@@ -58,6 +58,12 @@ struct VolumetricCloudsRegionData
     float maxCloudHeight;
     // Strength of the shape/erosion noise override inside the region (see regionDensityBoost usage below).
     float densityOverride;
+    // Absolute world-space cloud base/top altitude override. Disabled when topAltitude <= bottomAltitude
+    // (the CPU side encodes "no override" as bottomAltitude == topAltitude == 0).
+    float bottomAltitude;
+    float topAltitude;
+    // Strength (0-1) of the base-darkening applied inside the region (see stormDarkening usage below).
+    float storminess;
 };
 StructuredBuffer<VolumetricCloudsRegionData> _VolumetricCloudsRegions;
 int _VolumetricCloudsRegionCount;
@@ -407,6 +413,14 @@ struct CloudCoverageData
     // shape/erosion noise. Lets regions read clearly even where the cloud type channel has little to no
     // influence on the shape (e.g. the Simple control mode's LUT does not vary with cloud type).
     float regionDensityBoost;
+    // Weight (0-1) of the dominant region's altitude override at this position; 0 when no overlapping
+    // region has one active. See heightOverrideValue and EvaluateNormalizedCloudHeightRange.
+    float heightOverrideWeight;
+    // Normalized cloud height remapped into the dominant overriding region's own bottom/top altitude,
+    // blended into properties.height by heightOverrideWeight.
+    float heightOverrideValue;
+    // Strength (0-1) of the base-darkening applied at this position, see storminess on VolumetricCloudsRegion.
+    float stormDarkening;
 };
 
 // Function that returns if a given point in planet space position in inside or outside the cloud volume
@@ -420,6 +434,13 @@ bool PointInsideCloudVolume(float3 positionPS)
 float EvaluateNormalizedCloudHeight(float3 positionPS)
 {
     return (length(positionPS) - (_LowestCloudAltitude + _EarthRadius)) / ((_HighestCloudAltitude + _EarthRadius) - (_LowestCloudAltitude + _EarthRadius));
+}
+
+// Same as EvaluateNormalizedCloudHeight, but against an explicit altitude range instead of the ambient cloud
+// layer's. Used to remap height inside a VolumetricCloudsRegion with an active altitude override.
+float EvaluateNormalizedCloudHeightRange(float3 positionPS, float bottomAltitude, float topAltitude)
+{
+    return (length(positionPS) - (bottomAltitude + _EarthRadius)) / ((topAltitude + _EarthRadius) - (bottomAltitude + _EarthRadius));
 }
 
 // Animation of the cloud map position
@@ -480,6 +501,9 @@ void GetCloudCoverageData(float3 positionPS, out CloudCoverageData data)
 #endif
 
     data.regionDensityBoost = 0.0;
+    data.heightOverrideWeight = 0.0;
+    data.heightOverrideValue = 0.0;
+    data.stormDarkening = 0.0;
     for (int regionIndex = 0; regionIndex < _VolumetricCloudsRegionCount; ++regionIndex)
     {
         VolumetricCloudsRegionData region = _VolumetricCloudsRegions[regionIndex];
@@ -490,6 +514,17 @@ void GetCloudCoverageData(float3 positionPS, out CloudCoverageData data)
         data.cloudType = lerp(data.cloudType, region.cloudType, regionWeight);
         data.maxCloudHeight = lerp(data.maxCloudHeight, region.maxCloudHeight, regionWeight);
         data.regionDensityBoost = max(data.regionDensityBoost, regionWeight * region.densityOverride);
+        data.stormDarkening = max(data.stormDarkening, regionWeight * region.storminess);
+
+        // The dominant (highest weight) region with an active override wins; overlapping regions with
+        // different altitude ranges do not blend their height remap together, they hand off between them.
+        float overrideActive = region.topAltitude > region.bottomAltitude ? 1.0 : 0.0;
+        float overrideWeight = regionWeight * overrideActive;
+        if (overrideWeight > data.heightOverrideWeight)
+        {
+            data.heightOverrideWeight = overrideWeight;
+            data.heightOverrideValue = EvaluateNormalizedCloudHeightRange(positionPS, region.bottomAltitude, region.topAltitude);
+        }
     }
 }
 
@@ -533,6 +568,12 @@ void EvaluateCloudProperties(float3 positionWS, float noiseMipOffset, float eros
     CloudCoverageData cloudCoverageData;
     GetCloudCoverageData(positionPS, cloudCoverageData);
 
+    // A region with an active altitude override replaces the normalized height (and so the LUT height axis
+    // and the max-height cutoff below) with one remapped into its own bottom/top altitude, letting a storm
+    // cell tower above (or sit lower than) the ambient cloud layer instead of being clamped to its range.
+    if (cloudCoverageData.heightOverrideWeight > 0.0)
+        properties.height = lerp(properties.height, cloudCoverageData.heightOverrideValue, cloudCoverageData.heightOverrideWeight);
+
     // If this region of space has no cloud coverage, exit right away
     if (cloudCoverageData.coverage.x <= CLOUD_DENSITY_TRESHOLD || cloudCoverageData.maxCloudHeight < properties.height)
         return;
@@ -574,6 +615,15 @@ void EvaluateCloudProperties(float3 positionWS, float noiseMipOffset, float eros
         highFrequencyNoise = lerp(0.0, highFrequencyNoise, erosionFactor * 0.75f * cloudCoverageData.coverage.x * _ErosionFactorCompensation);
         base_cloud = DensityRemap(base_cloud, highFrequencyNoise, 1.0, 0.0, 1.0);
         properties.ambientOcclusion = saturate(properties.ambientOcclusion - sqrt(highFrequencyNoise * _ErosionOcclusion));
+    }
+
+    // Storm darkening: reduce the ambient light response towards the region's cloud base, giving it the
+    // heavy, light-blocking underside of a real storm cell. Applied last so it is not washed out by the
+    // ambient occlusion blend/erosion steps above. A floor keeps the base from going fully unlit.
+    if (cloudCoverageData.stormDarkening > 0.0)
+    {
+        float baseFade = 1.0 - saturate(properties.height / 0.35);
+        properties.ambientOcclusion *= 1.0 - cloudCoverageData.stormDarkening * baseFade * 0.85;
     }
 
     // Given that we are not sampling the erosion texture, we compensate by substracting an erosion value

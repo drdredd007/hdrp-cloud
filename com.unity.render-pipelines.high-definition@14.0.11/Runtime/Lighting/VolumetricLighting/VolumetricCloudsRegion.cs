@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 namespace UnityEngine.Rendering.HighDefinition
 {
     // GPU-side representation of a single region. Kept in sync by hand with the StructuredBuffer declaration
-    // in VolumetricCloudsUtilities.hlsl (VolumetricCloudsRegionData) - 8 floats, 32 bytes.
+    // in VolumetricCloudsUtilities.hlsl (VolumetricCloudsRegionData) - 12 floats, 48 bytes.
     [StructLayout(LayoutKind.Sequential)]
     struct VolumetricCloudsRegionData
     {
@@ -15,22 +15,9 @@ namespace UnityEngine.Rendering.HighDefinition
         public float cloudType;
         public float maxCloudHeight;
         public float densityOverride;
-    }
-
-    /// <summary>
-    /// Cloud shape applied inside a <see cref="VolumetricCloudsRegion"/>. Matches the shapes available in the
-    /// Volumetric Clouds Advanced control mode (Cumulus, Alto Stratus, Cumulonimbus).
-    /// </summary>
-    public enum VolumetricCloudsRegionType
-    {
-        /// <summary>Flat, low density stratus layer.</summary>
-        AltoStratus,
-        /// <summary>Fluffy, medium height cumulus clouds.</summary>
-        Cumulus,
-        /// <summary>Cumulus clouds blended with a stratus layer.</summary>
-        CumulusAltoStratus,
-        /// <summary>Tall, anvil-shaped storm clouds.</summary>
-        Cumulonimbus,
+        public float bottomAltitude;
+        public float topAltitude;
+        public float storminess;
     }
 
     /// <summary>
@@ -52,14 +39,29 @@ namespace UnityEngine.Rendering.HighDefinition
         [Tooltip("Distance, in meters, over which the region blends out into the surrounding cloud coverage.")]
         public float blendDistance = 250.0f;
 
-        /// <summary>Cloud shape applied inside the region.</summary>
-        [Tooltip("Cloud shape applied inside the region.")]
-        public VolumetricCloudsRegionType cloudType = VolumetricCloudsRegionType.Cumulonimbus;
-
-        /// <summary>Cloud coverage applied inside the region. 0 clears the clouds, 1 is fully covered.</summary>
-        [Tooltip("Cloud coverage applied inside the region. 0 clears the clouds, 1 is fully covered.")]
+        /// <summary>
+        /// Coverage of the low, flat Alto Stratus layer inside the region. 0 removes it. Combined with Cumulus
+        /// Coverage above zero, the region reads as a blended Cumulus + Alto Stratus layer instead of either
+        /// shape alone, matching how the global Advanced control mode combines its Cumulus/Alto Stratus maps.
+        /// </summary>
+        [Tooltip("Coverage of the low, flat Alto Stratus layer inside the region. 0 removes it. Combined with Cumulus Coverage above zero, the region blends into a Cumulus + Alto Stratus layer, matching the global Advanced control mode.")]
         [Range(0.0f, 1.0f)]
-        public float coverage = 1.0f;
+        public float altoStratusCoverage = 0.0f;
+
+        /// <summary>
+        /// Coverage of fluffy, medium-height Cumulus clouds inside the region. 0 removes them.
+        /// </summary>
+        [Tooltip("Coverage of fluffy, medium-height Cumulus clouds inside the region. 0 removes them.")]
+        [Range(0.0f, 1.0f)]
+        public float cumulusCoverage = 0.0f;
+
+        /// <summary>
+        /// Coverage of tall, anvil-shaped Cumulonimbus storm clouds inside the region. 0 removes them; above
+        /// zero it takes precedence over Cumulus/Alto Stratus, matching the global Advanced control mode.
+        /// </summary>
+        [Tooltip("Coverage of tall, anvil-shaped Cumulonimbus storm clouds inside the region. 0 removes them. Above zero it takes precedence over Cumulus/Alto Stratus, matching the global Advanced control mode.")]
+        [Range(0.0f, 1.0f)]
+        public float cumulonimbusCoverage = 1.0f;
 
         /// <summary>Rain intensity applied inside the region.</summary>
         [Tooltip("Rain intensity applied inside the region.")]
@@ -76,30 +78,131 @@ namespace UnityEngine.Rendering.HighDefinition
         [Range(0.0f, 1.0f)]
         public float densityOverride = 1.0f;
 
+        /// <summary>
+        /// Darkens the region's cloud base and reduces its ambient light response, giving it the heavy,
+        /// light-blocking underside of a real storm cell instead of a brighter, uniformly-lit cloud.
+        /// </summary>
+        [Tooltip("Darkens the region's cloud base and reduces its ambient light response, giving it the heavy, light-blocking underside of a real storm cell instead of a brighter, uniformly-lit cloud.")]
+        [Range(0.0f, 1.0f)]
+        public float storminess = 0.0f;
+
+        /// <summary>
+        /// Overrides the cloud altitude range inside the region instead of using the Volumetric Clouds
+        /// Bottom Altitude/Altitude Range from the Volume. Lets a storm cell tower above (or sit lower than)
+        /// the surrounding cloud layer.
+        /// </summary>
+        [Tooltip("Overrides the cloud altitude range inside the region instead of using the Volumetric Clouds Bottom Altitude/Altitude Range from the Volume. Lets a storm cell tower above (or sit lower than) the surrounding cloud layer.")]
+        public bool altitudeOverride = false;
+
+        /// <summary>World-space altitude of the region's cloud base, in meters. Only used when Altitude Override is enabled.</summary>
+        [Tooltip("World-space altitude of the region's cloud base, in meters. Only used when Altitude Override is enabled.")]
+        public float regionBottomAltitude = 1000.0f;
+
+        /// <summary>World-space altitude of the region's cloud top, in meters. Only used when Altitude Override is enabled.</summary>
+        [Tooltip("World-space altitude of the region's cloud top, in meters. Only used when Altitude Override is enabled. Must be greater than Bottom Altitude.")]
+        public float regionTopAltitude = 6000.0f;
+
+        [Tooltip("Adds a lit rain column to volumetric fog below this cloud region. Requires Volumetric Fog and sufficient Fog Depth Extent.")]
+        public bool rainFog = true;
+
+        [Tooltip("World-space altitude of the bottom of the rain column, in meters. The top follows the region's cloud base (Region Bottom Altitude when Altitude Override is enabled, otherwise Volumetric Clouds Bottom Altitude).")]
+        public float rainFogBottomAltitude = 0.0f;
+
+        [Tooltip("Mean free path in meters at full rain and coverage. Smaller values produce denser rain fog.")]
+        [Min(1.0f)] public float rainFogMeanFreePath = 1200.0f;
+
+        [Tooltip("Scattering albedo of the rain mist. Lighting is supplied by HDRP volumetric fog.")]
+        public Color rainFogAlbedo = new Color(0.65f, 0.7f, 0.75f, 1.0f);
+
+        [Tooltip("Vertical fade distance at the bottom and cloud base, clamped to half the column height.")]
+        [Min(1.0f)] public float rainFogVerticalFade = 200.0f;
+
+        [Tooltip("Relative density at the bottom of the column. Density increases towards the cloud base.")]
+        [Range(0.0f, 1.0f)] public float rainFogBottomDensity = 0.25f;
+
+        /// <summary>
+        /// Combines independent per-type coverage into the single coverage/type/height triplet the shader's
+        /// cloud type LUT axis expects. Mirrors the precedence rules baked into CloudMapGenerator.compute
+        /// (Cumulonimbus overrides Cumulus/Alto Stratus, which in turn blend together when both are present)
+        /// so a region reads exactly like the equivalent combination would on the global Advanced-mode map.
+        /// </summary>
+        internal static void EvaluateCloudTypeBlend(float altoStratusCoverage, float cumulusCoverage, float cumulonimbusCoverage,
+            out float coverage, out float cloudType, out float maxCloudHeight)
+        {
+            altoStratusCoverage = Mathf.Clamp01(altoStratusCoverage);
+            cumulusCoverage = Mathf.Clamp01(cumulusCoverage);
+            cumulonimbusCoverage = Mathf.Clamp01(cumulonimbusCoverage);
+
+            // Matches the sub-ranges of the 0..1 cloud type LUT axis evaluated by CloudMapGenerator.compute.
+            const float k_AltoStratusRangeMin = 0.0f / 256.0f;
+            const float k_AltoStratusRangeMax = 32.0f / 256.0f;
+            const float k_CumulusAltoStratusRangeMin = 32.0f / 256.0f;
+            const float k_CumulusAltoStratusRangeMax = 64.0f / 256.0f;
+            const float k_CumulusRangeMin = 64.0f / 256.0f;
+            const float k_CumulusRangeMax = 128.0f / 256.0f;
+            const float k_CumulonimbusRangeFirstMin = 128.0f / 256.0f;
+            const float k_CumulonimbusRangeSecondMin = 130.0f / 256.0f;
+            const float k_CumulonimbusRangeThirdMin = 136.0f / 256.0f;
+            const float k_CumulonimbusRangeMax = 1.0f;
+
+            if (cumulonimbusCoverage > 0.0f)
+            {
+                // Cumulonimbus takes precedence over every other type, same as the global Advanced mode map.
+                cloudType = cumulonimbusCoverage * (k_CumulonimbusRangeMax - k_CumulonimbusRangeFirstMin) + k_CumulonimbusRangeFirstMin;
+                if (cloudType < k_CumulonimbusRangeSecondMin)
+                {
+                    coverage = 0.0f;
+                    maxCloudHeight = 0.0f;
+                }
+                else if (cloudType < k_CumulonimbusRangeThirdMin)
+                {
+                    float t = (cloudType - k_CumulonimbusRangeSecondMin) / (k_CumulonimbusRangeThirdMin - k_CumulonimbusRangeSecondMin);
+                    coverage = Mathf.Lerp(0.0f, cumulonimbusCoverage, t);
+                    maxCloudHeight = Mathf.Lerp(0.0f, 1.0f, t);
+                }
+                else
+                {
+                    coverage = Mathf.Lerp(0.0f, 0.75f, cumulonimbusCoverage);
+                    maxCloudHeight = 1.0f;
+                }
+            }
+            else if (cumulusCoverage > 0.0f)
+            {
+                if (altoStratusCoverage > 0.0f)
+                {
+                    cloudType = 0.5f * (k_CumulusAltoStratusRangeMax - k_CumulusAltoStratusRangeMin) + k_CumulusAltoStratusRangeMin;
+                    coverage = Mathf.Max(cumulusCoverage, altoStratusCoverage);
+                    maxCloudHeight = 1.0f;
+                }
+                else
+                {
+                    cloudType = 0.5f * (k_CumulusRangeMax - k_CumulusRangeMin) + k_CumulusRangeMin;
+                    coverage = cumulusCoverage;
+                    maxCloudHeight = 0.5f;
+                }
+            }
+            else if (altoStratusCoverage > 0.0f)
+            {
+                cloudType = 0.5f * (k_AltoStratusRangeMax - k_AltoStratusRangeMin) + k_AltoStratusRangeMin;
+                coverage = altoStratusCoverage;
+                maxCloudHeight = 1.0f;
+            }
+            else
+            {
+                coverage = 0.0f;
+                cloudType = 0.0f;
+                maxCloudHeight = 0.0f;
+            }
+        }
+
         internal VolumetricCloudsRegionData GetRegionData()
         {
-            float typeValue, maxHeight;
-            switch (cloudType)
-            {
-                case VolumetricCloudsRegionType.AltoStratus:
-                    // Matches the Alto Stratus only range evaluated by CloudMapGenerator.compute.
-                    typeValue = 16.0f / 256.0f;
-                    maxHeight = 1.0f;
-                    break;
-                case VolumetricCloudsRegionType.CumulusAltoStratus:
-                    typeValue = 48.0f / 256.0f;
-                    maxHeight = 1.0f;
-                    break;
-                case VolumetricCloudsRegionType.Cumulonimbus:
-                    // Highest sub-range: full anvil shape at maximal cloud height.
-                    typeValue = 1.0f;
-                    maxHeight = 1.0f;
-                    break;
-                default: // Cumulus
-                    typeValue = 96.0f / 256.0f;
-                    maxHeight = 0.5f;
-                    break;
-            }
+            EvaluateCloudTypeBlend(altoStratusCoverage, cumulusCoverage, cumulonimbusCoverage,
+                out float coverage, out float cloudType, out float maxHeight);
+
+            // A disabled/degenerate override is encoded as bottomAltitude == topAltitude == 0 so the shader
+            // can detect it (topAltitude > bottomAltitude) without needing a separate flag in the buffer.
+            bool overrideActive = altitudeOverride && regionTopAltitude > regionBottomAltitude;
 
             Vector3 position = transform.position;
             return new VolumetricCloudsRegionData
@@ -109,9 +212,12 @@ namespace UnityEngine.Rendering.HighDefinition
                 blendDistance = Mathf.Max(blendDistance, 0.0f),
                 coverage = coverage,
                 rainIntensity = rainIntensity,
-                cloudType = typeValue,
+                cloudType = cloudType,
                 maxCloudHeight = maxHeight,
                 densityOverride = densityOverride,
+                bottomAltitude = overrideActive ? regionBottomAltitude : 0.0f,
+                topAltitude = overrideActive ? regionTopAltitude : 0.0f,
+                storminess = storminess,
             };
         }
 

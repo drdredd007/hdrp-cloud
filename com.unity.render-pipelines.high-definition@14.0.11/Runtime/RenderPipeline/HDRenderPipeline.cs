@@ -602,6 +602,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             InitializeVolumetricLighting();
             InitializeVolumetricClouds();
+            InitializeLightImposters();
             InitializeSubsurfaceScattering();
             InitializeWaterSystem();
 
@@ -948,6 +949,7 @@ namespace UnityEngine.Rendering.HighDefinition
             CleanupLightLoop();
 
             ReleaseVolumetricClouds();
+            ReleaseLightImposters();
             CleanupSubsurfaceScattering();
             ReleaseWaterSystem();
 

@@ -30,6 +30,42 @@ StructuredBuffer<LocalVolumetricFogEngineData> _VolumeData;
 
 RW_TEXTURE3D(float4, _VBufferDensity); // RGB = sqrt(scattering), A = sqrt(extinction)
 
+// Four float4s per region; see PrepareRainFogRegions. Absolute world positions
+// keep the column anchored while HDRP renders using camera-relative coordinates.
+StructuredBuffer<float4> _RainFogRegions;
+int _RainFogRegionCount;
+
+void AddCloudRegionRainFog(float3 positionWS, inout float3 scattering, inout float extinction)
+{
+    float3 p = GetAbsolutePositionWS(positionWS);
+    for (int i = 0; i < _RainFogRegionCount; ++i)
+    {
+        float4 area = _RainFogRegions[i * 4];
+        float4 height = _RainFogRegions[i * 4 + 1];
+        float4 optical = _RainFogRegions[i * 4 + 2];
+        float4 shell = _RainFogRegions[i * 4 + 3];
+        float distanceXZ = distance(p.xz, area.xy);
+        if (distanceXZ >= area.z + area.w) continue;
+        float radial = 1.0 - smoothstep(area.z, area.z + area.w, distanceXZ);
+
+        float2 shellXZ = shell.y > 0.5 ? p.xz : p.xz - _WorldSpaceCameraPos.xz;
+        float radius = shell.x + height.y;
+        // Stable form of sqrt(radius^2 - xz^2) - earthRadius.
+        float xzSquared = dot(shellXZ, shellXZ);
+        float root = sqrt(max(0.0, radius * radius - xzSquared));
+        float top = height.y - xzSquared / max(radius + root, 1.0);
+        float span = top - height.x;
+        if (span <= 0.0 || p.y <= height.x || p.y >= top) continue;
+        float fade = min(height.z, span * 0.5);
+        float vertical = smoothstep(0.0, fade, p.y - height.x)
+                       * smoothstep(0.0, fade, top - p.y);
+        vertical *= lerp(height.w, 1.0, saturate((p.y - height.x) / span));
+        float sigma = optical.w * radial * vertical;
+        scattering += optical.rgb * sigma;
+        extinction += sigma;
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Implementation
 //--------------------------------------------------------------------------------------------------
@@ -68,6 +104,8 @@ void FillVolumetricDensityBuffer(uint2 voxelCoord2D, JitteredRay ray)
         // Start by sampling the height fog.
         float3 voxelScattering = _HeightFogBaseScattering.xyz * heightMultiplier;
         float  voxelExtinction = _HeightFogBaseExtinction * heightMultiplier;
+
+        AddCloudRegionRainFog(voxelCenterWS, voxelScattering, voxelExtinction);
 
         _VBufferDensity[voxelCoord] = float4(voxelScattering, voxelExtinction);
 

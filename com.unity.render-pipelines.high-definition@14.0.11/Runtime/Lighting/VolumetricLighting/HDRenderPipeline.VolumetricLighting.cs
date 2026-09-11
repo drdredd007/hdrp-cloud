@@ -973,6 +973,8 @@ namespace UnityEngine.Rendering.HighDefinition
 
         class HeightFogVoxelizationPassData
         {
+            public Vector4[] rainFogData;
+            public ComputeBufferHandle rainFogBuffer;
             public ComputeShader voxelizationCS;
             public int voxelizationKernel;
 
@@ -1022,7 +1024,11 @@ namespace UnityEngine.Rendering.HighDefinition
 
                 using (var builder = renderGraph.AddRenderPass<HeightFogVoxelizationPassData>("Clear and Height Fog Voxelization", out var passData))
                 {
-                    builder.EnableAsyncCompute(hdCamera.frameSettings.VolumeVoxelizationRunsAsync());
+                    passData.rainFogData = PrepareRainFogRegions(hdCamera);
+                    // Command-buffer upload and consumption stay on the graphics queue when rain is present.
+                    builder.EnableAsyncCompute(passData.rainFogData.Length == 0 && hdCamera.frameSettings.VolumeVoxelizationRunsAsync());
+                    passData.rainFogBuffer = builder.WriteComputeBuffer(renderGraph.CreateComputeBuffer(
+                        new ComputeBufferDesc(Mathf.Max(1, passData.rainFogData.Length), 4 * sizeof(float)) { name = "CloudRegionRainFog" }));
 
                     passData.viewCount = hdCamera.viewCount;
 
@@ -1045,6 +1051,10 @@ namespace UnityEngine.Rendering.HighDefinition
                     builder.SetRenderFunc(
                         (HeightFogVoxelizationPassData data, RenderGraphContext ctx) =>
                         {
+                            if (data.rainFogData.Length > 0)
+                                ctx.cmd.SetBufferData(data.rainFogBuffer, data.rainFogData);
+                            ctx.cmd.SetComputeIntParam(data.voxelizationCS, "_RainFogRegionCount", data.rainFogData.Length / 4);
+                            ctx.cmd.SetComputeBufferParam(data.voxelizationCS, data.voxelizationKernel, "_RainFogRegions", data.rainFogBuffer);
                             ctx.cmd.SetComputeTextureParam(data.voxelizationCS, data.voxelizationKernel, HDShaderIDs._VBufferDensity, data.densityBuffer);
                             ctx.cmd.SetComputeBufferParam(data.voxelizationCS, data.voxelizationKernel, HDShaderIDs._VolumeAmbientProbeBuffer, data.volumetricAmbientProbeBuffer);
 
