@@ -10,6 +10,7 @@ namespace UnityEditor.Rendering.HighDefinition
         SerializedProperty m_CloudType;
         SerializedProperty m_Coverage;
         SerializedProperty m_RainIntensity;
+        SerializedProperty m_DensityOverride;
         SerializedProperty m_Radius;
         SerializedProperty m_BlendDistance;
 
@@ -18,6 +19,7 @@ namespace UnityEditor.Rendering.HighDefinition
             m_CloudType = serializedObject.FindProperty("cloudType");
             m_Coverage = serializedObject.FindProperty("coverage");
             m_RainIntensity = serializedObject.FindProperty("rainIntensity");
+            m_DensityOverride = serializedObject.FindProperty("densityOverride");
             m_Radius = serializedObject.FindProperty("radius");
             m_BlendDistance = serializedObject.FindProperty("blendDistance");
         }
@@ -29,6 +31,7 @@ namespace UnityEditor.Rendering.HighDefinition
             EditorGUILayout.PropertyField(m_CloudType);
             EditorGUILayout.PropertyField(m_Coverage);
             EditorGUILayout.PropertyField(m_RainIntensity);
+            EditorGUILayout.PropertyField(m_DensityOverride);
 
             EditorGUILayout.Space();
             EditorGUILayout.PropertyField(m_Radius);
