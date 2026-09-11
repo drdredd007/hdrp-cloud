@@ -56,6 +56,9 @@ namespace UnityEditor.Rendering.HighDefinition
         SerializedDataParameter m_PowderEffectIntensity;
         SerializedDataParameter m_MultiScattering;
         SerializedDataParameter m_AmbientLightProbeDimmer;
+        SerializedDataParameter m_BottomLightingBlend;
+        SerializedDataParameter m_CustomBottomColor;
+        SerializedDataParameter m_CustomBottomIntensity;
         SerializedDataParameter m_SunLightDimmer;
         SerializedDataParameter m_ErosionOcclusion;
 
@@ -136,6 +139,9 @@ namespace UnityEditor.Rendering.HighDefinition
             m_PowderEffectIntensity = Unpack(o.Find(x => x.powderEffectIntensity));
             m_MultiScattering = Unpack(o.Find(x => x.multiScattering));
             m_AmbientLightProbeDimmer = Unpack(o.Find(x => x.ambientLightProbeDimmer));
+            m_BottomLightingBlend = Unpack(o.Find(x => x.bottomLightingBlend));
+            m_CustomBottomColor = Unpack(o.Find(x => x.customBottomColor));
+            m_CustomBottomIntensity = Unpack(o.Find(x => x.customBottomIntensity));
             m_SunLightDimmer = Unpack(o.Find(x => x.sunLightDimmer));
             m_ErosionOcclusion = Unpack(o.Find(x => x.erosionOcclusion));
 
@@ -442,6 +448,12 @@ namespace UnityEditor.Rendering.HighDefinition
             DrawHeader("Lighting");
             {
                 PropertyField(m_AmbientLightProbeDimmer);
+                PropertyField(m_BottomLightingBlend);
+                using (new IndentLevelScope())
+                {
+                    PropertyField(m_CustomBottomColor);
+                    PropertyField(m_CustomBottomIntensity);
+                }
                 PropertyField(m_SunLightDimmer);
                 PropertyField(m_ErosionOcclusion);
                 PropertyField(m_ScatteringTint);

@@ -75,6 +75,7 @@ CBUFFER_START(ShaderVariablesClouds)
     float _CubicTransmittance;
     int _Padding1;
     float4 _DistanceBasedWeights[12];
+    float4 _CustomBottomLighting;
 CBUFFER_END
 
 

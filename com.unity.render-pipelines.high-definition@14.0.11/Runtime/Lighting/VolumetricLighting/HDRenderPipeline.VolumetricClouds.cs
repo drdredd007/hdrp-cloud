@@ -349,6 +349,14 @@ namespace UnityEngine.Rendering.HighDefinition
             cb._CloudMapTiling.Set(settings.cloudTiling.value.x, settings.cloudTiling.value.y, settings.cloudOffset.value.x, settings.cloudOffset.value.y);
 
             cb._ScatteringTint = Color.white - settings.scatteringTint.value * 0.75f;
+
+            // Match the probe's ambient dimmer, but keep the custom lower lighting independent of the sky.
+            // The shader applies exposure to both sides after blending in linear lighting space.
+            Color customBottomLighting = settings.customBottomColor.value.linear
+                * settings.customBottomIntensity.value * settings.ambientLightProbeDimmer.value;
+            cb._CustomBottomLighting.Set(customBottomLighting.r, customBottomLighting.g, customBottomLighting.b,
+                settings.bottomLightingBlend.value);
+
             cb._PowderEffectIntensity = settings.powderEffectIntensity.value;
             cb._NormalizationFactor = ComputeNormalizationFactor(cb._EarthRadius, (cb._LowestCloudAltitude + cb._HighestCloudAltitude) * 0.5f);
 
