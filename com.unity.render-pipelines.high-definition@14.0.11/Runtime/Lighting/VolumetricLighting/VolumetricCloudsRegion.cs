@@ -14,6 +14,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public float rainIntensity;
         public float cloudType;
         public float maxCloudHeight;
+        public float densityOverride;
     }
 
     /// <summary>
@@ -65,6 +66,16 @@ namespace UnityEngine.Rendering.HighDefinition
         [Range(0.0f, 1.0f)]
         public float rainIntensity = 1.0f;
 
+        /// <summary>
+        /// Strength at which the region forces a solid, unbroken cloud mass, overriding the shape/erosion
+        /// noise that normally breaks up the clouds. 0 only overrides the coverage/rain/type map channels
+        /// (subtle, and in Simple control mode barely visible since its LUT ignores cloud type); 1 makes the
+        /// region read clearly in every control mode.
+        /// </summary>
+        [Tooltip("Strength at which the region forces a solid, unbroken cloud mass inside its radius, overriding the shape/erosion noise so it reads clearly in every control mode (including Simple).")]
+        [Range(0.0f, 1.0f)]
+        public float densityOverride = 1.0f;
+
         internal VolumetricCloudsRegionData GetRegionData()
         {
             float typeValue, maxHeight;
@@ -100,6 +111,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 rainIntensity = rainIntensity,
                 cloudType = typeValue,
                 maxCloudHeight = maxHeight,
+                densityOverride = densityOverride,
             };
         }
 

@@ -56,6 +56,8 @@ struct VolumetricCloudsRegionData
     float rainIntensity;
     float cloudType;
     float maxCloudHeight;
+    // Strength of the shape/erosion noise override inside the region (see regionDensityBoost usage below).
+    float densityOverride;
 };
 StructuredBuffer<VolumetricCloudsRegionData> _VolumetricCloudsRegions;
 int _VolumetricCloudsRegionCount;
@@ -401,6 +403,10 @@ struct CloudCoverageData
     float cloudType;
     // Maximal cloud height
     float maxCloudHeight;
+    // Strength (0-1) at which a manually placed region forces a solid, unbroken cloud mass regardless of the
+    // shape/erosion noise. Lets regions read clearly even where the cloud type channel has little to no
+    // influence on the shape (e.g. the Simple control mode's LUT does not vary with cloud type).
+    float regionDensityBoost;
 };
 
 // Function that returns if a given point in planet space position in inside or outside the cloud volume
@@ -461,18 +467,29 @@ void GetCloudCoverageData(float3 positionPS, out CloudCoverageData data)
     data.cloudType = cloudMapData.z;
     data.maxCloudHeight = cloudMapData.w;
 
-    // Blend in manually placed cloud regions on top of the procedural/authored map. positionPS.xz matches
-    // world-space XZ (only the height channel is offset by the earth radius), so regions stay fixed at the
-    // world position they were placed at instead of drifting with the cloud map's tiling/wind animation.
+    // Blend in manually placed cloud regions on top of the procedural/authored map. Regions are authored in
+    // absolute world space (Transform.position), so they must be compared against absolute world XZ.
+    // positionPS.xz is only that in LOCAL_VOLUMETRIC_CLOUDS mode (ray.originWS = _WorldSpaceCameraPos there).
+    // In the default distant trace the ray instead originates at a hardcoded (0, 0, 0), i.e. positionPS is
+    // camera-relative, so we shift it back to world space here - otherwise regions only line up with the
+    // camera sitting exactly at the world origin and drift away from their landmark as it moves.
+#ifdef LOCAL_VOLUMETRIC_CLOUDS
+    float2 regionQueryPositionWS = positionPS.xz;
+#else
+    float2 regionQueryPositionWS = positionPS.xz + _WorldSpaceCameraPos.xz;
+#endif
+
+    data.regionDensityBoost = 0.0;
     for (int regionIndex = 0; regionIndex < _VolumetricCloudsRegionCount; ++regionIndex)
     {
         VolumetricCloudsRegionData region = _VolumetricCloudsRegions[regionIndex];
-        float distToRegion = distance(positionPS.xz, region.positionWS);
+        float distToRegion = distance(regionQueryPositionWS, region.positionWS);
         float regionWeight = 1.0 - smoothstep(region.radius, region.radius + max(region.blendDistance, 1e-3), distToRegion);
         data.coverage = lerp(data.coverage, float2(region.coverage, region.coverage * region.coverage), regionWeight);
         data.rainClouds = lerp(data.rainClouds, region.rainIntensity, regionWeight);
         data.cloudType = lerp(data.cloudType, region.cloudType, regionWeight);
         data.maxCloudHeight = lerp(data.maxCloudHeight, region.maxCloudHeight, regionWeight);
+        data.regionDensityBoost = max(data.regionDensityBoost, regionWeight * region.densityOverride);
     }
 }
 
@@ -526,6 +543,12 @@ void EvaluateCloudProperties(float3 positionWS, float noiseMipOffset, float eros
     // Adjust the shape and erosion factor based on the LUT and the coverage
     shapeFactor = shapeFactor * densityErosionAO.y;
     erosionFactor = erosionFactor * densityErosionAO.y;
+
+    // Manually placed regions can force a solid, unbroken cloud mass (shapeFactor/erosionFactor -> 0) so they
+    // read clearly regardless of control mode - this matters in particular for Simple mode, where the cloud
+    // type channel has no effect on the LUT (its custom LUT is a single column, so only coverage/rain differ).
+    shapeFactor = lerp(shapeFactor, 0.0, cloudCoverageData.regionDensityBoost);
+    erosionFactor = lerp(erosionFactor, 0.0, cloudCoverageData.regionDensityBoost);
 
     // Combine with the low frequency noise, we want less shaping for large clouds
     lowFrequencyNoise = lerp(1.0, lowFrequencyNoise, shapeFactor);

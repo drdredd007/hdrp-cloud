@@ -10,8 +10,8 @@ namespace UnityEngine.Rendering.HighDefinition
         void InitializeVolumetricCloudsRegions()
         {
             m_VolumetricCloudsRegionData = new VolumetricCloudsRegionData[VolumetricCloudsRegionManager.maxRegionCount];
-            // 8 floats per region (positionWS, radius, blendDistance, coverage, rainIntensity, cloudType, maxCloudHeight).
-            m_VolumetricCloudsRegionBuffer = new ComputeBuffer(VolumetricCloudsRegionManager.maxRegionCount, 8 * sizeof(float));
+            // 9 floats per region (positionWS, radius, blendDistance, coverage, rainIntensity, cloudType, maxCloudHeight, densityOverride).
+            m_VolumetricCloudsRegionBuffer = new ComputeBuffer(VolumetricCloudsRegionManager.maxRegionCount, 9 * sizeof(float));
         }
 
         void ReleaseVolumetricCloudsRegions()
