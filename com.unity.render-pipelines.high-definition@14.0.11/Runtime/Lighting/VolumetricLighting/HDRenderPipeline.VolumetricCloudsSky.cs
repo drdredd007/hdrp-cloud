@@ -136,6 +136,8 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudMapTexture, passData.commonData.cloudMapTexture);
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudLutTexture, passData.commonData.cloudLutTexture);
             cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsAmbientProbeBuffer, passData.ambientProbeBuffer);
+            cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsRegions, passData.commonData.regionsBuffer);
+            cmd.SetComputeIntParam(passData.commonData.volumetricCloudsCS, HDShaderIDs._VolumetricCloudsRegionCount, passData.commonData.regionsCount);
 
             // Output buffers
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudsLightingTextureRW, passData.intermediateLightingBuffer);
@@ -256,6 +258,8 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudMapTexture, passData.commonData.cloudMapTexture);
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudLutTexture, passData.commonData.cloudLutTexture);
             cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsAmbientProbeBuffer, passData.ambientProbeBuffer);
+            cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsRegions, passData.commonData.regionsBuffer);
+            cmd.SetComputeIntParam(passData.commonData.volumetricCloudsCS, HDShaderIDs._VolumetricCloudsRegionCount, passData.commonData.regionsCount);
 
             // Output buffers
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudsLightingTextureRW, passData.intermediateLightingBuffer0);

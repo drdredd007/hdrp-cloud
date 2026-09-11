@@ -105,6 +105,7 @@ namespace UnityEngine.Rendering.HighDefinition
             InitializeVolumetricCloudsMap();
             InitializeVolumetricCloudsShadows();
             InitializeVolumetricCloudsAmbientProbe();
+            InitializeVolumetricCloudsRegions();
         }
 
         void ReleaseVolumetricClouds()
@@ -119,6 +120,7 @@ namespace UnityEngine.Rendering.HighDefinition
             ReleaseVolumetricCloudsMap();
             ReleaseVolumetricCloudsShadows();
             ReleaseVolumetricCloudsAmbientProbe();
+            ReleaseVolumetricCloudsRegions();
         }
 
         void AllocatePresetTextures()
@@ -528,6 +530,10 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Cloud constant buffer buffer
             public ShaderVariablesClouds cloudsCB;
+
+            // Manually placed cloud regions (rain/storm areas)
+            public ComputeBuffer regionsBuffer;
+            public int regionsCount;
         }
 
         Texture3D ErosionNoiseTypeToTexture(VolumetricClouds.CloudErosionNoise noiseType)
@@ -572,6 +578,9 @@ namespace UnityEngine.Rendering.HighDefinition
             commonData.ditheredTextureSet = blueNoise.DitheredTextureSet8SPP();
             commonData.sunLight = GetMainLight();
             commonData.enableExposureControl = enableExposureControl;
+
+            commonData.regionsBuffer = m_VolumetricCloudsRegionBuffer;
+            commonData.regionsCount = UpdateVolumetricCloudsRegionBuffer();
         }
 
         void UpdateVolumetricClouds(HDCamera hdCamera, in VolumetricClouds settings)
