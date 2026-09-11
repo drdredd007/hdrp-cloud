@@ -157,5 +157,8 @@ namespace UnityEngine.Rendering.HighDefinition
 
         [HLSLArray(3 * 4, typeof(Vector4))]
         public fixed float _DistanceBasedWeights[12 * 4];
+
+        // RGB: custom lower ambient lighting before exposure. W: blend from the sky probe to the custom lighting.
+        public Vector4 _CustomBottomLighting;
     }
 }

@@ -200,7 +200,10 @@ EnvironmentLighting EvaluateEnvironmentLighting(CloudRay ray, float3 entryEvalua
     lighting.sunColor0 = _SunLightColor.xyz * GetCurrentExposureMultiplier();
     lighting.sunColor1 = lighting.sunColor0;
     lighting.ambientTermTop = SampleSH9(_VolumetricCloudsAmbientProbeBuffer, float3(0, 1, 0)) * GetCurrentExposureMultiplier();
-    lighting.ambientTermBottom = max(SampleSH9(_VolumetricCloudsAmbientProbeBuffer, float3(0, -1, 0)), 0) * GetCurrentExposureMultiplier();
+    float3 bottomLighting = max(SampleSH9(_VolumetricCloudsAmbientProbeBuffer, float3(0, -1, 0)), 0);
+    // Replace only the lower ambient component; the sky probe and upper lighting remain shared and unchanged.
+    bottomLighting = lerp(bottomLighting, _CustomBottomLighting.rgb, _CustomBottomLighting.w);
+    lighting.ambientTermBottom = bottomLighting * GetCurrentExposureMultiplier();
 
     // evaluate the attenuation at both points (entrance and exit of the cloud layer)
     EvaluateSunColorAttenuation(entryEvaluationPointWS, lighting.sunDirection, lighting.sunColor0);

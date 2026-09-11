@@ -426,6 +426,24 @@ namespace UnityEngine.Rendering.HighDefinition
         public ClampedFloatParameter ambientLightProbeDimmer = new ClampedFloatParameter(1.0f, 0.0f, 1.0f);
 
         /// <summary>
+        /// Blends the lower ambient lighting from the sky probe (including Ground Tint) with a custom color.
+        /// </summary>
+        [Tooltip("Blends the lower ambient lighting from the sky probe (including Ground Tint) with Custom Bottom Color. 0 preserves the sky lighting; 1 fully replaces the lower ambient lighting.")]
+        public ClampedFloatParameter bottomLightingBlend = new ClampedFloatParameter(0.0f, 0.0f, 1.0f);
+
+        /// <summary>
+        /// Specifies the custom color used for the lower ambient lighting of the clouds.
+        /// </summary>
+        [Tooltip("Color of the custom lower ambient lighting, independent of the sky's Ground Tint. Scaled by Custom Bottom Intensity and Ambient Light Probe Dimmer.")]
+        public ColorParameter customBottomColor = new ColorParameter(Color.white, hdr: false, showAlpha: false, showEyeDropper: true);
+
+        /// <summary>
+        /// Specifies the intensity of the custom lower ambient lighting before camera exposure.
+        /// </summary>
+        [Tooltip("Intensity of Custom Bottom Color before camera exposure. 0 removes the custom contribution; values above 1 increase its brightness. Only affects the custom side of Bottom Lighting Blend.")]
+        public MinFloatParameter customBottomIntensity = new MinFloatParameter(1.0f, 0.0f);
+
+        /// <summary>
         /// Controls the influence of the sun light on the cloud volume. A lower value will suppress the sun light and produce darker clouds overall.
         /// </summary>
         [Tooltip("Controls the influence of the sun light on the cloud volume. A lower value will suppress the sun light and produce darker clouds overall.")]
