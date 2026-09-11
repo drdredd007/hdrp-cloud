@@ -44,6 +44,22 @@ Texture3D<float> _ErosionNoise;
 // Ambient probe. Contains a convolution with Cornette Shank phase function so it needs to sample a different buffer.
 StructuredBuffer<float4> _VolumetricCloudsAmbientProbeBuffer;
 
+// Manually placed regions that override the cloud coverage/rain/type in a world-space circular area.
+// Evaluated directly in world space (not reprojected through the cloud map tiling/wind) so they stay fixed
+// at the location they were placed at, regardless of the cloud pattern's animation.
+struct VolumetricCloudsRegionData
+{
+    float2 positionWS;
+    float radius;
+    float blendDistance;
+    float coverage;
+    float rainIntensity;
+    float cloudType;
+    float maxCloudHeight;
+};
+StructuredBuffer<VolumetricCloudsRegionData> _VolumetricCloudsRegions;
+int _VolumetricCloudsRegionCount;
+
 // Function that interects a ray with a sphere (optimized for very large sphere), returns up to two positives distances.
 int RaySphereIntersection(float3 startWS, float3 dir, float radius, out float2 result)
 {
@@ -444,6 +460,20 @@ void GetCloudCoverageData(float3 positionPS, out CloudCoverageData data)
     data.rainClouds = cloudMapData.y;
     data.cloudType = cloudMapData.z;
     data.maxCloudHeight = cloudMapData.w;
+
+    // Blend in manually placed cloud regions on top of the procedural/authored map. positionPS.xz matches
+    // world-space XZ (only the height channel is offset by the earth radius), so regions stay fixed at the
+    // world position they were placed at instead of drifting with the cloud map's tiling/wind animation.
+    for (int regionIndex = 0; regionIndex < _VolumetricCloudsRegionCount; ++regionIndex)
+    {
+        VolumetricCloudsRegionData region = _VolumetricCloudsRegions[regionIndex];
+        float distToRegion = distance(positionPS.xz, region.positionWS);
+        float regionWeight = 1.0 - smoothstep(region.radius, region.radius + max(region.blendDistance, 1e-3), distToRegion);
+        data.coverage = lerp(data.coverage, float2(region.coverage, region.coverage * region.coverage), regionWeight);
+        data.rainClouds = lerp(data.rainClouds, region.rainIntensity, regionWeight);
+        data.cloudType = lerp(data.cloudType, region.cloudType, regionWeight);
+        data.maxCloudHeight = lerp(data.maxCloudHeight, region.maxCloudHeight, regionWeight);
+    }
 }
 
 // Function that evaluates the cloud properties at a given absolute world space position
