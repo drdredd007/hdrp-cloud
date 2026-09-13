@@ -1,0 +1,10 @@
+{
+  "references": [
+    "Unity.RenderPipelines.HighDefinition.Runtime",
+    "Unity.RenderPipelines.Core.Runtime",
+    "Unity.Mathematics",
+    "Unity.Collections",
+    "Unity.Burst"
+  ],
+  "name": "Unity.RenderPipelines.HighDefinition.Planets.Runtime"
+}
