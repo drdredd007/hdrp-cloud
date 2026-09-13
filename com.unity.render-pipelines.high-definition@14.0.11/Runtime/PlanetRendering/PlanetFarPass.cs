@@ -29,6 +29,11 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool IsRefining=>geometry.IsRefining;
         public bool EnableLocalSurface;
         public int LocalSurfacePatchCount=>nearGeometry.Meshes.Count;
+        public bool HasLocalSurfaceAt(double3 position)
+        {
+            var q=(double4)((quaternion)PlanetRotation).value;
+            return EnableLocalSurface && nearGeometry.Covers(Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),position-Definition.Center),128);
+        }
         readonly PlanetNearSurfaceCache nearGeometry=new PlanetNearSurfaceCache();
         Material surface,composite;
         MaterialPropertyBlock properties;

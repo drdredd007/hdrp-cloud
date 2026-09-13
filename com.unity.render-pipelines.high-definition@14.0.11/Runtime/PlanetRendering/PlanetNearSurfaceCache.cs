@@ -23,6 +23,9 @@ namespace UnityEngine.Rendering.HighDefinition
             var local=Frame.ToLocal(camera);
             return active.Count==PatchCount && math.abs(local.x)<=HalfSize-margin && math.abs(local.z)<=HalfSize-margin;
         }
+        public bool Covers(PlanetDefinition definition,double3 camera,double margin=0)
+            => initialized && definition.IsValid && generated.Seed==definition.Seed && generated.Radius==definition.Radius && generated.Relief==definition.Relief &&
+                generated.GeneratorVersion==definition.GeneratorVersion && Covers(camera,margin);
         public void Update(PlanetDefinition definition,double3 camera,int budget=4)
         {
             if(!definition.IsValid || !math.all(math.isfinite(camera)) || math.lengthsq(camera)<1)return;
