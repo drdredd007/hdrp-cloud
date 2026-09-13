@@ -54,3 +54,19 @@ The nested Editor assembly is editor-only and has no game dependencies. Assets a
 generator presets, not coordinate-world instances. An application supplies placement
 and instance identity and can reuse Definition/Lod/Orientation from an asset. Multiple
 planet composition, coordinate authoring integration and surface editing remain future work.
+
+## Local surface foundation
+
+PlanetSurfaceAddress identifies a location by latitude/longitude, radial height and heading.
+Longitude zero is planet-local +X and increases toward +Z; north is +Y. Heading 0 is north,
+90 east. PlanetSurfaceCoordinates resolves a double local frame, independent of orbital
+LOD and world center. Optional terrain alignment changes orientation only. The caller
+applies planet instance pose and generator orientation separately.
+
+PlanetLocalPatch builds metre-space arrays around this frame from the same height field.
+Neighbouring patches share grid inputs. Positions, normals, colors and outward triangles
+can feed a near renderer or an application's static mesh collider. Resolution is a power
+of two from 2 to 128; patch coordinates are conservatively bounded to 8192 metres. The
+returned object owns persistent native arrays and must be disposed. Vertex generation
+uses Burst, but Build currently completes synchronously. This is not yet a near/far
+handoff or asynchronous terrain streamer; the orbital camera restrictions still apply.
