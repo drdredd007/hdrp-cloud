@@ -1,6 +1,6 @@
 Shader "SpaceRunner/Planet Far Surface"
 {
-    Properties { _FarZTest("Depth test", Int) = 4 }
+    Properties { _FarZTest("Depth test", Int) = 4 _LayerToMeters("Layer distance scale", Float) = 1000 }
     SubShader
     {
         Tags { "RenderPipeline"="HDRenderPipeline" }
@@ -15,7 +15,7 @@ Shader "SpaceRunner/Planet Far Surface"
             float4x4 _FarViewProjection, _PlanetRotation;
             float3 _PatchOffset, _PlanetLightDirection;
             float4 _PlanetLightColor;
-            float _PlanetLightLux;
+            float _PlanetLightLux, _LayerToMeters;
             struct PlanetVertex {float3 position:POSITION;float3 normal:NORMAL;float4 color:COLOR;};
             struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;};
             PlanetVaryings PlanetVert(PlanetVertex input)
@@ -29,7 +29,7 @@ Shader "SpaceRunner/Planet Far Surface"
             {
                 float sun=saturate(dot(normalize(input.normal),normalize(_PlanetLightDirection)));
                 float3 radiance=input.color.rgb*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb+0.001);
-                return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*1000.0);
+                return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);
             }
             ENDHLSL
         }

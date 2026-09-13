@@ -70,3 +70,18 @@ of two from 2 to 128; patch coordinates are conservatively bounded to 8192 metre
 returned object owns persistent native arrays and must be disposed. Vertex generation
 uses Burst, but Build currently completes synchronously. This is not yet a near/far
 handoff or asynchronous terrain streamer; the orbital camera restrictions still apply.
+
+## Optional near layer
+
+PlanetFarPass.EnableLocalSurface enables the first near layer below 20 km and keeps the
+far horizon below its previous 10 km cutoff. PlanetNearSurfaceCache builds 16 metric
+512 m patches (32 cells each), four per render execution, and publishes complete sets.
+Recentering retains the old set until replacement is ready. Above 30 km, near resources
+are released. An extra RGBAFloat/depth target costs about 20 bytes per pixel. Near pixels
+replace the coarse far approximation, then their metric ray distance is compared against
+HDRP scene depth. Local terrain does not yet write into main HDRP depth for SSR/fog/DOF.
+
+This optional layer has logical lifecycle tests and a Player build, but no new image
+acceptance or performance measurement. It is not collider readiness or a production
+streamer. The application must handle safe descent separately; existing orbital callers
+keep the old behavior unless they explicitly enable the layer.

@@ -27,9 +27,13 @@ namespace UnityEngine.Rendering.HighDefinition
         readonly PlanetSurfaceCache geometry=new PlanetSurfaceCache();
         public PlanetLodSettings LodSettings=PlanetLodSettings.Default;
         public bool IsRefining=>geometry.IsRefining;
+        public bool EnableLocalSurface;
+        public int LocalSurfacePatchCount=>nearGeometry.Meshes.Count;
+        readonly PlanetNearSurfaceCache nearGeometry=new PlanetNearSurfaceCache();
         Material surface,composite;
         MaterialPropertyBlock properties;
         RenderTexture farBuffer;
+        RenderTexture nearBuffer;
 
 
 
@@ -42,10 +46,14 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         protected override void Execute(CustomPassContext ctx)
         {
-            if(!Enabled || ctx.hdCamera.camera!=Observer || !Definition.IsValid || Altitude<10000 || Observer.orthographic)return;
+            if(!EnableLocalSurface){nearGeometry.Dispose();ReleaseNearBuffer();}
+            if(!Enabled || ctx.hdCamera.camera!=Observer || !Definition.IsValid || (Altitude<10000 && !EnableLocalSurface) || Observer.orthographic)return;
             int width=ctx.hdCamera.actualWidth,height=ctx.hdCamera.actualHeight;
             var q=(double4)((quaternion)PlanetRotation).value;
-            geometry.Update(Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),CameraPosition-Definition.Center),height,Observer.fieldOfView,LodSettings);
+            var localCamera=PlanetField.Rotate(new double4(-q.xyz,q.w),CameraPosition-Definition.Center);
+            geometry.Update(Definition,localCamera,height,Observer.fieldOfView,LodSettings);
+            if(EnableLocalSurface && Altitude<20000)nearGeometry.Update(Definition,localCamera);
+            else if(Altitude>30000){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(!farBuffer || farBuffer.width!=width || farBuffer.height!=height)
             {
                 ReleaseBuffer();farBuffer=new RenderTexture(width,height,24,RenderTextureFormat.ARGBFloat,RenderTextureReadWrite.Linear)
@@ -63,15 +71,40 @@ namespace UnityEngine.Rendering.HighDefinition
                 var rotation=(double4)((quaternion)PlanetRotation).value;
                 var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(rotation,geometry.Get(geometry.Active[i]).Pivot));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
+                properties.SetFloat("_LayerToMeters",1000);
+                properties.SetMatrix("_FarViewProjection",projection*view);
+                properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
                 ctx.cmd.DrawMesh(geometry.Get(geometry.Active[i]).Mesh,Matrix4x4.identity,surface,0,0,properties);
             }
+            bool hasNear=EnableLocalSurface && nearGeometry.Meshes.Count>0 && Altitude<20000;
+            if(hasNear)
+            {
+                if(!nearBuffer || nearBuffer.width!=width || nearBuffer.height!=height)
+                {
+                    ReleaseNearBuffer();nearBuffer=new RenderTexture(width,height,24,RenderTextureFormat.ARGBFloat,RenderTextureReadWrite.Linear)
+                    {name="Planet local surface color + metric ray distance",filterMode=FilterMode.Point};nearBuffer.Create();
+                }
+                ctx.cmd.SetRenderTarget(nearBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
+                ctx.cmd.ClearRenderTarget(true,true,Color.clear,SystemInfo.usesReversedZBuffer?0:1);
+                var frame=nearGeometry.Frame;
+                var relative=(Definition.Center-CameraPosition)+PlanetField.Rotate(q,frame.Position);
+                var localRotation=PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation);
+                properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
+                properties.SetFloat("_LayerToMeters",1);
+                properties.SetMatrix("_FarViewProjection",GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.05f,10000),true)*view);
+                properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(localRotation));
+                foreach(var mesh in nearGeometry.Meshes)ctx.cmd.DrawMesh(mesh,Matrix4x4.identity,surface,0,0,properties);
+            }
             composite.SetTexture("_PlanetFarBuffer",farBuffer);
+            composite.SetFloat("_PlanetHasNear",hasNear?1:0);
+            if(hasNear)composite.SetTexture("_PlanetNearBuffer",nearBuffer);
             CoreUtils.SetRenderTarget(ctx.cmd,ctx.cameraColorBuffer);
             ctx.cmd.SetViewport(new Rect(0,0,width,height));
             CoreUtils.DrawFullScreen(ctx.cmd,composite);
         }
         void ReleaseBuffer(){if(farBuffer){farBuffer.Release();CoreUtils.Destroy(farBuffer);farBuffer=null;}}
+        void ReleaseNearBuffer(){if(nearBuffer){nearBuffer.Release();CoreUtils.Destroy(nearBuffer);nearBuffer=null;}}
 
-        protected override void Cleanup(){geometry.Dispose();ReleaseBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
+        protected override void Cleanup(){geometry.Dispose();nearGeometry.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
     }
 }
