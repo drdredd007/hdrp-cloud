@@ -1,0 +1,5 @@
+{
+  "name": "Unity.RenderPipelines.HighDefinition.Planets.Editor",
+  "includePlatforms": ["Editor"],
+  "references": ["Unity.RenderPipelines.HighDefinition.Planets.Runtime", "Unity.RenderPipelines.HighDefinition.Runtime", "Unity.RenderPipelines.Core.Runtime", "Unity.Mathematics"]
+}

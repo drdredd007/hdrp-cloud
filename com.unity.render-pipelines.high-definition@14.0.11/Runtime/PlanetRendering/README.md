@@ -10,8 +10,15 @@ through serialized references so the Player build includes them. Supported initi
 one perspective camera, D3D11, no XR, no dynamic resolution, no TAA. The application must
 keep near-range rendering in the camera's normal HDRP coordinate system.
 
-The pass generates 96 immutable patches (level 2, 32 by 32 cells) on first execution.
-Generation uses Jobs/Burst but waits synchronously; streaming and adaptive LOD are future work.
+The pass starts with six root patches, then selects adaptive quadtree leaves using a
+heuristic projected error, horizon priority, hysteresis and a bounded patch count.
+Defaults: maximum level 8, 192 leaves, 4 pixel error and 4 new patches per update.
+Each patch has 32 by 32 cells plus radial skirts; skirts are visual crack concealment,
+not collision geometry or a watertight edge stitch. LOD geomorph is not implemented.
+PlanetSurfaceCache keeps the complete old covering set until the replacement is ready,
+then releases obsolete meshes. Transient residency can include both sets. Six initial
+roots are synchronous and exempt from the generation budget. Subsequent Jobs/Burst
+generation also completes within its update; fully asynchronous streaming is future work.
 PlanetPatchKey and PlanetField are shared contracts for later surface refinement.
 Height/normal samples depend on planet-local direction and seed, never the camera origin.
 
@@ -21,13 +28,29 @@ with an independent 24-bit depth attachment. The composition pass reconstructs n
 distance from HDRP depth; it never compares raw depth values from different projections.
 Memory scales with the active camera target size; buffers are replaced on resize and
 released with the pass. Approximate target payload is 20 bytes per pixel, excluding driver
-alignment. Geometry has approximately 105k vertices / 197k triangles.
+alignment. Each patch has 1,221 vertices and 2,304 triangles including skirts.
 
 This is an orbital renderer, not a landing surface. It stops below 10 km; the example
-application limits orbital camera navigation to 50 km. Surface colliders, adaptive LOD,
+application limits orbital camera navigation to 50 km. Surface colliders, near handoff,
 terrain streaming, transparent far objects, temporal history, SSR/SSGI/DOF and atmosphere
 are not implemented. Do not use this target as a replacement for the main HDRP depth.
 
 PlanetDefinition.GeneratorVersion currently accepts only version 1. Different seeds or
 radius/relief values rebuild geometry; center/orientation changes reuse meshes. The test
 application carries CPU boundary/normal/precision tests and GPU capture fixtures.
+
+## Editor authoring
+
+Open Window > Rendering > HDRP Planet Generator and choose New Planet. The saved
+PlanetGeneratorAsset contains seed, radius, relief, orientation and LOD settings.
+Double-click an asset to reopen it. The native Inspector supports Undo/Redo; Save writes
+only the selected asset. Drag the preview to orbit, scroll to zoom (minimum altitude
+50 km), and use Live Preview or Refresh. Preview uses the same PlanetFarPass in an
+isolated editor preview scene with neutral lighting; it pauses during Play and releases
+its camera, render target and geometry on close/reload. It does not alter scene lighting
+or save other dirty assets. Preview appearance still requires user visual acceptance.
+
+The nested Editor assembly is editor-only and has no game dependencies. Assets are
+generator presets, not coordinate-world instances. An application supplies placement
+and instance identity and can reuse Definition/Lod/Orientation from an asset. Multiple
+planet composition, coordinate authoring integration and surface editing remain future work.

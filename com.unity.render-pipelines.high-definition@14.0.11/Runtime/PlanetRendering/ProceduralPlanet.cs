@@ -20,9 +20,12 @@ namespace UnityEngine.Rendering.HighDefinition
             math.isfinite(Radius) && math.isfinite(Relief) && math.all(math.isfinite(Center));
     }
     // Stable face/quadtree address: the same address and height field will be used by surface LOD.
-    public struct PlanetPatchKey
+    public struct PlanetPatchKey : IEquatable<PlanetPatchKey>
     {
         public int Face,Level,X,Y;
+        public bool Equals(PlanetPatchKey other)=>Face==other.Face && Level==other.Level && X==other.X && Y==other.Y;
+        public override bool Equals(object other)=>other is PlanetPatchKey key && Equals(key);
+        public override int GetHashCode(){unchecked{return ((Face*397+Level)*397+X)*397+Y;}}
         public PlanetPatchKey(int face,int level,int x,int y){Face=face;Level=level;X=x;Y=y;}
     }
     public static class PlanetField
