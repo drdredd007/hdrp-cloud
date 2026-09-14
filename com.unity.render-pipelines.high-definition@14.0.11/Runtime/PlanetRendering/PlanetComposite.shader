@@ -15,6 +15,7 @@ Shader "SpaceRunner/Planet Composite"
             TEXTURE2D(_PlanetFarBuffer);
             TEXTURE2D(_PlanetNearBuffer);
             float _PlanetHasNear;
+            float _PlanetDebugView;
             // 1 when HDRP's resolved PhysicallyBasedSky describes this planet (see PlanetAtmosphere.Matches).
             float _PlanetAtmosphere;
             // Points this close to the sea-level sphere are shaded as "ground" by the sky tables,
@@ -33,6 +34,8 @@ Shader "SpaceRunner/Planet Composite"
                 float2 sea=IntersectSphere(_PlanetaryRadius,dot(O,-V)/max(r,1),r);
                 float height=length(O-V*distance)-_PlanetaryRadius;
                 bool ground=sea.x>=0 && height<PLANET_SEA_LEVEL_BAND;
+                // Skirts and patch chords can dip below sea level, where the sky tables are not valid.
+                if(ground)distance=min(distance,sea.x);
                 float3 skyColor,skyOpacity;
                 EvaluatePbrAtmosphere(camera,V,ground?-distance:distance,false,skyColor,skyOpacity);
                 return color*(1-skyOpacity)+skyColor*_IntensityMultiplier*GetCurrentExposureMultiplier();
@@ -45,9 +48,9 @@ Shader "SpaceRunner/Planet Composite"
                 {
                     float4 local=LOAD_TEXTURE2D(_PlanetNearBuffer,uint2(input.positionCS.xy));
                     // Local terrain replaces its coarse approximation wherever it covers the pixel.
-                    if(local.a>0)far=local;
+                    if(local.a>0){far=local;if(_PlanetDebugView>0)far.rgb*=float3(1,.25,.25);}
                 }
-                if(far.a<=0)return 0;
+                if(far.a<=0)return _PlanetDebugView>0?float4(0,1,0,1):0;
                 float depth=LoadCameraDepth(input.positionCS.xy);
                 if(depth!=UNITY_RAW_FAR_CLIP_VALUE)
                 {
@@ -56,7 +59,7 @@ Shader "SpaceRunner/Planet Composite"
                     if(nearDistance<far.a)return 0;
                 }
                 float3 color=far.rgb;
-                if(_PlanetAtmosphere>0)color=ApplyAtmosphere(color,input.positionCS.xy,far.a);
+                if(_PlanetAtmosphere>0 && _PlanetDebugView<=0)color=ApplyAtmosphere(color,input.positionCS.xy,far.a);
                 return float4(color,1);
             }
             ENDHLSL

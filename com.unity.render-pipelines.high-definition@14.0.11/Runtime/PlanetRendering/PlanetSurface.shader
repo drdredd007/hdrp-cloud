@@ -1,12 +1,13 @@
 Shader "SpaceRunner/Planet Far Surface"
 {
-    Properties { _FarZTest("Depth test", Int) = 4 _LayerToMeters("Layer distance scale", Float) = 1000 }
+    Properties { _LayerToMeters("Layer distance scale", Float) = 1000 }
     SubShader
     {
         Tags { "RenderPipeline"="HDRenderPipeline" }
         Pass
         {
-            Cull Back ZWrite On ZTest [_FarZTest]
+            // Written for Unity conventions; Unity reverses depth comparison on reversed-Z platforms.
+            Cull Back ZWrite On ZTest LEqual
             HLSLPROGRAM
             #pragma target 4.5
             #pragma vertex PlanetVert
@@ -27,15 +28,50 @@ Shader "SpaceRunner/Planet Far Surface"
             float _PlanetAtmosphere;
             // 1 to light with HDRP directional lights when the camera has any; otherwise the explicit light below.
             float _PlanetUseSceneLights;
-            struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;};
+            // Diagnostics (PlanetFarPass.DebugView): 1 tints skirt vertices (index >= _PlanetMainVertexCount).
+            float _PlanetDebugView;
+            int _PlanetMainVertexCount;
+            // Far layout only: edges (bit 0 v=0, 1 u=1, 2 v=1, 3 u=0) adjacent to a one-level-coarser patch.
+            int _PlanetStitchMask;
+            struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;float skirt:TEXCOORD2;};
+            PlanetVertex PlanetFetch(uint id){return _PlanetVertices[(uint)_PlanetBaseVertex+id];}
+            // T-junction removal: an odd vertex on a stitched edge (and its skirt vertex) moves to the midpoint of its
+            // even neighbours, which coincide with the coarser patch's edge vertices, so both sides share one edge line.
+            PlanetVertex PlanetStitchedVertex(uint id)
+            {
+                PlanetVertex v=PlanetFetch(id);
+                uint mask=(uint)_PlanetStitchMask;
+                if(mask==0)return v;
+                const uint resolution=32,row=33,main=row*row;
+                uint step=0;
+                if(id<main)
+                {
+                    uint x=id%row,y=id/row;
+                    if(y==0 && (x&1) && (mask&1))step=1;
+                    else if(x==resolution && (y&1) && (mask&2))step=row;
+                    else if(y==resolution && (x&1) && (mask&4))step=1;
+                    else if(x==0 && (y&1) && (mask&8))step=row;
+                }
+                else if(id<main+4*row)
+                {
+                    uint local=id-main,edge=local/row,j=local%row;
+                    if((j&1) && ((mask>>edge)&1))step=1;
+                }
+                if(step==0)return v;
+                PlanetVertex a=PlanetFetch(id-step),b=PlanetFetch(id+step);
+                v.position=(a.position+b.position)*0.5;
+                v.normal=normalize(a.normal+b.normal);
+                v.color=(a.color+b.color)*0.5;
+                return v;
+            }
             // Indexed procedural draw: SV_VertexID is the patch-local index from the shared index buffer.
             PlanetVaryings PlanetVert(uint vertexID:SV_VertexID)
             {
-                PlanetVertex input=_PlanetVertices[(uint)_PlanetBaseVertex+vertexID];
+                PlanetVertex input=PlanetStitchedVertex(vertexID);
                 PlanetVaryings o;
                 o.relative=mul((float3x3)_PlanetRotation,input.position)+_PatchOffset;
                 o.position=mul(_FarViewProjection,float4(o.relative,1));
-                o.normal=mul((float3x3)_PlanetRotation,input.normal);o.color=input.color;return o;
+                o.normal=mul((float3x3)_PlanetRotation,input.normal);o.color=input.color;o.skirt=vertexID>=(uint)_PlanetMainVertexCount?1:0;return o;
             }
             float4 PlanetFrag(PlanetVaryings input):SV_Target
             {
@@ -69,6 +105,7 @@ Shader "SpaceRunner/Planet Far Surface"
                     float sun=saturate(dot(normal,normalize(_PlanetLightDirection)));
                     radiance=input.color.rgb*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb+0.001);
                 }
+                if(_PlanetDebugView>0 && input.skirt>0)radiance=float3(1,0,1)*_PlanetLightLux;
                 return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);
             }
             ENDHLSL

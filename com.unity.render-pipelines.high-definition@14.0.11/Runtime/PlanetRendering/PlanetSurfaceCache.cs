@@ -10,6 +10,7 @@ namespace UnityEngine.Rendering.HighDefinition
     {
         List<PlanetPatchKey> active=new List<PlanetPatchKey>();
         readonly Dictionary<PlanetPatchKey,int> slots=new Dictionary<PlanetPatchKey,int>();
+        readonly Dictionary<PlanetPatchKey,int> stitch=new Dictionary<PlanetPatchKey,int>();
         readonly IPlanetPatchBackend backend;
         List<PlanetPatchKey> pending;
         int pendingIndex,lastHeight;
@@ -29,6 +30,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool IsRefining=>pending!=null;
         public int ResidentCount=>slots.Count;
         public int Slot(PlanetPatchKey key)=>slots[key];
+        // Edges (bit 0 v=0, 1 u=1, 2 v=1, 3 u=0) whose neighbour is one level coarser; their odd vertices snap to its edge.
+        public int StitchMask(PlanetPatchKey key)=>stitch.TryGetValue(key,out var mask)?mask:0;
         public static double3 Pivot(in PlanetDefinition definition,PlanetPatchKey key)=>PlanetField.Direction(key,.5,.5)*definition.Radius;
         // Worst case residency: a complete old set plus a complete replacement.
         public static int RequiredSlots(PlanetLodSettings settings)=>2*settings.Clamped.PatchBudget+6;
@@ -40,17 +43,16 @@ namespace UnityEngine.Rendering.HighDefinition
             bool discarded=backend.Reserve(RequiredSlots(settings));
             if(discarded || !initialized || generated.Id!=definition.Id || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius ||
                 generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion)
-            {
-                Reset();
-                for(int face=0;face<6;face++){var key=new PlanetPatchKey(face,0,0,0);active.Add(key);Generate(cmd,definition,key);}
-                generated=definition;initialized=true;
-            }
+                Restart(cmd,definition);
             double altitude=math.length(camera)-definition.Radius;
             if(pending==null && (lastHeight!=height || math.distance(lastCamera,camera)>math.max(10,altitude*.02) ||
                 math.abs(lastFov-fov)>.1f || !lastSettings.Equals(settings)))
             {
                 pending=PlanetLodSelector.Select(definition,camera,height,fov,settings,active);pendingIndex=0;
                 lastCamera=camera;lastHeight=height;lastFov=fov;lastSettings=settings;
+                int needed=slots.Count;foreach(var key in pending)if(!slots.ContainsKey(key))needed++;
+                // Balancing can exceed the budget-based reservation; growing discards stored patches, so start over.
+                if(backend.Reserve(math.max(RequiredSlots(settings),needed))){Restart(cmd,definition);return;}
             }
             if(pending==null)return;
             int created=0;
@@ -62,6 +64,8 @@ namespace UnityEngine.Rendering.HighDefinition
             if(pendingIndex<pending.Count)return;
             // One complete covering set replaces another; camera motion cannot cancel pending generation forever.
             active=pending;pending=null;
+            var cover=new HashSet<PlanetPatchKey>(active);stitch.Clear();
+            foreach(var key in active){int mask=PlanetLodSelector.CoarserEdges(cover,key);if(mask!=0)stitch.Add(key,mask);}
             var retained=new HashSet<PlanetPatchKey>(active);var obsolete=new List<PlanetPatchKey>();
             foreach(var pair in slots)if(!retained.Contains(pair.Key))obsolete.Add(pair.Key);
             foreach(var key in obsolete){backend.Release(slots[key]);slots.Remove(key);}
@@ -71,7 +75,13 @@ namespace UnityEngine.Rendering.HighDefinition
             int slot=backend.Acquire();slots.Add(key,slot);
             backend.GenerateFar(cmd,slot,definition,key);
         }
-        void Reset(){backend.ReleaseAll();slots.Clear();active.Clear();pending=null;initialized=false;lastHeight=0;}
+        void Restart(CommandBuffer cmd,in PlanetDefinition definition)
+        {
+            Reset();
+            for(int face=0;face<6;face++){var key=new PlanetPatchKey(face,0,0,0);active.Add(key);Generate(cmd,definition,key);}
+            generated=definition;initialized=true;
+        }
+        void Reset(){backend.ReleaseAll();slots.Clear();stitch.Clear();active.Clear();pending=null;initialized=false;lastHeight=0;}
         // Releases GPU storage; the cache can be updated again afterwards.
         public void Dispose(){Reset();backend.Dispose();}
     }

@@ -5,6 +5,7 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering.HighDefinition;
 
 namespace UnityEngine.Rendering.HighDefinition
@@ -29,6 +30,8 @@ namespace UnityEngine.Rendering.HighDefinition
         // Light the surface with HDRP directional lights when the camera has any, instead of LightDirection/LightLux.
         public bool UseSceneLights=true;
         public bool AtmosphereActive {get;private set;}
+        // Diagnostics: 0 off; 1 without atmosphere: skirts magenta, uncovered layer pixels green, near-layer pixels tinted red.
+        public int DebugView;
         // Optional; PlanetPatchGenerator is otherwise loaded from this module's Resources.
         public ComputeShader Generator;
         public int PatchCount=>geometry.Active.Count;
@@ -48,6 +51,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetFarPass(){geometry=new PlanetSurfaceCache(farPatches);nearGeometry=new PlanetNearSurfaceCache(nearPatches);}
         Material surface,composite;
         MaterialPropertyBlock properties;
+        // Layer depth spans metres to thousands of kilometres; float depth keeps reversed-Z precision across it.
+        const GraphicsFormat LayerColorFormat=GraphicsFormat.R32G32B32A32_SFloat,LayerDepthFormat=GraphicsFormat.D32_SFloat;
         RenderTexture farBuffer;
         RenderTexture nearBuffer;
 
@@ -57,7 +62,6 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             if(!PlanetShader || !CompositeShader)throw new InvalidOperationException("Planet shaders must be serialized in the sample scene.");
             surface=CoreUtils.CreateEngineMaterial(PlanetShader);composite=CoreUtils.CreateEngineMaterial(CompositeShader);
-            surface.SetInt("_FarZTest",(int)(SystemInfo.usesReversedZBuffer?CompareFunction.GreaterEqual:CompareFunction.LessEqual));
             properties=new MaterialPropertyBlock();
         }
         protected override void Execute(CustomPassContext ctx)
@@ -79,7 +83,7 @@ namespace UnityEngine.Rendering.HighDefinition
             else if(Altitude>30000){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(!farBuffer || farBuffer.width!=width || farBuffer.height!=height)
             {
-                ReleaseBuffer();farBuffer=new RenderTexture(width,height,24,RenderTextureFormat.ARGBFloat,RenderTextureReadWrite.Linear)
+                ReleaseBuffer();farBuffer=new RenderTexture(width,height,LayerColorFormat,LayerDepthFormat)
                 {name="Planet far color + ray distance in metres",filterMode=FilterMode.Point};farBuffer.Create();
             }
             // The scaled layer uses its own projection/depth. Its alpha stores unscaled ray distance.
@@ -90,8 +94,11 @@ namespace UnityEngine.Rendering.HighDefinition
             properties.SetVector("_PlanetCenterRelative",(Vector3)centerRelative);
             properties.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
             properties.SetFloat("_PlanetUseSceneLights",UseSceneLights?1:0);
+            properties.SetFloat("_PlanetDebugView",DebugView);composite.SetFloat("_PlanetDebugView",DebugView);
+            properties.SetInteger("_PlanetMainVertexCount",PlanetGpuPatchBackend.Row*PlanetGpuPatchBackend.Row);
             ctx.cmd.SetRenderTarget(farBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
-            ctx.cmd.ClearRenderTarget(true,true,Color.clear,SystemInfo.usesReversedZBuffer?0:1);
+            // Unity-convention depth (clear 1, ZTest LEqual): Unity reverses both for reversed-Z platforms itself.
+                ctx.cmd.ClearRenderTarget(true,true,Color.clear,1);
             properties.SetBuffer("_PlanetVertices",farPatches.Vertices);
             properties.SetFloat("_LayerToMeters",1000);
             properties.SetMatrix("_FarViewProjection",projection*view);
@@ -102,6 +109,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(q,PlanetSurfaceCache.Pivot(Definition,key)));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
                 properties.SetInteger("_PlanetBaseVertex",geometry.Slot(key)*farPatches.SlotVertexCount);
+                properties.SetInteger("_PlanetStitchMask",geometry.StitchMask(key));
                 ctx.cmd.DrawProcedural(farPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,farPatches.PatchIndexCount,1,properties);
             }
             bool hasNear=EnableLocalSurface && nearGeometry.Slots.Count>0 && Altitude<20000;
@@ -109,11 +117,12 @@ namespace UnityEngine.Rendering.HighDefinition
             {
                 if(!nearBuffer || nearBuffer.width!=width || nearBuffer.height!=height)
                 {
-                    ReleaseNearBuffer();nearBuffer=new RenderTexture(width,height,24,RenderTextureFormat.ARGBFloat,RenderTextureReadWrite.Linear)
+                    ReleaseNearBuffer();nearBuffer=new RenderTexture(width,height,LayerColorFormat,LayerDepthFormat)
                     {name="Planet local surface color + metric ray distance",filterMode=FilterMode.Point};nearBuffer.Create();
                 }
                 ctx.cmd.SetRenderTarget(nearBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
-                ctx.cmd.ClearRenderTarget(true,true,Color.clear,SystemInfo.usesReversedZBuffer?0:1);
+                // Unity-convention depth (clear 1, ZTest LEqual): Unity reverses both for reversed-Z platforms itself.
+                ctx.cmd.ClearRenderTarget(true,true,Color.clear,1);
                 var frame=nearGeometry.Frame;
                 var relative=(Definition.Center-CameraPosition)+PlanetField.Rotate(q,frame.Position);
                 var localRotation=PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation);
@@ -122,6 +131,8 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetMatrix("_FarViewProjection",GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.05f,10000),true)*view);
                 properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(localRotation));
                 properties.SetBuffer("_PlanetVertices",nearPatches.Vertices);
+                properties.SetInteger("_PlanetMainVertexCount",int.MaxValue);
+                properties.SetInteger("_PlanetStitchMask",0);
                 foreach(var slot in nearGeometry.Slots)
                 {
                     properties.SetInteger("_PlanetBaseVertex",slot*nearPatches.SlotVertexCount);

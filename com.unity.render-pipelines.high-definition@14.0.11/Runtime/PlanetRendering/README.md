@@ -14,8 +14,18 @@ keep near-range rendering in the camera's normal HDRP coordinate system.
 The pass starts with six root patches, then selects adaptive quadtree leaves using a
 heuristic projected error, horizon priority, hysteresis and a bounded patch count.
 Defaults: maximum level 8, 192 leaves, 4 pixel error and 32 new patches per update.
-Each patch has 32 by 32 cells plus radial skirts; skirts are visual crack concealment,
-not collision geometry or a watertight edge stitch. LOD geomorph is not implemented.
+Each patch has 32 by 32 cells plus radial skirts. The selected cover is balanced so edge
+neighbours differ by at most one level (PlanetLodSelector.Balance; this can add leaves beyond
+PatchBudget), and edges next to a coarser neighbour are stitched in the vertex shader: odd edge
+vertices move to the midpoint of their even neighbours, which coincide with the coarser edge.
+Skirts only conceal sub-pixel float cracks; they are not collision geometry. LOD geomorph is
+not implemented.
+
+Layer depth follows Unity conventions (clear to 1, ZTest LEqual) with GetGPUProjectionMatrix;
+Unity reverses both on reversed-Z platforms. Writing reversed values by hand (GreaterEqual,
+clear 0) is reversed twice and keeps the farthest fragment: far-side skirts then show through
+the surface as seam lines. PlanetFarPass.DebugView = 1 renders without atmosphere, with skirts
+magenta, uncovered layer pixels green and near-layer pixels tinted red.
 PlanetSurfaceCache keeps the complete old covering set until the replacement is ready,
 then releases obsolete slots. Transient residency can include both sets. Six initial
 roots are exempt from the generation budget.

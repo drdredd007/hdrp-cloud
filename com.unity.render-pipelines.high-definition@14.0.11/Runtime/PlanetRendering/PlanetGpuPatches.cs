@@ -134,7 +134,8 @@ namespace UnityEngine.Rendering.HighDefinition
             for(int y=0;y<Resolution;y++)for(int x=0;x<Resolution;x++)
             {
                 int a=y*Row+x,b=a+1,c=a+Row,d=c+1;
-                // Far: PlanetPatchMesh winding. Local: PlanetLocalPatch triangles (a,c,b),(b,c,d).
+                // Both layouts are Unity front faces toward the outside (cross(b-a,c-a) points outward/up):
+                // cube-face u×v is outward while local x×z is down, hence the different orders.
                 if(layout==PlanetPatchLayout.Far){triangles[n++]=a;triangles[n++]=b;triangles[n++]=c;triangles[n++]=b;triangles[n++]=d;triangles[n++]=c;}
                 else{triangles[n++]=a;triangles[n++]=c;triangles[n++]=b;triangles[n++]=b;triangles[n++]=c;triangles[n++]=d;}
             }
@@ -144,6 +145,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     int top=edge==0?j:edge==1?j*Row+Resolution:edge==2?Resolution*Row+Resolution-j:(Resolution-j)*Row;
                     int bottom=Row*Row+edge*Row+j;
                     int next=edge==0?top+1:edge==1?top+Row:edge==2?top-1:top-Row;
+                    // Skirts face away from their patch, toward the neighbour that may show a crack.
                     triangles[n++]=top;triangles[n++]=bottom;triangles[n++]=next;
                     triangles[n++]=next;triangles[n++]=bottom;triangles[n++]=bottom+1;
                 }

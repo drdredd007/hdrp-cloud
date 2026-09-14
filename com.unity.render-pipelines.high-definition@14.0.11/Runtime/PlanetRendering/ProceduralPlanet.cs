@@ -48,6 +48,29 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             return math.normalize(cube);
         }
+        // Inverse of Direction: the patch of 'level' that contains a planet-local direction.
+        public static PlanetPatchKey Locate(double3 direction,int level)
+        {
+            var abs=math.abs(direction);int face;double a,b;
+            if(abs.x>=abs.y && abs.x>=abs.z)
+            {
+                var cube=direction/abs.x;
+                if(direction.x>0){face=0;a=-cube.z;b=cube.y;}else{face=1;a=cube.z;b=cube.y;}
+            }
+            else if(abs.y>=abs.z)
+            {
+                var cube=direction/abs.y;
+                if(direction.y>0){face=2;a=cube.x;b=-cube.z;}else{face=3;a=cube.x;b=cube.z;}
+            }
+            else
+            {
+                var cube=direction/abs.z;
+                if(direction.z>0){face=4;a=cube.x;b=cube.y;}else{face=5;a=-cube.x;b=cube.y;}
+            }
+            int count=1<<level;
+            int x=math.clamp((int)math.floor((a+1)*.5*count),0,count-1),y=math.clamp((int)math.floor((b+1)*.5*count),0,count-1);
+            return new PlanetPatchKey(face,level,x,y);
+        }
         public static double Height(PlanetDefinition definition,double3 direction)
         {
             // Noise coordinates depend only on planet-local direction, seed and generator version.
