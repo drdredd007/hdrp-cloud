@@ -12,10 +12,17 @@ Shader "SpaceRunner/Planet Far Surface"
             #pragma vertex PlanetVert
             #pragma fragment PlanetFrag
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
+            #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Sky/PhysicallyBasedSky/PhysicallyBasedSkyCommon.hlsl"
             float4x4 _FarViewProjection, _PlanetRotation;
             float3 _PatchOffset, _PlanetLightDirection;
             float4 _PlanetLightColor;
             float _PlanetLightLux, _LayerToMeters;
+            // Planet centre relative to the camera in metres, world axes.
+            float3 _PlanetCenterRelative;
+            // 1 when HDRP's resolved PhysicallyBasedSky describes this planet (tables and constants are bound).
+            float _PlanetAtmosphere;
+            // 1 to light with HDRP directional lights when the camera has any; otherwise the explicit light below.
+            float _PlanetUseSceneLights;
             struct PlanetVertex {float3 position:POSITION;float3 normal:NORMAL;float4 color:COLOR;};
             struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;};
             PlanetVaryings PlanetVert(PlanetVertex input)
@@ -27,8 +34,36 @@ Shader "SpaceRunner/Planet Far Surface"
             }
             float4 PlanetFrag(PlanetVaryings input):SV_Target
             {
-                float sun=saturate(dot(normalize(input.normal),normalize(_PlanetLightDirection)));
-                float3 radiance=input.color.rgb*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb+0.001);
+                float3 normal=normalize(input.normal);
+                float3 brdf=input.color.rgb*INV_PI;
+                float3 radiance=0;
+                if(_PlanetUseSceneLights>0 && _DirectionalLightCount>0)
+                {
+                    // Planet-centred position: the terrain point in the sky's own frame.
+                    float3 position=input.relative*_LayerToMeters-_PlanetCenterRelative;
+                    float radial=length(position);
+                    float3 up=position/max(radial,1);
+                    for(uint i=0;i<_DirectionalLightCount;i++)
+                    {
+                        DirectionalLightData light=_DirectionalLightDatas[i];
+                        float3 L=-light.forward;
+                        float3 irradiance=light.color*light.diffuseDimmer;
+                        if(_PlanetAtmosphere>0 && asint(light.distanceFromCamera)>=0)
+                        {
+                            // Same models as the sky's analytic ground: sun transmittance to the point and
+                            // precomputed sky irradiance for a horizontal surface.
+                            float r=max(radial,_PlanetaryRadius+1);
+                            radiance+=brdf*SampleGroundIrradianceTexture(dot(up,L))*irradiance;
+                            irradiance*=EvaluateSunColorAttenuation(dot(up,L),r);
+                        }
+                        radiance+=brdf*irradiance*saturate(dot(normal,L));
+                    }
+                }
+                else
+                {
+                    float sun=saturate(dot(normal,normalize(_PlanetLightDirection)));
+                    radiance=input.color.rgb*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb+0.001);
+                }
                 return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);
             }
             ENDHLSL

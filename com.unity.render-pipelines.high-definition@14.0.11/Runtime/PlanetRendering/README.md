@@ -32,8 +32,39 @@ alignment. Each patch has 1,221 vertices and 2,304 triangles including skirts.
 
 This is an orbital renderer, not a landing surface. It stops below 10 km; the example
 application limits orbital camera navigation to 50 km. Surface colliders, near handoff,
-terrain streaming, transparent far objects, temporal history, SSR/SSGI/DOF and atmosphere
-are not implemented. Do not use this target as a replacement for the main HDRP depth.
+terrain streaming, transparent far objects, temporal history and SSR/SSGI/DOF are not
+implemented. Do not use this target as a replacement for the main HDRP depth.
+
+## Atmosphere
+
+The atmosphere is stock HDRP PhysicallyBasedSky (Custom model, spherical mode), which already
+renders from inside the layer and from space. PlanetGeneratorAsset.Atmosphere stores its
+per-planet parameters (PlanetAtmosphereSettings, blittable for application snapshots).
+The application owns a global Volume and calls PlanetAtmosphere.Configure before rendering:
+sea-level radius is PlanetDefinition.Radius (terrain uses max(0, height)), and the centre is
+the double planet centre minus the application's render origin, i.e. Unity world space.
+Only centre/rotation change per frame; they are outside HDRP's table precomputation hash.
+The camera must clear with Sky. One PhysicallyBasedSky exists per camera, so one planet has
+an atmosphere at a time.
+
+PlanetFarPass samples the same data only when PlanetAtmosphere.Matches confirms that the
+camera's resolved volume stack describes this planet (sky type, radius and centre within float
+tolerance); otherwise layers are unchanged. With a match:
+- the composite applies EvaluatePbrAtmosphere over the stored metric ray distance
+  (transmittance and in-scattering), so limb, haze and terminator agree with the sky pass;
+- the surface shader uses HDRP directional lights (UseSceneLights; LightDirection/LightLux
+  remain the fallback when a camera has none, e.g. the generator preview) with per-point
+  sun transmittance and the sky's ground irradiance table as ambient.
+
+HDRP change: PhysicallyBasedSkyRenderer.PrecomputationData.BindGlobalBuffers (an empty stub in
+14.0.11) now publishes the ground irradiance and in-scattered radiance tables globally.
+
+Limits: PBR fog on regular opaque geometry stays disabled in HDRP 14, so ships, stations and
+other HDRP scene geometry receive no aerial perspective yet. Volumetric clouds are composited
+before BeforeTransparent and are covered by the planet layer. The sky's analytic sea-level
+sphere remains behind the planet and is visible only where patch chords/skirts do not cover it
+or where the planet layer is not drawn. Float placement is ~0.5 m at 4,000 km and ~64 m at
+10^9 m from the Unity origin. The generator preview has no sky volume and shows no atmosphere.
 
 PlanetDefinition.GeneratorVersion currently accepts only version 1. Different seeds or
 radius/relief values rebuild geometry; center/orientation changes reuse meshes. The test

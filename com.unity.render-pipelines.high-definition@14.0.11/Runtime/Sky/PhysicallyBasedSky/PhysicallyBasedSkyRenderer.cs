@@ -162,8 +162,14 @@ namespace UnityEngine.Rendering.HighDefinition
                 }
             }
 
+            // SpaceRunner planet rendering: layers composited outside the sky pass (PlanetFarPass) evaluate
+            // the same aerial perspective as the sky, so the tables are also published globally.
             public void BindGlobalBuffers(CommandBuffer cmd)
             {
+                cmd.SetGlobalTexture(HDShaderIDs._GroundIrradianceTexture, m_GroundIrradianceTable);
+                cmd.SetGlobalTexture(HDShaderIDs._AirSingleScatteringTexture, m_InScatteredRadianceTables[0]);
+                cmd.SetGlobalTexture(HDShaderIDs._AerosolSingleScatteringTexture, m_InScatteredRadianceTables[1]);
+                cmd.SetGlobalTexture(HDShaderIDs._MultipleScatteringTexture, m_InScatteredRadianceTables[2]);
             }
 
             public void BindBuffers(MaterialPropertyBlock mpb)

@@ -17,6 +17,8 @@ namespace UnityEngine.Rendering.HighDefinition
         [Range(6,384)] public int PatchBudget=192;
         [Range(.5f,32)] public float PixelError=4;
         [Range(1,16)] public int PatchesPerFrame=4;
+        [Header("Atmosphere")]
+        public PlanetAtmosphereSettings Atmosphere=PlanetAtmosphereSettings.EarthLike;
         public PlanetDefinition Definition => new PlanetDefinition {Id=PlanetId,Seed=Seed,GeneratorVersion=1,Radius=Radius,Relief=Relief};
         public PlanetLodSettings Lod => new PlanetLodSettings {MaximumLevel=MaximumLevel,PatchBudget=PatchBudget,PixelError=PixelError,PatchesPerFrame=PatchesPerFrame};
     }

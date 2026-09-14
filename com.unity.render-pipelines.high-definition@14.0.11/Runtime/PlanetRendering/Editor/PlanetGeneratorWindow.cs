@@ -198,6 +198,8 @@ namespace UnityEngine.Rendering.HighDefinition
             pass=(PlanetFarPass)volume.AddPassOfType<PlanetFarPass>();pass.name="Planet generator preview";pass.Observer=previewCamera;
             pass.PlanetShader=Shader.Find("SpaceRunner/Planet Far Surface");pass.CompositeShader=Shader.Find("SpaceRunner/Planet Composite");
             pass.LightDirection=new Vector3(.4f,.7f,-.58f).normalized;pass.LightLux=math.PI;
+            // The isolated preview scene has no sky volume or scene sun; keep its neutral explicit light.
+            pass.UseSceneLights=false;pass.EnableAtmosphere=false;
         }
         void RenderPreview()
         {
