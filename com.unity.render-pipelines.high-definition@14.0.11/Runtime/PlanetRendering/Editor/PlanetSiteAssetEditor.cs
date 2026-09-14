@@ -22,6 +22,8 @@ namespace UnityEngine.Rendering.HighDefinition
             if(serializedObject.ApplyModifiedProperties())signature=null;
             EditorGUILayout.HelpBox("Metre dimensions. Address and heading use the generator's surface frame. Drag the preview to orbit; scroll to zoom.",MessageType.Info);
             if(GUILayout.Button("Refresh preview"))signature=null;
+            using(new EditorGUI.DisabledScope(!((PlanetSiteAsset)target).Generator))
+                if(GUILayout.Button("Place on planet"))PlanetGeneratorWindow.OpenForSite((PlanetSiteAsset)target);
             if(!string.IsNullOrEmpty(error))EditorGUILayout.HelpBox(error,MessageType.Error);
         }
         public override bool HasPreviewGUI()=>true;
