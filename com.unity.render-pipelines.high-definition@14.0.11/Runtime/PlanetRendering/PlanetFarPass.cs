@@ -17,6 +17,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public Shader PlanetShader,CompositeShader;
         public PlanetDefinition Definition;
         public double3 CameraPosition;
+        public double3? LocalSurfaceTarget;
         public Quaternion PlanetRotation=Quaternion.identity;
         public Vector3 LightDirection;
         public Color LightColor=Color.white;
@@ -57,7 +58,9 @@ namespace UnityEngine.Rendering.HighDefinition
             var q=(double4)((quaternion)PlanetRotation).value;
             var localCamera=PlanetField.Rotate(new double4(-q.xyz,q.w),CameraPosition-Definition.Center);
             geometry.Update(Definition,localCamera,height,Observer.fieldOfView,LodSettings);
-            if(EnableLocalSurface && Altitude<20000)nearGeometry.Update(Definition,localCamera);
+            var nearTarget=LocalSurfaceTarget ?? CameraPosition;
+            if(EnableLocalSurface && math.length(nearTarget-Definition.Center)-Definition.Radius<20000)
+                nearGeometry.Update(Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),nearTarget-Definition.Center));
             else if(Altitude>30000){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(!farBuffer || farBuffer.width!=width || farBuffer.height!=height)
             {
