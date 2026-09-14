@@ -1,0 +1,81 @@
+#pragma kernel FarPatch
+#pragma kernel LocalPatch
+
+// Planet patch vertices for rendering. Output layouts match PlanetPatchJob/PlanetPatchMesh (far)
+// and PlanetLocalPatchJob (local) so GPU geometry and CPU colliders/picking describe one surface.
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/PlanetRendering/PlanetField.hlsl"
+
+#define PLANET_FAR_SCALE 0.001 // PlanetField.FarScale
+
+RWStructuredBuffer<PlanetVertex> _PlanetVertices;
+uint _PlanetBaseVertex, _PlanetVertexCount;
+int _PlanetResolution;
+
+// Far patch: cube-face address; skirt depth is evaluated in double on the CPU.
+int _PatchFace, _PatchLevel, _PatchX, _PatchY;
+float _PatchSkirtDepth;
+
+// Local patch: surface frame whose Up is the radial direction through its origin.
+float3 _FrameRight, _FrameUp, _FrameForward;
+float _FrameRadius;       // |frame origin| in metres
+float _FrameHeight;       // |frame origin| - planet radius, evaluated in double
+int _LocalKeyX, _LocalKeyZ;
+float _LocalCellSize;
+
+PlanetVertex FarVertex(uint x, uint y, out float3 direction)
+{
+    float3 pivot = PlanetCubeDirection(_PatchFace, _PatchLevel, _PatchX, _PatchY, 0.5, 0.5);
+    direction = PlanetCubeDirection(_PatchFace, _PatchLevel, _PatchX, _PatchY, x / (float)_PlanetResolution, y / (float)_PlanetResolution);
+    PlanetVertex v;
+    v.position = PlanetSurfaceFrom(direction, pivot) * PLANET_FAR_SCALE;
+    v.normal = PlanetNormal(direction);
+    v.color = PlanetColor(direction);
+    return v;
+}
+
+[numthreads(64, 1, 1)]
+void FarPatch(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= _PlanetVertexCount) return;
+    uint resolution = (uint)_PlanetResolution, row = resolution + 1, count = row * row;
+    float3 direction;
+    PlanetVertex v;
+    if (index < count)
+        v = FarVertex(index % row, index / row, direction);
+    else
+    {
+        // Radial skirt below the matching edge vertex (PlanetPatchMesh edge order).
+        uint local = index - count, edge = local / row, j = local % row;
+        uint top = edge == 0 ? j : edge == 1 ? j * row + resolution : edge == 2 ? resolution * row + resolution - j : (resolution - j) * row;
+        v = FarVertex(top % row, top / row, direction);
+        v.position -= direction * (_PatchSkirtDepth * PLANET_FAR_SCALE);
+    }
+    _PlanetVertices[_PlanetBaseVertex + index] = v;
+}
+
+[numthreads(64, 1, 1)]
+void LocalPatch(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= _PlanetVertexCount) return;
+    uint row = (uint)_PlanetResolution + 1;
+    float lx = (_LocalKeyX * _PlanetResolution + (int)(index % row)) * _LocalCellSize;
+    float lz = (_LocalKeyZ * _PlanetResolution + (int)(index / row)) * _LocalCellSize;
+    float3 tangent = _FrameRight * lx + _FrameForward * lz;
+    float3 direction = normalize(_FrameUp * _FrameRadius + tangent);
+    float height = max(0.0, PlanetHeight(direction));
+
+    // Frame-local surface point without radius-scale cancellation:
+    // |q| = sqrt(rho^2 + t^2) = rho + e, e = t^2 / (rho + |q|); delta = (R + h) - |q| = h - h0 - e.
+    float t2 = lx * lx + lz * lz;
+    float e = t2 / (_FrameRadius + sqrt(_FrameRadius * _FrameRadius + t2));
+    float radial = _FrameRadius + e;
+    float delta = height - _FrameHeight - e;
+    PlanetVertex v;
+    v.position = float3(lx * (1.0 + delta / radial), (_FrameRadius / radial) * delta, lz * (1.0 + delta / radial));
+    float3 normal = PlanetNormal(direction);
+    v.normal = float3(dot(normal, _FrameRight), dot(normal, _FrameUp), dot(normal, _FrameForward));
+    v.color = PlanetColor(direction);
+    _PlanetVertices[_PlanetBaseVertex + index] = v;
+}

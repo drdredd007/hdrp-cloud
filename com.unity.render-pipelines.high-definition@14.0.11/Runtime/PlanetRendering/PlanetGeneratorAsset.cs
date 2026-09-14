@@ -16,7 +16,7 @@ namespace UnityEngine.Rendering.HighDefinition
         [Range(0,10)] public int MaximumLevel=8;
         [Range(6,384)] public int PatchBudget=192;
         [Range(.5f,32)] public float PixelError=4;
-        [Range(1,16)] public int PatchesPerFrame=4;
+        [Tooltip("Patches generated per rendered frame (GPU dispatches).")][Range(1,128)] public int PatchesPerFrame=32;
         [Header("Atmosphere")]
         public PlanetAtmosphereSettings Atmosphere=PlanetAtmosphereSettings.EarthLike;
         public PlanetDefinition Definition => new PlanetDefinition {Id=PlanetId,Seed=Seed,GeneratorVersion=1,Radius=Radius,Relief=Relief};
@@ -27,8 +27,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public int MaximumLevel,PatchBudget,PatchesPerFrame;
         public bool Equals(PlanetLodSettings other)=>MaximumLevel==other.MaximumLevel && PatchBudget==other.PatchBudget && PatchesPerFrame==other.PatchesPerFrame && PixelError==other.PixelError;
         public float PixelError;
-        public static PlanetLodSettings Default => new PlanetLodSettings {MaximumLevel=8,PatchBudget=192,PatchesPerFrame=4,PixelError=4};
+        public static PlanetLodSettings Default => new PlanetLodSettings {MaximumLevel=8,PatchBudget=192,PatchesPerFrame=32,PixelError=4};
         public PlanetLodSettings Clamped => new PlanetLodSettings {MaximumLevel=math.clamp(MaximumLevel,0,10),PatchBudget=math.clamp(PatchBudget,6,384),
-            PatchesPerFrame=math.clamp(PatchesPerFrame,1,16),PixelError=math.isfinite(PixelError)?math.clamp(PixelError,.5f,32):4};
+            PatchesPerFrame=math.clamp(PatchesPerFrame,1,128),PixelError=math.isfinite(PixelError)?math.clamp(PixelError,.5f,32):4};
     }
 }

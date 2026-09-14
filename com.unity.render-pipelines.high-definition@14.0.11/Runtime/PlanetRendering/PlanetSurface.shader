@@ -13,6 +13,10 @@ Shader "SpaceRunner/Planet Far Surface"
             #pragma fragment PlanetFrag
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Sky/PhysicallyBasedSky/PhysicallyBasedSkyCommon.hlsl"
+            // Vertex layout shared with PlanetPatchGenerator.compute (PlanetVertex, 40 bytes).
+            struct PlanetVertex {float3 position;float3 normal;float4 color;};
+            StructuredBuffer<PlanetVertex> _PlanetVertices;
+            int _PlanetBaseVertex;
             float4x4 _FarViewProjection, _PlanetRotation;
             float3 _PatchOffset, _PlanetLightDirection;
             float4 _PlanetLightColor;
@@ -23,10 +27,11 @@ Shader "SpaceRunner/Planet Far Surface"
             float _PlanetAtmosphere;
             // 1 to light with HDRP directional lights when the camera has any; otherwise the explicit light below.
             float _PlanetUseSceneLights;
-            struct PlanetVertex {float3 position:POSITION;float3 normal:NORMAL;float4 color:COLOR;};
             struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;};
-            PlanetVaryings PlanetVert(PlanetVertex input)
+            // Indexed procedural draw: SV_VertexID is the patch-local index from the shared index buffer.
+            PlanetVaryings PlanetVert(uint vertexID:SV_VertexID)
             {
+                PlanetVertex input=_PlanetVertices[(uint)_PlanetBaseVertex+vertexID];
                 PlanetVaryings o;
                 o.relative=mul((float3x3)_PlanetRotation,input.position)+_PatchOffset;
                 o.position=mul(_FarViewProjection,float4(o.relative,1));

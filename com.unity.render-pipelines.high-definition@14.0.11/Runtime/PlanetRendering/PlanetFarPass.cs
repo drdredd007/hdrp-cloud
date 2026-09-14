@@ -29,19 +29,23 @@ namespace UnityEngine.Rendering.HighDefinition
         // Light the surface with HDRP directional lights when the camera has any, instead of LightDirection/LightLux.
         public bool UseSceneLights=true;
         public bool AtmosphereActive {get;private set;}
+        // Optional; PlanetPatchGenerator is otherwise loaded from this module's Resources.
+        public ComputeShader Generator;
         public int PatchCount=>geometry.Active.Count;
         public double Altitude=>math.length(CameraPosition-Definition.Center)-Definition.Radius;
-        readonly PlanetSurfaceCache geometry=new PlanetSurfaceCache();
+        readonly PlanetGpuPatchBackend farPatches=new PlanetGpuPatchBackend(PlanetPatchLayout.Far),nearPatches=new PlanetGpuPatchBackend(PlanetPatchLayout.Local);
+        readonly PlanetSurfaceCache geometry;
         public PlanetLodSettings LodSettings=PlanetLodSettings.Default;
         public bool IsRefining=>geometry.IsRefining;
         public bool EnableLocalSurface;
-        public int LocalSurfacePatchCount=>nearGeometry.Meshes.Count;
+        public int LocalSurfacePatchCount=>nearGeometry.Slots.Count;
         public bool HasLocalSurfaceAt(double3 position)
         {
             var q=(double4)((quaternion)PlanetRotation).value;
             return EnableLocalSurface && nearGeometry.Covers(Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),position-Definition.Center),128);
         }
-        readonly PlanetNearSurfaceCache nearGeometry=new PlanetNearSurfaceCache();
+        readonly PlanetNearSurfaceCache nearGeometry;
+        public PlanetFarPass(){geometry=new PlanetSurfaceCache(farPatches);nearGeometry=new PlanetNearSurfaceCache(nearPatches);}
         Material surface,composite;
         MaterialPropertyBlock properties;
         RenderTexture farBuffer;
@@ -66,10 +70,12 @@ namespace UnityEngine.Rendering.HighDefinition
             int width=ctx.hdCamera.actualWidth,height=ctx.hdCamera.actualHeight;
             var q=(double4)((quaternion)PlanetRotation).value;
             var localCamera=PlanetField.Rotate(new double4(-q.xyz,q.w),CameraPosition-Definition.Center);
-            geometry.Update(Definition,localCamera,height,Observer.fieldOfView,LodSettings);
+            // Generation is enqueued before the draws below on the same command buffer.
+            farPatches.Generator=Generator;nearPatches.Generator=Generator;
+            geometry.Update(ctx.cmd,Definition,localCamera,height,Observer.fieldOfView,LodSettings);
             var nearTarget=LocalSurfaceTarget ?? CameraPosition;
             if(EnableLocalSurface && math.length(nearTarget-Definition.Center)-Definition.Radius<20000)
-                nearGeometry.Update(Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),nearTarget-Definition.Center));
+                nearGeometry.Update(ctx.cmd,Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),nearTarget-Definition.Center));
             else if(Altitude>30000){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(!farBuffer || farBuffer.width!=width || farBuffer.height!=height)
             {
@@ -86,17 +92,19 @@ namespace UnityEngine.Rendering.HighDefinition
             properties.SetFloat("_PlanetUseSceneLights",UseSceneLights?1:0);
             ctx.cmd.SetRenderTarget(farBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
             ctx.cmd.ClearRenderTarget(true,true,Color.clear,SystemInfo.usesReversedZBuffer?0:1);
+            properties.SetBuffer("_PlanetVertices",farPatches.Vertices);
+            properties.SetFloat("_LayerToMeters",1000);
+            properties.SetMatrix("_FarViewProjection",projection*view);
+            properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
             for(int i=0;i<geometry.Active.Count;i++)
             {
-                var rotation=(double4)((quaternion)PlanetRotation).value;
-                var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(rotation,geometry.Get(geometry.Active[i]).Pivot));
+                var key=geometry.Active[i];
+                var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(q,PlanetSurfaceCache.Pivot(Definition,key)));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
-                properties.SetFloat("_LayerToMeters",1000);
-                properties.SetMatrix("_FarViewProjection",projection*view);
-                properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
-                ctx.cmd.DrawMesh(geometry.Get(geometry.Active[i]).Mesh,Matrix4x4.identity,surface,0,0,properties);
+                properties.SetInteger("_PlanetBaseVertex",geometry.Slot(key)*farPatches.SlotVertexCount);
+                ctx.cmd.DrawProcedural(farPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,farPatches.PatchIndexCount,1,properties);
             }
-            bool hasNear=EnableLocalSurface && nearGeometry.Meshes.Count>0 && Altitude<20000;
+            bool hasNear=EnableLocalSurface && nearGeometry.Slots.Count>0 && Altitude<20000;
             if(hasNear)
             {
                 if(!nearBuffer || nearBuffer.width!=width || nearBuffer.height!=height)
@@ -113,7 +121,12 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetFloat("_LayerToMeters",1);
                 properties.SetMatrix("_FarViewProjection",GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.05f,10000),true)*view);
                 properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(localRotation));
-                foreach(var mesh in nearGeometry.Meshes)ctx.cmd.DrawMesh(mesh,Matrix4x4.identity,surface,0,0,properties);
+                properties.SetBuffer("_PlanetVertices",nearPatches.Vertices);
+                foreach(var slot in nearGeometry.Slots)
+                {
+                    properties.SetInteger("_PlanetBaseVertex",slot*nearPatches.SlotVertexCount);
+                    ctx.cmd.DrawProcedural(nearPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,nearPatches.PatchIndexCount,1,properties);
+                }
             }
             composite.SetTexture("_PlanetFarBuffer",farBuffer);
             composite.SetFloat("_PlanetHasNear",hasNear?1:0);
