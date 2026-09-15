@@ -267,5 +267,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public Vector4 _ScreenCoordScaleBias;
         
         public Vector4 _ColorPyramidUvScaleAndLimitPrevFrame;
+        public Vector4 _PlanetWeatherCenterRadius;
+        public Matrix4x4 _PlanetWeatherWorldToLocal;
     }
 }

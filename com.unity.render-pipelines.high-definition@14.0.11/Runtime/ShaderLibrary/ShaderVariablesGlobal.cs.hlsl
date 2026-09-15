@@ -155,6 +155,8 @@ GLOBAL_CBUFFER_START(ShaderVariablesGlobal, b0)
     float4 _ScreenSizeOverride;
     float4 _ScreenCoordScaleBias;
     float4 _ColorPyramidUvScaleAndLimitPrevFrame;
+    float4 _PlanetWeatherCenterRadius;
+    float4x4 _PlanetWeatherWorldToLocal;
 CBUFFER_END
 
 

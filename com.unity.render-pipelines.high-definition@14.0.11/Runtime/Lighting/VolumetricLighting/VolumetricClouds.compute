@@ -150,7 +150,15 @@ CloudRay BuildRay(uint2 intermediateCoord, float integrationNoise)
 #endif
 
     // Compute the distance to the center of the earth
-    ray.toEarthCenter = length(ray.originWS + float3(0, _EarthRadius, 0));
+    if(PlanetWeatherActive())
+    {
+        ray.originWS=_WorldSpaceCameraPos.xyz;
+        float planetDistance=PlanetWeatherDistance(uint2((intermediateCoord+.5)*_FinalScreenSize.xy/_IntermediateScreenSize.xy));
+        float limit=length(_PlanetWeatherCenterRadius.xyz)+2*(_EarthRadius+_HighestCloudAltitude);
+        ray.maxRayLength=isOccluded?ray.maxRayLength:limit;
+        if(planetDistance>0)ray.maxRayLength=min(ray.maxRayLength,planetDistance);
+    }
+    ray.toEarthCenter = length(CloudPlanetPosition(ray.originWS));
 
     // Evaluate where the point is
     // -2.0 means under the surface of the earth
@@ -790,7 +798,8 @@ void COMBINE_KERNEL(uint3 finalCoord : SV_DispatchThreadID,
     currentClouds.w = saturate(currentClouds.w);
 
 #ifdef LOCAL_VOLUMETRIC_CLOUDS
-    float cloudsDepth = LOAD_TEXTURE2D_X(_DepthStatusTexture, finalCoord.xy).z;
+    // Full-resolution tracing writes R32, unlike the packed temporal history.
+    float cloudsDepth = PlanetWeatherActive()?LOAD_TEXTURE2D_X(_DepthStatusTexture, finalCoord.xy).x:LOAD_TEXTURE2D_X(_DepthStatusTexture, finalCoord.xy).z;
 #else
     float cloudsDepth = UNITY_RAW_FAR_CLIP_VALUE;
 #endif

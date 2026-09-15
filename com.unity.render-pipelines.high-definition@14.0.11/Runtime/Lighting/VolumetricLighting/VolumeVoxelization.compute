@@ -17,6 +17,7 @@
 #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/GeometricTools.hlsl"
 #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/VolumeRendering.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetaryWeather.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Core/Utilities/GeometryUtils.cs.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/VolumetricLighting/HDRenderPipeline.VolumetricLighting.cs.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/LightLoop/LightLoopDef.hlsl"
@@ -44,7 +45,14 @@ void AddCloudRegionRainFog(float3 positionWS, inout float3 scattering, inout flo
         float4 height = _RainFogRegions[i * 4 + 1];
         float4 optical = _RainFogRegions[i * 4 + 2];
         float4 shell = _RainFogRegions[i * 4 + 3];
-        float distanceXZ = distance(p.xz, area.xy);
+        float sampleHeight=p.y;
+        float distanceXZ=distance(p.xz,area.xy);
+        if(shell.y>1.5)
+        {
+            float3 planetPosition=PlanetWeatherPosition(positionWS);
+            sampleHeight=length(planetPosition)-shell.x;
+            distanceXZ=PlanetWeatherRegionDistance(mul((float3x3)_PlanetWeatherWorldToLocal,planetPosition),shell.zw);
+        }
         if (distanceXZ >= area.z + area.w) continue;
         float radial = 1.0 - smoothstep(area.z, area.z + area.w, distanceXZ);
 
@@ -54,12 +62,13 @@ void AddCloudRegionRainFog(float3 positionWS, inout float3 scattering, inout flo
         float xzSquared = dot(shellXZ, shellXZ);
         float root = sqrt(max(0.0, radius * radius - xzSquared));
         float top = height.y - xzSquared / max(radius + root, 1.0);
+        if(shell.y>1.5)top=height.y;
         float span = top - height.x;
-        if (span <= 0.0 || p.y <= height.x || p.y >= top) continue;
+        if (span <= 0.0 || sampleHeight <= height.x || sampleHeight >= top) continue;
         float fade = min(height.z, span * 0.5);
-        float vertical = smoothstep(0.0, fade, p.y - height.x)
-                       * smoothstep(0.0, fade, top - p.y);
-        vertical *= lerp(height.w, 1.0, saturate((p.y - height.x) / span));
+        float vertical = smoothstep(0.0, fade, sampleHeight - height.x)
+                       * smoothstep(0.0, fade, top - sampleHeight);
+        vertical *= lerp(height.w, 1.0, saturate((sampleHeight - height.x) / span));
         float sigma = optical.w * radial * vertical;
         scattering += optical.rgb * sigma;
         extinction += sigma;
@@ -98,7 +107,7 @@ void FillVolumetricDensityBuffer(uint2 voxelCoord2D, JitteredRay ray)
 
         // TODO: the fog value at the center is likely different from the average value across the voxel.
         // Compute the average value.
-        float fragmentHeight   = voxelCenterWS.y;
+        float fragmentHeight   = PlanetWeatherActive()?PlanetWeatherHeight(voxelCenterWS):voxelCenterWS.y;
         float heightMultiplier = ComputeHeightFogMultiplier(fragmentHeight, _HeightFogBaseHeight, _HeightFogExponents);
 
         // Start by sampling the height fog.

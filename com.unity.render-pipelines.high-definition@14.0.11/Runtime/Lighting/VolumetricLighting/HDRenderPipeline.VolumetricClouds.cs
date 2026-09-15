@@ -137,7 +137,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
         float ComputeNormalizationFactor(float earthRadius, float lowerCloudRadius)
         {
-            return Mathf.Sqrt((k_EarthRadius + lowerCloudRadius) * (k_EarthRadius + lowerCloudRadius) - k_EarthRadius * earthRadius);
+            return Mathf.Sqrt((earthRadius + lowerCloudRadius) * (earthRadius + lowerCloudRadius) - earthRadius * earthRadius);
         }
 
         void GetPresetCloudMapValues(VolumetricClouds.CloudPresets preset, out CloudModelData cloudModelData)
@@ -279,7 +279,7 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             // Volumetric clouds require the max Z pass if the camera has clouds and we are in non local mode
             VolumetricClouds settings = hdCamera.volumeStack.GetComponent<VolumetricClouds>();
-            return HasVolumetricClouds(hdCamera, in settings) && !settings.localClouds.value;
+            return HasVolumetricClouds(hdCamera, in settings) && !settings.localClouds.value && !PlanetaryWeather.IsActive(hdCamera);
         }
 
         Texture2D GetPresetCloudMapTexture()
@@ -341,13 +341,14 @@ namespace UnityEngine.Rendering.HighDefinition
                 cb._LowestCloudAltitude = Mathf.Max(cb._LowestCloudAltitude, 1.0f);
 
             cb._HighestCloudAltitude = cb._LowestCloudAltitude + settings.altitudeRange.value;
-            cb._EarthRadius = Mathf.Lerp(1.0f, 0.025f, settings.earthCurvature.value) * k_EarthRadius;
+            cb._EarthRadius = PlanetaryWeather.IsActive(hdCamera)?hdCamera.volumeStack.GetComponent<PlanetaryWeather>().radius.value:Mathf.Lerp(1.0f, 0.025f, settings.earthCurvature.value) * k_EarthRadius;
             cb._CloudRangeSquared.Set(Square(cb._LowestCloudAltitude + cb._EarthRadius), Square(cb._HighestCloudAltitude + cb._EarthRadius));
 
             cb._NumPrimarySteps = settings.numPrimarySteps.value;
             cb._NumLightSteps = settings.numLightSteps.value;
             // 1000.0f is the maximal distance that a single step can do in theory (otherwise we endup skipping large clouds)
             cb._MaxRayMarchingDistance = Mathf.Min(settings.altitudeRange.value / 8.0f * cb._NumPrimarySteps, hdCamera.camera.farClipPlane);
+            if(PlanetaryWeather.IsActive(hdCamera))cb._MaxRayMarchingDistance=2*(cb._EarthRadius+cb._HighestCloudAltitude);
             cb._CloudMapTiling.Set(settings.cloudTiling.value.x, settings.cloudTiling.value.y, settings.cloudOffset.value.x, settings.cloudOffset.value.y);
 
             cb._ScatteringTint = Color.white - settings.scatteringTint.value * 0.75f;
@@ -500,7 +501,7 @@ namespace UnityEngine.Rendering.HighDefinition
             cb._IntermediateResolutionScale = cameraData.intermediateWidth == cameraData.finalWidth ? 1u : 2u;
 
             // The valid max z mask is only valid if we are in non local mode
-            cb._ValidMaxZMask = settings.localClouds.value ? 0 : 1;
+            cb._ValidMaxZMask = settings.localClouds.value || PlanetaryWeather.IsActive(hdCamera) ? 0 : 1;
 
             unsafe
             {
@@ -534,6 +535,7 @@ namespace UnityEngine.Rendering.HighDefinition
             // Manually placed cloud regions (rain/storm areas)
             public ComputeBuffer regionsBuffer;
             public int regionsCount;
+            public VolumetricCloudsRegionData[] planetRegions;
         }
 
         Texture3D ErosionNoiseTypeToTexture(VolumetricClouds.CloudErosionNoise noiseType)
@@ -630,6 +632,11 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Make sure the volumetric clouds are animated properly
             UpdateVolumetricClouds(hdCamera, in settings);
+
+            // Planet depth is metric and is not present in the stock depth pyramid/history.
+            // Use the existing full-resolution path until planet-aware temporal reconstruction is available.
+            if(PlanetaryWeather.IsActive(hdCamera))
+                return RenderVolumetricClouds_FullResolution(renderGraph,hdCamera,GetCameraType(hdCamera),colorBuffer,depthPyramid,motionVector,volumetricLighting,maxZMask);
 
             // Evaluate which version of the clouds we should be using
             TVolumetricCloudsCameraType cameraType = GetCameraType(hdCamera);

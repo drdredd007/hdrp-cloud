@@ -50,6 +50,14 @@ namespace UnityEditor.Rendering.HighDefinition
         {
             serializedObject.Update();
 
+            var planetary=serializedObject.FindProperty("planetary");
+            EditorGUILayout.PropertyField(planetary);
+            if(planetary.boolValue || planetary.hasMultipleDifferentValues)
+            {
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("planetId"));
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("planetCoordinates"),new GUIContent("Latitude / Longitude"));
+                EditorGUILayout.HelpBox("Radius and fade are metres along the planet surface. Altitudes are above sea level. Transform position is not used in this mode.",MessageType.Info);
+            }
             EditorGUILayout.LabelField("Cloud Types", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(m_AltoStratusCoverage);
             EditorGUILayout.PropertyField(m_CumulusCoverage);
@@ -123,6 +131,7 @@ namespace UnityEditor.Rendering.HighDefinition
         void OnSceneGUI()
         {
             var region = target as VolumetricCloudsRegion;
+            if(region && region.planetary)return;
             Vector3 center = region.transform.position;
 
             // Drag handle for the core radius, drawn flat on the world XZ plane to match how the region

@@ -6,6 +6,8 @@ namespace UnityEngine.Rendering.HighDefinition
         // independent of the cloud buffer, which can be updated by other camera passes.
         Vector4[] PrepareRainFogRegions(HDCamera camera)
         {
+            // Filter flat and planet-addressed regions independently.
+            var weather=PlanetaryWeather.IsActive(camera)?camera.volumeStack.GetComponent<PlanetaryWeather>():null;
             var clouds = camera.volumeStack.GetComponent<VolumetricClouds>();
             if (!m_ActiveVolumetricClouds || !clouds.active || !HasVolumetricClouds(camera, clouds))
                 return System.Array.Empty<Vector4>();
@@ -15,7 +17,7 @@ namespace UnityEngine.Rendering.HighDefinition
             int cloudRegionCount = 0;
             foreach (var region in regions)
             {
-                if (region == null || !region.isActiveAndEnabled) continue;
+                if (region == null || !region.isActiveAndEnabled || !region.MatchesWeather(weather)) continue;
                 // Match the set uploaded to the cloud shader, including non-raining regions.
                 if (cloudRegionCount++ >= VolumetricCloudsRegionManager.maxRegionCount) break;
                 VolumetricCloudsRegion.EvaluateCloudTypeBlend(region.altoStratusCoverage, region.cumulusCoverage,
@@ -38,6 +40,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 // Cloud-shell curvature uses absolute XZ for local clouds, camera-relative XZ for distant clouds.
                 result.Add(new Vector4(Mathf.Lerp(1, 0.025f, clouds.earthCurvature.value) * k_EarthRadius,
                     clouds.localClouds.value ? 1 : 0, 0, 0));
+                if(weather!=null)result[result.Count-1]=new Vector4(weather.radius.value,2,region.planetCoordinates.x,region.planetCoordinates.y);
             }
             return result.ToArray();
         }
@@ -61,14 +64,14 @@ namespace UnityEngine.Rendering.HighDefinition
         }
 
         // Gathers the currently active regions, uploads them to the GPU and returns how many are valid.
-        int UpdateVolumetricCloudsRegionBuffer()
+        int UpdateVolumetricCloudsRegionBuffer(PlanetaryWeather weather=null)
         {
             var regions = VolumetricCloudsRegionManager.manager.regions;
             int count = 0;
             for (int i = 0; i < regions.Count && count < VolumetricCloudsRegionManager.maxRegionCount; ++i)
             {
                 var region = regions[i];
-                if (region == null || !region.isActiveAndEnabled)
+                if (region == null || !region.isActiveAndEnabled || !region.MatchesWeather(weather))
                     continue;
 
                 m_VolumetricCloudsRegionData[count] = region.GetRegionData();

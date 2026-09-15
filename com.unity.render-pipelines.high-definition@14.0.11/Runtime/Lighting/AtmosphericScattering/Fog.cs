@@ -170,8 +170,8 @@ namespace UnityEngine.Rendering.HighDefinition
         internal static bool IsPBRFogEnabled(HDCamera hdCamera)
         {
             var visualEnv = hdCamera.volumeStack.GetComponent<VisualEnvironment>();
-            // For now PBR fog (coming from the PBR sky) is disabled until we improve it
-            return false;
+            // Enable the stock aerial perspective only for the explicitly placed procedural planet.
+            return PlanetaryWeather.IsActive(hdCamera) && (visualEnv.skyType.value == (int)SkyType.PhysicallyBased) && hdCamera.frameSettings.IsEnabled(FrameSettingsField.AtmosphericScattering);
             //return (visualEnv.skyType.value == (int)SkyType.PhysicallyBased) && hdCamera.frameSettings.IsEnabled(FrameSettingsField.AtmosphericScattering);
         }
 
@@ -196,6 +196,8 @@ namespace UnityEngine.Rendering.HighDefinition
 
         internal static void UpdateShaderVariablesGlobalCB(ref ShaderVariablesGlobal cb, HDCamera hdCamera)
         {
+            PlanetaryWeather.Update(ref cb,hdCamera);
+            cb._PBRFogEnabled=IsPBRFogEnabled(hdCamera)?1:0;
             // TODO Handle user override
             var fogSettings = hdCamera.volumeStack.GetComponent<Fog>();
 
@@ -232,7 +234,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             float crBaseHeight = baseHeight.value;
 
-            if (ShaderConfig.s_CameraRelativeRendering != 0)
+            if (ShaderConfig.s_CameraRelativeRendering != 0 && !PlanetaryWeather.IsActive(hdCamera))
             {
                 crBaseHeight -= hdCamera.camera.transform.position.y;
             }

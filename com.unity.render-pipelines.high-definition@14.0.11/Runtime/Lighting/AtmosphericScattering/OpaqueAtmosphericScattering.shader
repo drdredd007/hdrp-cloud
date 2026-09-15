@@ -54,6 +54,13 @@ Shader "Hidden/HDRP/OpaqueAtmosphericScattering"
                 // Warning: we do not modify depth values. Use them with care!
             }
 
+            float planetDistance=PlanetWeatherDistance(uint2(input.positionCS.xy));
+            if(planetDistance>0 && (depth==UNITY_RAW_FAR_CLIP_VALUE || planetDistance<distance(posInput.positionWS,GetCurrentViewPosition())))
+                {
+                posInput.positionWS=GetCurrentViewPosition()-V*planetDistance;
+                // PlanetComposite already applied the PBR atmosphere; apply only weather fog again.
+                posInput.deviceDepth=UNITY_RAW_FAR_CLIP_VALUE;
+                }
             EvaluateAtmosphericScattering(posInput, V, color, opacity); // Premultiplied alpha
         }
 

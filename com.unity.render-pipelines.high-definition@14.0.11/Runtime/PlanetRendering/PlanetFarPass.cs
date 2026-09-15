@@ -146,6 +146,11 @@ namespace UnityEngine.Rendering.HighDefinition
             CoreUtils.SetRenderTarget(ctx.cmd,ctx.cameraColorBuffer);
             ctx.cmd.SetViewport(new Rect(0,0,width,height));
             CoreUtils.DrawFullScreen(ctx.cmd,composite);
+            // Published after this camera's layers, consumed by opaque fog and cloud tracing.
+            ctx.cmd.SetGlobalTexture("_PlanetWeatherFarDistance",farBuffer);
+            ctx.cmd.SetGlobalTexture("_PlanetWeatherNearDistance",hasNear?nearBuffer:farBuffer);
+            ctx.cmd.SetGlobalInt("_PlanetWeatherHasNear",hasNear?1:0);
+            ctx.cmd.SetGlobalInt("_PlanetWeatherDepthReady",1);
         }
         void ReleaseBuffer(){if(farBuffer){farBuffer.Release();CoreUtils.Destroy(farBuffer);farBuffer=null;}}
         void ReleaseNearBuffer(){if(nearBuffer){nearBuffer.Release();CoreUtils.Destroy(nearBuffer);nearBuffer=null;}}

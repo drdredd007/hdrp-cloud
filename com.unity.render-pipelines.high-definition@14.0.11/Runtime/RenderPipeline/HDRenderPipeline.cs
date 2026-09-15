@@ -1138,6 +1138,9 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             m_ShaderVariablesGlobalCB._ColorPyramidUvScaleAndLimitPrevFrame = HDUtils.ComputeViewportScaleAndLimit(hdCamera.historyRTHandleProperties.previousViewportSize, hdCamera.historyRTHandleProperties.previousRenderTargetSize);
 
+            cmd.SetGlobalInt(Shader.PropertyToID("_PlanetWeatherDepthReady"),0);
+            cmd.SetGlobalTexture(Shader.PropertyToID("_PlanetWeatherFarDistance"),Texture2D.blackTexture);
+            cmd.SetGlobalTexture(Shader.PropertyToID("_PlanetWeatherNearDistance"),Texture2D.blackTexture);
             ConstantBuffer.PushGlobal(cmd, m_ShaderVariablesGlobalCB, HDShaderIDs._ShaderVariablesGlobal);
         }
 

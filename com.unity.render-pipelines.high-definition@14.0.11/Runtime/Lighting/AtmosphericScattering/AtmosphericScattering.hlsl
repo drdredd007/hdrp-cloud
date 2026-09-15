@@ -14,6 +14,7 @@
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Debug/DebugDisplay.hlsl"
 #endif
 
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetaryWeather.hlsl"
 TEXTURE3D(_VBufferLighting);
 
 float3 ExpLerp(float3 A, float3 B, float t, float x, float y)
@@ -314,6 +315,7 @@ void EvaluateAtmosphericScattering(PositionInputs posInput, float3 V, out float3
             float3 volAlbedo = _HeightFogBaseScattering.xyz / _HeightFogBaseExtinction;
             float  odFallback = OpticalDepthHeightFog(_HeightFogBaseExtinction, _HeightFogBaseHeight,
                 _HeightFogExponents, cosZenith, startHeight, distDelta);
+            if(PlanetWeatherActive())odFallback=PlanetWeatherFogOpticalDepth(positionWS,-V,distDelta,_HeightFogBaseExtinction,_HeightFogBaseHeight,_HeightFogExponents.y);
             float  trFallback = TransmittanceFromOpticalDepth(odFallback);
             float  trCamera = 1 - volFog.a;
 
@@ -325,7 +327,7 @@ void EvaluateAtmosphericScattering(PositionInputs posInput, float3 V, out float3
         opacity = volFog.a;
     }
 
-#if 0 // _PBRFogEnabled is disabled from C# anyway
+#if 1 // Explicit planet weather enables aerial perspective for geometry and cloud samples.
     // Sky pass already applies atmospheric scattering to the far plane.
     // This pass only handles geometry.
     if (_PBRFogEnabled && (posInput.deviceDepth != UNITY_RAW_FAR_CLIP_VALUE))
@@ -333,7 +335,7 @@ void EvaluateAtmosphericScattering(PositionInputs posInput, float3 V, out float3
         float3 skyColor = 0, skyOpacity = 0;
 
         // Convert it to distance along the ray. Doesn't work with tilt shift, etc.
-        float tFrag = posInput.linearDepth * rcp(dot(-V, GetViewForwardDir1(UNITY_MATRIX_V)));
+        float tFrag = fogFragDist;
 
         EvaluatePbrAtmosphere(_WorldSpaceCameraPos.xyz, V, tFrag, false, skyColor, skyOpacity);
         skyColor *= _IntensityMultiplier * GetCurrentExposureMultiplier();

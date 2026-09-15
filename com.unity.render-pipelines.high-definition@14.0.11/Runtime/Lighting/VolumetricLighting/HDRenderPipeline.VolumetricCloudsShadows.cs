@@ -30,7 +30,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
         bool HasVolumetricCloudsShadows(HDCamera hdCamera, in VolumetricClouds settings)
         {
-            return (HasVolumetricClouds(hdCamera, in settings)
+            return (!PlanetaryWeather.IsActive(hdCamera) && HasVolumetricClouds(hdCamera, in settings)
                 && GetMainLight() != null
                 && settings.shadows.value);
         }
@@ -43,7 +43,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
         internal bool HasVolumetricCloudsShadows_IgnoreSun(HDCamera hdCamera, in VolumetricClouds settings)
         {
-            return (HasVolumetricClouds(hdCamera, in settings) && settings.shadows.value);
+            return (!PlanetaryWeather.IsActive(hdCamera) && HasVolumetricClouds(hdCamera, in settings) && settings.shadows.value);
         }
 
         internal bool HasVolumetricCloudsShadows_IgnoreSun(HDCamera hdCamera)

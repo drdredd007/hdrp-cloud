@@ -34,6 +34,19 @@ namespace UnityEngine.Rendering.HighDefinition
         /// <summary>Radius of the region, in meters, projected on the world XZ plane.</summary>
         [Tooltip("Radius of the region, in meters, projected on the world XZ plane.")]
         public float radius = 500.0f;
+        [Tooltip("Anchor by latitude/longitude on a planet instead of the flat Transform XZ plane.")]
+        public bool planetary;
+        [Tooltip("Matches the Id of the planet generator. Instances of the same Id share these regions.")]
+        public int planetId=1;
+        [Tooltip("Latitude and longitude in degrees, in the generator's local orientation.")]
+        public Vector2 planetCoordinates;
+        public bool MatchesWeather(PlanetaryWeather weather)
+        {
+            if(weather==null || !weather.IsValid)return !planetary;
+            return planetary && planetId==weather.planetId.value &&
+                !float.IsNaN(planetCoordinates.x) && !float.IsInfinity(planetCoordinates.x) &&
+                !float.IsNaN(planetCoordinates.y) && !float.IsInfinity(planetCoordinates.y) && Mathf.Abs(planetCoordinates.x)<=90;
+        }
 
         /// <summary>Distance, in meters, over which the region blends out into the surrounding cloud coverage.</summary>
         [Tooltip("Distance, in meters, over which the region blends out into the surrounding cloud coverage.")]
@@ -207,7 +220,7 @@ namespace UnityEngine.Rendering.HighDefinition
             Vector3 position = transform.position;
             return new VolumetricCloudsRegionData
             {
-                positionWS = new Vector2(position.x, position.z),
+                positionWS = planetary ? planetCoordinates : new Vector2(position.x, position.z),
                 radius = Mathf.Max(radius, 0.0f),
                 blendDistance = Mathf.Max(blendDistance, 0.0f),
                 coverage = coverage,

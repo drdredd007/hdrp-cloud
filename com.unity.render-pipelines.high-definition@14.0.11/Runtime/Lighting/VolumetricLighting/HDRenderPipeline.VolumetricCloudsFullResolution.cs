@@ -36,6 +36,9 @@ namespace UnityEngine.Rendering.HighDefinition
             // Fill the common data
             FillVolumetricCloudsCommonData(exposureControl, settings, cameraType, in cloudModelData, ref parameters.commonData);
 
+            if(PlanetaryWeather.IsActive(hdCamera)){parameters.commonData.localClouds=true;parameters.commonData.regionsCount=UpdateVolumetricCloudsRegionBuffer(hdCamera.volumeStack.GetComponent<PlanetaryWeather>());
+                parameters.commonData.planetRegions=new VolumetricCloudsRegionData[parameters.commonData.regionsCount];
+                System.Array.Copy(m_VolumetricCloudsRegionData,parameters.commonData.planetRegions,parameters.commonData.regionsCount);}
             // If this is a baked reflection, we run everything at full res
             parameters.finalWidth = width;
             parameters.finalHeight = height;
@@ -71,7 +74,7 @@ namespace UnityEngine.Rendering.HighDefinition
             cameraData.viewCount = parameters.viewCount;
             cameraData.enableExposureControl = parameters.commonData.enableExposureControl;
             cameraData.lowResolution = false;
-            cameraData.enableIntegration = true;
+            cameraData.enableIntegration = !PlanetaryWeather.IsActive(hdCamera);
             UpdateShaderVariableslClouds(ref parameters.commonData.cloudsCB, hdCamera, settings, cameraData, cloudModelData, false);
 
             return parameters;
@@ -82,6 +85,8 @@ namespace UnityEngine.Rendering.HighDefinition
             RTHandle intermediateLightingBuffer0, RTHandle intermediateDepthBuffer0,
             RTHandle intermediateColorBuffer, RTHandle intermediateUpscaleBuffer)
         {
+            if(parameters.commonData.planetRegions!=null && parameters.commonData.planetRegions.Length>0)
+                cmd.SetBufferData(parameters.commonData.regionsBuffer,parameters.commonData.planetRegions);
             // Compute the number of tiles to evaluate
             int finalTX = (parameters.finalWidth + (8 - 1)) / 8;
             int finalTY = (parameters.finalHeight + (8 - 1)) / 8;
@@ -189,7 +194,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
         TextureHandle RenderVolumetricClouds_FullResolution(RenderGraph renderGraph, HDCamera hdCamera, TVolumetricCloudsCameraType cameraType, TextureHandle colorBuffer, TextureHandle depthPyramid, TextureHandle motionVectors, TextureHandle volumetricLighting, TextureHandle maxZMask)
         {
-            using (var builder = renderGraph.AddRenderPass<VolumetricCloudsFullResolutionData>("Generating the rays for RTR", out var passData, ProfilingSampler.Get(HDProfileId.VolumetricClouds)))
+            using (var builder = renderGraph.AddRenderPass<VolumetricCloudsFullResolutionData>("Volumetric clouds full resolution", out var passData, ProfilingSampler.Get(HDProfileId.VolumetricClouds)))
             {
                 builder.EnableAsyncCompute(false);
                 VolumetricClouds settings = hdCamera.volumeStack.GetComponent<VolumetricClouds>();
@@ -197,10 +202,10 @@ namespace UnityEngine.Rendering.HighDefinition
                 passData.parameters = PrepareVolumetricCloudsParameters_FullResolution(hdCamera, hdCamera.actualWidth, hdCamera.actualHeight, hdCamera.viewCount, hdCamera.exposureControlFS, settings, cameraType);
                 passData.colorBuffer = builder.ReadTexture(builder.WriteTexture(colorBuffer));
                 passData.depthPyramid = builder.ReadTexture(depthPyramid);
-                passData.maxZMask = settings.localClouds.value ? renderGraph.defaultResources.blackTextureXR : builder.ReadTexture(maxZMask);
+                passData.maxZMask = passData.parameters.commonData.localClouds || !maxZMask.IsValid() ? renderGraph.defaultResources.blackTextureXR : builder.ReadTexture(maxZMask);
                 passData.ambientProbeBuffer = builder.ReadComputeBuffer(renderGraph.ImportComputeBuffer(m_CloudsDynamicProbeBuffer));
 
-                passData.volumetricLighting = builder.ReadTexture(volumetricLighting);
+                passData.volumetricLighting = volumetricLighting.IsValid()?builder.ReadTexture(volumetricLighting):renderGraph.defaultResources.blackTexture3DXR;
                 passData.scatteringFallbackTexture = renderGraph.defaultResources.blackTexture3DXR;
 
                 passData.intermediateLightingBuffer = builder.CreateTransientTexture(new TextureDesc(Vector2.one, true, true)

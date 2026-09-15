@@ -68,10 +68,15 @@ struct VolumetricCloudsRegionData
 StructuredBuffer<VolumetricCloudsRegionData> _VolumetricCloudsRegions;
 int _VolumetricCloudsRegionCount;
 
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetaryWeather.hlsl"
+float3 CloudPlanetPosition(float3 absolutePosition)
+{
+    return PlanetWeatherActive()?PlanetWeatherPosition(GetCameraRelativePositionWS(absolutePosition)):absolutePosition+float3(0,_EarthRadius,0);
+}
 // Function that interects a ray with a sphere (optimized for very large sphere), returns up to two positives distances.
 int RaySphereIntersection(float3 startWS, float3 dir, float radius, out float2 result)
 {
-    float3 startPS = startWS + float3(0, _EarthRadius, 0);
+    float3 startPS = CloudPlanetPosition(startWS);
     float a = dot(dir, dir);
     float b = 2.0 * dot(dir, startPS);
     float c = dot(startPS, startPS) - (radius * radius);
@@ -101,7 +106,7 @@ int RaySphereIntersection(float3 startWS, float3 dir, float radius, out float2 r
 // Function that interects a ray with a sphere (optimized for very large sphere), and says if there is at least one intersection
 bool RaySphereIntersection(float3 startWS, float3 dir, float radius)
 {
-    float3 startPS = startWS + float3(0, _EarthRadius, 0);
+    float3 startPS = CloudPlanetPosition(startWS);
     float a = dot(dir, dir);
     float b = 2.0 * dot(dir, startPS);
     float c = dot(startPS, startPS) - (radius * radius);
@@ -121,7 +126,7 @@ bool RaySphereIntersection(float3 startWS, float3 dir, float radius)
 // Function that intersects a ray with a plane and returns a flag and the intersection point
 bool IntersectPlane(float3 ray_originWS, float3 ray_dir, float3 pos, float3 normal, out float t)
 {
-    float3 ray_originPS = ray_originWS + float3(0, _EarthRadius, 0);
+    float3 ray_originPS = CloudPlanetPosition(ray_originWS);
     float denom = dot(normal, ray_dir);
     bool flag = false;
     t = -1.0f;
@@ -223,8 +228,9 @@ EnvironmentLighting EvaluateEnvironmentLighting(CloudRay ray, float3 entryEvalua
     lighting.sunDirection = _SunDirection.xyz;
     lighting.sunColor0 = _SunLightColor.xyz * GetCurrentExposureMultiplier();
     lighting.sunColor1 = lighting.sunColor0;
-    lighting.ambientTermTop = SampleSH9(_VolumetricCloudsAmbientProbeBuffer, float3(0, 1, 0)) * GetCurrentExposureMultiplier();
-    float3 bottomLighting = max(SampleSH9(_VolumetricCloudsAmbientProbeBuffer, float3(0, -1, 0)), 0);
+    float3 cloudUp=PlanetWeatherActive()?normalize(CloudPlanetPosition(entryEvaluationPointWS)):float3(0,1,0);
+    lighting.ambientTermTop = SampleSH9(_VolumetricCloudsAmbientProbeBuffer, cloudUp) * GetCurrentExposureMultiplier();
+    float3 bottomLighting = max(SampleSH9(_VolumetricCloudsAmbientProbeBuffer, -cloudUp), 0);
     // Replace only the lower ambient component; the sky probe and upper lighting remain shared and unchanged.
     bottomLighting = lerp(bottomLighting, _CustomBottomLighting.rgb, _CustomBottomLighting.w);
     lighting.ambientTermBottom = bottomLighting * GetCurrentExposureMultiplier();
@@ -483,6 +489,14 @@ void GetCloudCoverageData(float3 positionPS, out CloudCoverageData data)
     float2 normalizedPosition = AnimateCloudMapPosition(positionPS).xz / _NormalizationFactor * _CloudMapTiling.xy + _CloudMapTiling.zw - 0.5;
     // Read the data from the texture
     float4 cloudMapData =  SAMPLE_TEXTURE2D_LOD(_CloudMapTexture, s_linear_repeat_sampler, float2(normalizedPosition), 0);
+    if(PlanetWeatherActive())
+    {
+        float3 weights=pow(abs(normalize(positionPS)),4);weights/=max(dot(weights,1),.0001);
+        float3 mapPosition=AnimateCloudMapPosition(positionPS)/_NormalizationFactor;
+        float4 x=SAMPLE_TEXTURE2D_LOD(_CloudMapTexture,s_linear_repeat_sampler,mapPosition.zy*_CloudMapTiling.xy+_CloudMapTiling.zw-.5,0);
+        float4 z=SAMPLE_TEXTURE2D_LOD(_CloudMapTexture,s_linear_repeat_sampler,mapPosition.xy*_CloudMapTiling.xy+_CloudMapTiling.zw-.5,0);
+        cloudMapData=x*weights.x+cloudMapData*weights.y+z*weights.z;
+    }
     data.coverage = float2(cloudMapData.x, cloudMapData.x * cloudMapData.x);
     data.rainClouds = cloudMapData.y;
     data.cloudType = cloudMapData.z;
@@ -507,7 +521,7 @@ void GetCloudCoverageData(float3 positionPS, out CloudCoverageData data)
     for (int regionIndex = 0; regionIndex < _VolumetricCloudsRegionCount; ++regionIndex)
     {
         VolumetricCloudsRegionData region = _VolumetricCloudsRegions[regionIndex];
-        float distToRegion = distance(regionQueryPositionWS, region.positionWS);
+        float distToRegion = PlanetWeatherActive()?PlanetWeatherRegionDistance(positionPS,region.positionWS):distance(regionQueryPositionWS, region.positionWS);
         float regionWeight = 1.0 - smoothstep(region.radius, region.radius + max(region.blendDistance, 1e-3), distToRegion);
         data.coverage = lerp(data.coverage, float2(region.coverage, region.coverage * region.coverage), regionWeight);
         data.rainClouds = lerp(data.rainClouds, region.rainIntensity, regionWeight);
@@ -533,7 +547,7 @@ void EvaluateCloudProperties(float3 positionWS, float noiseMipOffset, float eros
                             out CloudProperties properties)
 {
     // Convert to planet space
-    float3 positionPS = positionWS + float3(0, _EarthRadius, 0);
+    float3 positionPS = CloudPlanetPosition(positionWS);
 
     // Initliaze all the values to 0 in case
     ZERO_INITIALIZE(CloudProperties, properties);
@@ -542,10 +556,11 @@ void EvaluateCloudProperties(float3 positionWS, float noiseMipOffset, float eros
     properties.ambientOcclusion = 1.0;
 
     // If the next sampling point is not inside the coud volume the density
-    if (!PointInsideCloudVolume(positionPS) || positionPS.y < 0.0f)
+    if (!PointInsideCloudVolume(positionPS) || (!PlanetWeatherActive() && positionPS.y < 0.0f))
         return;
 
     // Compute the normalized position for the three channels
+    if(PlanetWeatherActive())positionPS=mul((float3x3)_PlanetWeatherWorldToLocal,positionPS);
     float3 normalizedPos = positionPS / _NormalizationFactor;
 
     // Evaluate the normalized height of the position within the cloud volume
