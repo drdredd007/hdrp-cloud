@@ -10,6 +10,9 @@ namespace UnityEngine.Rendering.HighDefinition
         public MinFloatParameter radius = new MinFloatParameter(2123666.7f, 1);
         public Vector3Parameter center = new Vector3Parameter(Vector3.zero);
         public Vector3Parameter rotation = new Vector3Parameter(Vector3.zero);
+        [Tooltip("Minimum cloud base above sea level, in metres. The planet adapter includes terrain relief and clearance.")]
+        public MinFloatParameter minimumCloudAltitude = new MinFloatParameter(0, 0);
+        public float CloudBottom(float requested) => IsValid ? Mathf.Max(requested, minimumCloudAltitude.value) : requested;
         public bool IsValid => enabled.value && Finite(radius.value) && radius.value>0 &&
             Finite(center.value.x) && Finite(center.value.y) && Finite(center.value.z) &&
             Finite(rotation.value.x) && Finite(rotation.value.y) && Finite(rotation.value.z);

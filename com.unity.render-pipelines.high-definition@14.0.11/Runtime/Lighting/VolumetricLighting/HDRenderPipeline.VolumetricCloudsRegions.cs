@@ -26,7 +26,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 // The column top follows the region's own cloud base when its altitude override is active,
                 // otherwise the ambient cloud layer's bottom altitude from the Volume.
                 bool altitudeOverrideActive = region.altitudeOverride && region.regionTopAltitude > region.regionBottomAltitude;
-                float top = altitudeOverrideActive ? region.regionBottomAltitude : clouds.bottomAltitude.value;
+                float top = altitudeOverrideActive ? region.regionBottomAltitude : (weather != null ? weather.CloudBottom(clouds.bottomAltitude.value) : clouds.bottomAltitude.value);
                 if (!region.rainFog || strength <= 0 || region.radius <= 0 || top <= region.rainFogBottomAltitude)
                     continue;
 

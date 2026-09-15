@@ -334,6 +334,8 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             // Convert to kilometers
             cb._LowestCloudAltitude = settings.bottomAltitude.value;
+            if (PlanetaryWeather.IsActive(hdCamera))
+                cb._LowestCloudAltitude = hdCamera.volumeStack.GetComponent<PlanetaryWeather>().CloudBottom(cb._LowestCloudAltitude);
 
             // When in non local mode, the camera is supposed to be always stricly under the clouds
             // to avoid artifacts due to precision issues, when in non local, the clouds are always 1 meter above the camera.

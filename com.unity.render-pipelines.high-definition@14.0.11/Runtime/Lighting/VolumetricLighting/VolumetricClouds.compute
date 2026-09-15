@@ -215,6 +215,8 @@ void RenderClouds(uint3 traceCoord : SV_DispatchThreadID, uint2 groupThreadId : 
 
     // Compute the offset that shall be used (if any)
     float offset = _EnableIntegration ? GetBNDSequenceSample(intermediateCoord, _AccumulationFrameIndex, 0) : 0.0;
+    // Full-resolution planetary rendering has no temporal filter: use cell centres, not noisy jitter.
+    if (PlanetWeatherActive()) offset = 0.5;
 
     // Build the ray we will use of the ray marching.
     CloudRay ray = BuildRay(intermediateCoord, offset);
@@ -233,6 +235,7 @@ void RenderClouds(uint3 traceCoord : SV_DispatchThreadID, uint2 groupThreadId : 
     // Compute the cloud depth
     float cloudMinDistance = clamp(minimalDistance, _ProjectionParams.y, _ProjectionParams.z);
     float cloudMinDepth = result.invalidRay ? ray.depthValue : ConvertCloudDepth(ray.direction * cloudMinDistance);
+    if (PlanetWeatherActive()) cloudMinDepth = result.invalidRay ? 0.0 : max(minimalDistance, _ProjectionParams.y);
     _CloudsDepthTextureRW[COORD_TEXTURE2D_X(traceCoord.xy)] = cloudMinDepth;
 #else
     // Output the cloud distance
@@ -805,7 +808,12 @@ void COMBINE_KERNEL(uint3 finalCoord : SV_DispatchThreadID,
 #endif
 
     // Compute the pos input of the cloud position
-    PositionInputs cloudPosInput = GetPositionInput(finalCoord.xy, _FinalScreenSize.zw, cloudsDepth, UNITY_MATRIX_I_VP, GetWorldToViewMatrix(), 0);
+    PositionInputs cloudPosInput = GetPositionInput(finalCoord.xy, _FinalScreenSize.zw, PlanetWeatherActive() ? 0.5 : cloudsDepth, UNITY_MATRIX_I_VP, GetWorldToViewMatrix(), 0);
+    if (PlanetWeatherActive())
+    {
+        cloudPosInput.positionWS = GetCurrentViewPosition() + GetCloudViewDirWS(finalCoord.xy + 0.5) * cloudsDepth;
+        cloudPosInput.deviceDepth = cloudsDepth > 0.0 ? 0.5 : UNITY_RAW_FAR_CLIP_VALUE;
+    }
 
     // Compute the view direction
     float3 viewDir = -normalize(cloudPosInput.positionWS);

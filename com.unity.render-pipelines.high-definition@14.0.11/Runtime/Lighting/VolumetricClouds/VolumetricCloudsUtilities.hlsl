@@ -678,7 +678,7 @@ bool GetCloudVolumeIntersection_Light(float3 originWS, float3 dir, out float tot
 }
 
 // Function that evaluates the luminance at a given cloud position (only the contribution of the sun)
-float3 EvaluateSunLuminance(float3 positionWS, float3 sunDirection, float3 sunColor, float powderEffect, PHASE_FUNCTION_STRUCTURE phaseFunction)
+float3 EvaluateSunLuminance(float3 positionWS, float3 sunDirection, float3 sunColor, float powderEffect, PHASE_FUNCTION_STRUCTURE phaseFunction, float shapeMipOffset)
 {
     // Compute the Ray to the limits of the cloud volume in the direction of the light
     float totalLightDistance = 0.0;
@@ -711,7 +711,7 @@ float3 EvaluateSunLuminance(float3 positionWS, float3 sunDirection, float3 sunCo
             float3 currentSamplePointWS = positionWS + sunDirection * dist;
             // Get the cloud properties at the sample point
             CloudProperties lightRayCloudProperties;
-            EvaluateCloudProperties(currentSamplePointWS, 3.0f * j / _NumLightSteps, 0.0, true, true, lightRayCloudProperties);
+            EvaluateCloudProperties(currentSamplePointWS, max(shapeMipOffset, 3.0f * j / _NumLightSteps), 0.0, true, true, lightRayCloudProperties);
 
             // Normally we would evaluate the transmittance at each step and multiply them
             // but given the fact that exp exp (extinctionA) * exp(extinctionB) = exp(extinctionA + extinctionB)
@@ -739,7 +739,7 @@ float3 EvaluateSunLuminance(float3 positionWS, float3 sunDirection, float3 sunCo
 
 // Evaluates the inscattering from this position
 void EvaluateCloud(CloudProperties cloudProperties, EnvironmentLighting envLighting,
-                float3 currentPositionWS, float stepSize, float relativeRayDistance,
+                float3 currentPositionWS, float stepSize, float relativeRayDistance, float shapeMipOffset,
                 inout VolumetricRayResult volumetricRay)
 {
     // Apply the extinction
@@ -753,7 +753,7 @@ void EvaluateCloud(CloudProperties cloudProperties, EnvironmentLighting envLight
     float3 sunColor = EvaluateSunColor(envLighting, relativeRayDistance);
 
     // Evaluate the sun's luminance
-    float3 totalLuminance = EvaluateSunLuminance(currentPositionWS, envLighting.sunDirection, sunColor, powder_effect, envLighting.phaseFunction);
+    float3 totalLuminance = EvaluateSunLuminance(currentPositionWS, envLighting.sunDirection, sunColor, powder_effect, envLighting.phaseFunction, shapeMipOffset);
 
     // Add the environement lighting contribution
     totalLuminance += lerp(envLighting.ambientTermBottom, envLighting.ambientTermTop, cloudProperties.height) * cloudProperties.ambientOcclusion;
@@ -808,7 +808,15 @@ VolumetricRayResult TraceVolumetricRay(CloudRay cloudRay)
             cloudRay.envLighting = EvaluateEnvironmentLighting(cloudRay, rayMarchStartPos, rayMarchEndPos);
 
             // Evaluate our integration step
-            float stepS = totalDistance / (float)_NumPrimarySteps;
+            int primarySteps = _NumPrimarySteps;
+            if (PlanetWeatherActive())
+            {
+                // A grazing planetary ray is much longer than the layer's vertical thickness.
+                // Do not stretch a handful of samples across hundreds of kilometres.
+                float targetStep = max(1.0, (_HighestCloudAltitude - _LowestCloudAltitude) / 32.0);
+                primarySteps = max(primarySteps, min(512, (int)ceil(totalDistance / targetStep)));
+            }
+            float stepS = totalDistance / (float)primarySteps;
 
             // Tracking the number of steps that have been made
             int currentIndex = 0;
@@ -821,25 +829,37 @@ VolumetricRayResult TraceVolumetricRay(CloudRay cloudRay)
 
             // Current Distance that has been marched
             float currentDistance = 0;
+            if (PlanetWeatherActive())
+            {
+                currentDistance = stepS * cloudRay.integrationNoise;
+                currentPositionWS += cloudRay.direction * currentDistance;
+            }
 
             // Initialize the values for the optimized ray marching
             bool activeSampling = true;
             int sequentialEmptySamples = 0;
 
             // Do the ray march for every step that we can.
-            while (currentIndex < _NumPrimarySteps && currentDistance < totalDistance)
+            while (currentIndex < primarySteps && currentDistance < totalDistance)
             {
                 // Compute the camera-distance based attenuation
                 float densityAttenuationValue = DensityFadeValue(rayMarchRange.start + currentDistance);
                 // Compute the mip offset for the erosion texture
                 float erosionMipOffset = ErosionMipOffset(rayMarchRange.start + currentDistance);
+                float shapeMipOffset = 0.0;
+                if (PlanetWeatherActive())
+                {
+                    // Filter noise finer than a pixel at orbital distances (no temporal upscaler here).
+                    float footprint = (rayMarchRange.start + currentDistance) * 2.0 / max(1.0, _FinalScreenSize.y * abs(UNITY_MATRIX_P._m11));
+                    shapeMipOffset = clamp(log2(max(1.0, footprint * _ShapeScale * 128.0 / NOISE_TEXTURE_NORMALIZATION_FACTOR)), 0.0, 7.0);
+                }
 
                 // Should we be evaluating the clouds or just doing the large ray marching
                 if (activeSampling)
                 {
                     // If the density is null, we can skip as there will be no contribution
                     CloudProperties cloudProperties;
-                    EvaluateCloudProperties(currentPositionWS, 0.0f, erosionMipOffset, false, false, cloudProperties);
+                    EvaluateCloudProperties(currentPositionWS, shapeMipOffset, erosionMipOffset, false, false, cloudProperties);
 
                     // Apply the fade in function to the density
                     cloudProperties.density *= densityAttenuationValue;
@@ -852,7 +872,7 @@ VolumetricRayResult TraceVolumetricRay(CloudRay cloudRay)
                         meanDistanceDivider += transmitanceXdensity;
 
                         // Evaluate the cloud at the position
-                        EvaluateCloud(cloudProperties, cloudRay.envLighting, currentPositionWS, stepS, currentDistance / totalDistance, volumetricRay);
+                        EvaluateCloud(cloudProperties, cloudRay.envLighting, currentPositionWS, stepS, currentDistance / totalDistance, shapeMipOffset, volumetricRay);
 
                         // if most of the energy is absorbed, just leave.
                         if (volumetricRay.transmittance < 0.003)
@@ -872,7 +892,7 @@ VolumetricRayResult TraceVolumetricRay(CloudRay cloudRay)
                         activeSampling = false;
 
                     // Do the next step
-                    float relativeStepSize = lerp(cloudRay.integrationNoise, 1.0, saturate(currentIndex));
+                    float relativeStepSize = PlanetWeatherActive() ? 1.0 : lerp(cloudRay.integrationNoise, 1.0, saturate(currentIndex));
                     currentPositionWS += cloudRay.direction * stepS * relativeStepSize;
                     currentDistance += stepS * relativeStepSize;
                 }
@@ -880,7 +900,7 @@ VolumetricRayResult TraceVolumetricRay(CloudRay cloudRay)
                 {
                     // Sample the cheap version of the clouds
                     CloudProperties cloudProperties;
-                    EvaluateCloudProperties(currentPositionWS, 1.0f, 0.0, true, false, cloudProperties);
+                    EvaluateCloudProperties(currentPositionWS, max(1.0, shapeMipOffset), 0.0, true, false, cloudProperties);
 
                     // Apply the fade in function to the density
                     cloudProperties.density *= densityAttenuationValue;
