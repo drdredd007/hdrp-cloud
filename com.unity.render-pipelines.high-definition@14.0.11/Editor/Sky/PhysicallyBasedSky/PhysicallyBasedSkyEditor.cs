@@ -92,6 +92,7 @@ namespace UnityEditor.Rendering.HighDefinition
 
         public override void OnInspectorGUI()
         {
+            showAdditionalProperties = true;
             DrawHeader("Model");
 
             using (var scope = new OverridablePropertyScope(m_Type, m_ModelTypeLabel, this))

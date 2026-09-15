@@ -50,6 +50,9 @@ namespace UnityEngine.Rendering.HighDefinition
     // camera's resolved sky really describes the planet before planet layers sample its tables.
     public static class PlanetAtmosphere
     {
+        sealed class AppliedSettings { public bool Initialized; public PlanetAtmosphereSettings Value; }
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PhysicallyBasedSky, AppliedSettings> appliedSettings
+            = new System.Runtime.CompilerServices.ConditionalWeakTable<PhysicallyBasedSky, AppliedSettings>();
         // Float placement tolerance: HDRP stores the planet centre as a float3 in Unity world space.
         const float RelativeTolerance=2e-6f, AbsoluteTolerance=16;
 
@@ -58,12 +61,16 @@ namespace UnityEngine.Rendering.HighDefinition
             in PlanetDefinition definition,Quaternion planetRotation,Vector3 centerWorld)
         {
             if(environment==null || sky==null)throw new ArgumentNullException(environment==null?nameof(environment):nameof(sky));
-            environment.skyType.Override((int)SkyType.PhysicallyBased);
-            sky.type.Override(PhysicallyBasedSkyModel.Custom);
-            sky.sphericalMode.Override(true);
             sky.planetaryRadius.Override((float)definition.Radius);
             sky.planetCenterPosition.Override(centerWorld);
             sky.planetRotation.Override(planetRotation.eulerAngles);
+            // Keep spatial placement live, but do not overwrite profile edits every frame.
+            var applied = appliedSettings.GetValue(sky, _ => new AppliedSettings());
+            if(applied.Initialized && applied.Value.Equals(settings)) return;
+            applied.Initialized = true; applied.Value = settings;
+            environment.skyType.Override((int)SkyType.PhysicallyBased);
+            sky.type.Override(PhysicallyBasedSkyModel.Custom);
+            sky.sphericalMode.Override(true);
             sky.airDensityR.Override(math.saturate(settings.AirOpacity.r));
             sky.airDensityG.Override(math.saturate(settings.AirOpacity.g));
             sky.airDensityB.Override(math.saturate(settings.AirOpacity.b));

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -8,137 +9,112 @@ namespace UnityEditor.Rendering.HighDefinition
     public sealed class RuntimeVolumeWindow : EditorWindow
     {
         [SerializeField] Camera selectedCamera;
-        [SerializeField] VolumeProfile savedProfile;
-        [SerializeField] bool showSources;
-        Vector2 scroll, sourceScroll;
-        RuntimeVolumeSession session;
+        [SerializeField] Volume selectedVolume;
         Editor profileEditor;
+        VolumeProfile editedProfile;
+        readonly Dictionary<Object, HideFlags> originalFlags = new Dictionary<Object, HideFlags>();
+        Vector2 scroll;
         double nextRepaint;
 
         [MenuItem("Tools/Coordinates/Live Volume Inspector")]
         public static void Open() => GetWindow<RuntimeVolumeWindow>("Live Volumes");
-
         void OnEnable()
         {
             minSize = new Vector2(420, 350);
-            session = new RuntimeVolumeSession();
-            HDCamera.volumeStackUpdated += OnVolumeStackUpdated;
-            EditorApplication.playModeStateChanged += OnPlayModeChanged;
             EditorApplication.update += Tick;
+            EditorApplication.playModeStateChanged += PlayModeChanged;
         }
         void OnDisable()
         {
-            HDCamera.volumeStackUpdated -= OnVolumeStackUpdated;
-            EditorApplication.playModeStateChanged -= OnPlayModeChanged;
             EditorApplication.update -= Tick;
-            Clear();
+            EditorApplication.playModeStateChanged -= PlayModeChanged;
+            ClearEditor();
         }
-        void OnPlayModeChanged(PlayModeStateChange state)
+        void PlayModeChanged(PlayModeStateChange state)
         {
-            if (state == PlayModeStateChange.ExitingPlayMode || state == PlayModeStateChange.EnteredEditMode) Clear();
-            Repaint();
+            if(state == PlayModeStateChange.ExitingPlayMode) ClearEditor();
         }
-        void Clear()
+        void ClearEditor()
         {
-            if (profileEditor) DestroyImmediate(profileEditor);
-            profileEditor = null;
-            session?.Dispose();
+            if(profileEditor) DestroyImmediate(profileEditor);
+            profileEditor = null; editedProfile = null;
+            foreach(var pair in originalFlags) if(pair.Key) pair.Key.hideFlags = pair.Value;
+            originalFlags.Clear();
+        }
+        void MakeEditable(Object target)
+        {
+            if(!target || EditorUtility.IsPersistent(target)) return;
+            if(!originalFlags.ContainsKey(target)) originalFlags.Add(target, target.hideFlags);
+            target.hideFlags &= ~HideFlags.NotEditable;
         }
         void Tick()
         {
-            if (EditorApplication.timeSinceStartup < nextRepaint) return;
+            if(EditorApplication.timeSinceStartup < nextRepaint) return;
             nextRepaint = EditorApplication.timeSinceStartup + .15;
-            if (session?.Profile && !session.Camera) Clear();
-            if (EditorApplication.isPlaying && !selectedCamera)
-                selectedCamera = Camera.main ? Camera.main : Camera.allCameras.FirstOrDefault(c => c.cameraType == CameraType.Game);
+            if(!selectedCamera) selectedCamera = Camera.main ? Camera.main : Camera.allCameras.FirstOrDefault(c => c.cameraType == CameraType.Game);
             Repaint();
         }
-        void OnVolumeStackUpdated(HDCamera camera)
+        public static VolumeProfile UsedProfile(Volume volume) => volume && volume.HasInstantiatedProfile() ? volume.profile : volume ? volume.sharedProfile : null;
+        static bool AffectsCamera(Volume volume, Transform anchor)
         {
-            if (!EditorApplication.isPlaying || camera.camera != selectedCamera) return;
-            if (!session.Profile) session.Capture(selectedCamera, camera.volumeStack);
-            session.Apply(camera.camera, camera.volumeStack);
+            if(volume.isGlobal) return true;
+            if(!anchor) return false;
+            foreach(var collider in volume.GetComponents<Collider>())
+                if(collider.enabled && (collider.ClosestPoint(anchor.position)-anchor.position).sqrMagnitude <= volume.blendDistance*volume.blendDistance)
+                    return true;
+            return false;
         }
         void OnGUI()
         {
-            using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
+            selectedCamera = (Camera)EditorGUILayout.ObjectField("Camera", selectedCamera, typeof(Camera), true);
+            if(!selectedCamera) { EditorGUILayout.HelpBox("Select a camera to see its Volume profiles.",MessageType.Info); return; }
+            var hd = HDCamera.GetOrCreate(selectedCamera);
+            var volumes = VolumeManager.instance.GetVolumes(hd.volumeLayerMask)
+                .Where(v => v && v.isActiveAndEnabled && v.weight > 0 && UsedProfile(v) && AffectsCamera(v, hd.volumeAnchor)).Reverse().ToArray();
+            if(volumes.Length == 0) { ClearEditor(); EditorGUILayout.HelpBox("No active Volume profiles in this camera's Volume mask.", MessageType.Info); return; }
+            int index = System.Array.IndexOf(volumes, selectedVolume);
+            if(index < 0) index = 0;
+            var labels = volumes.Select(v => $"{v.name} / {UsedProfile(v).name} (priority {v.priority:g})").ToArray();
+            index = EditorGUILayout.Popup("Volume / Profile", index, labels);
+            selectedVolume = volumes[index];
+            var profile = UsedProfile(selectedVolume);
+            if(profile != editedProfile)
             {
-                var next = (Camera)EditorGUILayout.ObjectField(selectedCamera, typeof(Camera), true);
-                if (GUILayout.Button("Game camera", EditorStyles.toolbarButton, GUILayout.Width(90)))
-                    next = Camera.main ? Camera.main : Camera.allCameras.FirstOrDefault(c => c.cameraType == CameraType.Game);
-                if (next != selectedCamera) { Clear(); selectedCamera = next; }
+                ClearEditor(); editedProfile = profile;
+                MakeEditable(profile);
+                foreach(var component in profile.components) MakeEditable(component);
+                profileEditor = Editor.CreateEditor(profile);
             }
-            if (!EditorApplication.isPlaying)
+            // Add Override can create new components during the session.
+            foreach(var component in profile.components) MakeEditable(component);
+            using(new EditorGUILayout.HorizontalScope())
             {
-                EditorGUILayout.HelpBox("Enter Play Mode and select a camera. Live edits are temporary; save a profile before leaving Play Mode to keep them.", MessageType.Info);
-                return;
+                EditorGUILayout.ObjectField("Profile", profile, typeof(VolumeProfile), false);
+                if(GUILayout.Button("Select", GUILayout.Width(55))) Selection.activeObject = profile;
+                if(GUILayout.Button("Save copy…", GUILayout.Width(95))) SaveCopy(profile);
             }
-            if (!selectedCamera || !session.Profile)
-            {
-                EditorGUILayout.HelpBox("Select a rendering HDRP camera. Waiting for its resolved Volume settings…", MessageType.Info);
-                return;
-            }
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                session.Preview = EditorGUILayout.ToggleLeft("Preview edits", session.Preview, GUILayout.Width(110));
-                if (GUILayout.Button("Reset overrides"))
-                {
-                    Undo.RecordObjects(session.Profile.components.ToArray(), "Reset live volume overrides");
-                    session.Reset();
-                }
-                if (GUILayout.Button("Save profile…")) Save();
-            }
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                savedProfile = (VolumeProfile)EditorGUILayout.ObjectField("Saved profile", savedProfile, typeof(VolumeProfile), false);
-                using (new EditorGUI.DisabledScope(!savedProfile))
-                    if (GUILayout.Button("Load", GUILayout.Width(55)))
-                    {
-                        Undo.RecordObjects(session.Profile.components.ToArray(), "Load live volume overrides");
-                        session.Import(savedProfile);
-                        if (profileEditor) DestroyImmediate(profileEditor);
-                    }
-            }
-            EditorGUILayout.HelpBox("Values follow this camera live. Tick a parameter's override checkbox to edit it. Preview affects only this camera; closing the window restores normal Volume blending. Save exports only your overrides.", MessageType.None);
-            showSources = EditorGUILayout.Foldout(showSources, "Source volumes and priorities", true);
-            if (showSources) DrawSources();
+            EditorGUILayout.LabelField($"Weight {selectedVolume.weight:g} · {(selectedVolume.isGlobal ? "Global" : "Local (distance blend)")}", EditorStyles.miniLabel);
+            EditorGUILayout.HelpBox(EditorUtility.IsPersistent(profile)
+                ? "Editing the actual profile asset. Changes are saved normally, including in Play Mode. Higher-priority profiles can override its values."
+                : "Editing the actual runtime profile. Changes remain for this Play session; Save copy keeps a reusable asset.", MessageType.None);
             scroll = EditorGUILayout.BeginScrollView(scroll);
-            if (!profileEditor) profileEditor = Editor.CreateEditor(session.Profile);
             profileEditor.OnInspectorGUI();
             EditorGUILayout.EndScrollView();
         }
-        void DrawSources()
+        void SaveCopy(VolumeProfile source)
         {
-            var camera = HDCamera.GetOrCreate(selectedCamera);
-            sourceScroll = EditorGUILayout.BeginScrollView(sourceScroll, GUILayout.MaxHeight(180));
-            EditorGUILayout.LabelField("Candidates in the camera Volume mask; local influence also depends on distance.", EditorStyles.wordWrappedMiniLabel);
-            foreach (var volume in VolumeManager.instance.GetVolumes(camera.volumeLayerMask).Reverse())
+            string path = EditorUtility.SaveFilePanelInProject("Save VolumeProfile copy", "WeatherProfile", "asset", "Save the full profile with its current overrides.");
+            if(string.IsNullOrEmpty(path)) return;
+            var result = CreateInstance<VolumeProfile>();
+            foreach(var component in source.components)
             {
-                if (!volume) continue;
-                if (!volume.HasInstantiatedProfile() && !volume.sharedProfile) continue;
-                using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
-                {
-                    EditorGUILayout.ObjectField(volume, typeof(Volume), true);
-                    var profile = volume.HasInstantiatedProfile() ? volume.profile : volume.sharedProfile;
-                    EditorGUILayout.ObjectField(profile, typeof(VolumeProfile), false);
-                    EditorGUILayout.LabelField($"Priority {volume.priority:g} · Weight {volume.weight:g} · {(volume.isGlobal ? "Global" : "Local")} · {(volume.isActiveAndEnabled ? "Enabled" : "Disabled")}", EditorStyles.miniLabel);
-                }
+                if(!component) continue;
+                var copy = Instantiate(component); copy.hideFlags = HideFlags.None; copy.name = component.GetType().Name;
+                result.components.Add(copy);
             }
-            EditorGUILayout.EndScrollView();
-        }
-        void Save()
-        {
-            string path = EditorUtility.SaveFilePanelInProject("Save live volume overrides", "LiveWeather", "asset", "Save the checked overrides as a reusable VolumeProfile.");
-            if (string.IsNullOrEmpty(path)) return;
-            // Never replace an existing shared profile implicitly.
-            path = AssetDatabase.GenerateUniqueAssetPath(path);
-            var result = session.Export();
-            AssetDatabase.CreateAsset(result, path);
-            foreach (var component in result.components) AssetDatabase.AddObjectToAsset(component, result);
-            EditorUtility.SetDirty(result);
-            AssetDatabase.SaveAssets();
-            savedProfile = result;
-            EditorGUIUtility.PingObject(result);
+            AssetDatabase.CreateAsset(result, AssetDatabase.GenerateUniqueAssetPath(path));
+            foreach(var component in result.components) AssetDatabase.AddObjectToAsset(component,result);
+            EditorUtility.SetDirty(result); AssetDatabase.SaveAssets(); EditorGUIUtility.PingObject(result);
         }
     }
 }
