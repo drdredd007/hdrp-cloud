@@ -22,6 +22,9 @@ namespace UnityEngine.Rendering.HighDefinition
     [DebuggerDisplay("({camera.name})")]
     public class HDCamera
     {
+        /// <summary>Called after volume blending and before camera settings consume the stack.
+        /// Subscribers may apply camera-scoped preview overrides; changes are reset by the next blend.</summary>
+        public static event Action<HDCamera> volumeStackUpdated;
         #region Public API
         /// <summary>
         /// Structure containing all shader view related constants for this camera.
@@ -1848,6 +1851,7 @@ namespace UnityEngine.Rendering.HighDefinition
             using (new ProfilingScope(null, ProfilingSampler.Get(HDProfileId.VolumeUpdate)))
             {
                 VolumeManager.instance.Update(volumeStack, volumeAnchor, volumeLayerMask);
+                volumeStackUpdated?.Invoke(this);
             }
 
             // Update info about current target mid gray
