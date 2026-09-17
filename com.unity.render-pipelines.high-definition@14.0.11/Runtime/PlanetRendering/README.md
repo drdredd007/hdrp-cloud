@@ -1,11 +1,11 @@
-# Procedural planet orbital prototype
+# Procedural planet rendering prototype
 
 This optional HDRP assembly owns procedural cube-sphere geometry and far-layer rendering.
 It has no references to SpaceRunner, ECS physics or the application's coordinate graph.
 An application adapter supplies a PlanetDefinition, camera position in the same double
 reference frame, orientation, light direction, and one observer Camera.
 
-Add PlanetFarPass to a global CustomPassVolume at BeforeTransparent. Assign both shaders
+Add PlanetFarPass to a global CustomPassVolume at AfterOpaqueAndSky. Assign both shaders
 through serialized references so the Player build includes them; the patch compute shader
 is included through Resources. Compute shader support is required. Supported initial path:
 one perspective camera, D3D11, no XR, no dynamic resolution, no TAA. The application must
@@ -64,11 +64,11 @@ Memory scales with the active camera target size; buffers are replaced on resize
 released with the pass. Approximate target payload is 20 bytes per pixel, excluding driver
 alignment. Each patch has 1,221 vertices and 2,304 triangles including skirts.
 
-This is an orbital renderer, not a landing surface. It stops below 10 km; the example
-application limits orbital camera navigation to 50 km. Surface colliders, near handoff,
-terrain streaming, transparent far objects, temporal history and SSR/SSGI/DOF are not
-implemented. Do not use this target as a replacement for the main HDRP depth.
-
+With EnableLocalSurface, the near layer supports surface views while retaining the far
+horizon. Without it, the legacy orbital cutoff remains. The application owns colliders,
+readiness and safe descent. Production terrain streaming, transparent far objects and
+temporal history remain incomplete. The metric depth is consumed by planetary fog and
+clouds, but does not replace main HDRP depth for SSR/SSGI/DOF.
 ## Atmosphere
 
 The atmosphere is stock HDRP PhysicallyBasedSky (Custom model, spherical mode), which already
@@ -93,13 +93,11 @@ tolerance); otherwise layers are unchanged. With a match:
 HDRP change: PhysicallyBasedSkyRenderer.PrecomputationData.BindGlobalBuffers (an empty stub in
 14.0.11) now publishes the ground irradiance and in-scattered radiance tables globally.
 
-Limits: PBR fog on regular opaque geometry stays disabled in HDRP 14, so ships, stations and
-other HDRP scene geometry receive no aerial perspective yet. Volumetric clouds are composited
-before BeforeTransparent and are covered by the planet layer. The sky's analytic sea-level
-sphere remains behind the planet and is visible only where patch chords/skirts do not cover it
-or where the planet layer is not drawn. Float placement is ~0.5 m at 4,000 km and ~64 m at
-10^9 m from the Unity origin. The generator preview has no sky volume and shows no atmosphere.
-
+Regular opaque geometry and cloud samples receive PhysicallyBasedSky aerial perspective.
+Planet metric pixels avoid applying it twice. The planet is drawn at AfterOpaqueAndSky,
+before fog and clouds; these effects consume its metric distance. The analytic sea-level
+sphere remains behind terrain. The isolated generator preview has no sky volume.
+Float placement remains limited by camera-relative float precision.
 PlanetDefinition.GeneratorVersion currently accepts only version 1. Different seeds or
 radius/relief values rebuild geometry; center/orientation changes reuse meshes. The test
 application carries CPU boundary/normal/precision tests and GPU capture fixtures.
@@ -133,8 +131,8 @@ Neighbouring patches share grid inputs. Positions, normals, colors and outward t
 can feed a near renderer or an application's static mesh collider. Resolution is a power
 of two from 2 to 128; patch coordinates are conservatively bounded to 8192 metres. The
 returned object owns persistent native arrays and must be disposed. Vertex generation
-uses Burst, but Build currently completes synchronously. This is not yet a near/far
-handoff or asynchronous terrain streamer; the orbital camera restrictions still apply.
+uses Burst, but the CPU Build completes synchronously. Rendering uses GPU buffers instead. This is not an asynchronous
+terrain streamer; the application must manage collider readiness.
 
 ## Optional near layer
 
@@ -145,9 +143,38 @@ publishes complete sets.
 Recentering retains the old set until replacement is ready. Above 30 km, near resources
 are released. An extra RGBAFloat/depth target costs about 20 bytes per pixel. Near pixels
 replace the coarse far approximation, then their metric ray distance is compared against
-HDRP scene depth. Local terrain does not yet write into main HDRP depth for SSR/fog/DOF.
+HDRP scene depth. Local terrain does not write into main HDRP depth for SSR/DOF. Planetary fog consumes the separate metric depth.
 
-This optional layer has logical lifecycle tests and a Player build, but no new image
-acceptance or performance measurement. It is not collider readiness or a production
+The application has lifecycle tests and GPU weather capture fixtures. These are not a target-resolution performance measurement. It is not collider readiness or a production
 streamer. The application must handle safe descent separately; existing orbital callers
 keep the old behavior unless they explicitly enable the layer.
+
+## Planetary weather and profile editing — 17 September 2026
+
+PlanetaryWeather enables spherical Volumetric Clouds, radial Fog and regional Rain Fog.
+The application supplies camera-relative placement, radius and identity. Cloud floor is
+clamped by MinimumCloudAltitude; ordinary cloud altitude/range controls remain usable.
+Planetary clouds currently trace at full resolution without temporal reconstruction,
+with up to 512 steps. Flat cloud shadow cookies and flat sky cloud baking are disabled.
+Rain Fog is limited by the volumetric buffer range; spherical region handles remain pending.
+
+Procedural Coverage (default on) uses a 512-square-per-face coverage cubemap. Seed,
+Coverage, Coverage Contrast, System Scale, Open Sky, Climate Bands, Storm Count,
+Storm Scale and Storm Strength are Volume parameters. Scales are in metres. Disabling
+it selects the previous triplanar map path. The cube plus six-layer staging texture use
+approximately 12 MiB before driver overhead; no mip chain is generated. Cache resources
+are shared by the pipeline; independent multi-camera planet maps need validation.
+The application currently does not propagate PlanetDefinition.Seed into weather Seed.
+Rain Fog voxelization does not directly sample the new cube; matching its holes needs
+separate verification.
+
+Tools > Coordinates > Live Volume Inspector edits actual contributing Volume profiles,
+with native Add Override, presets, override flags and Undo. Asset edits persist;
+Save copy exports runtime profiles. PlanetAtmosphere.Configure preserves appearance edits
+unless source settings change, while spatial placement keeps updating.
+
+All implementations are on main. The new global coverage implementation is a3c3239.
+The application's saved 155 EditMode / 7 GPU PlayMode successes predate that commit;
+they must not be reported as coverage-map validation. D3D11 GPU checks require
+-batchmode -force-d3d11, without -nographics. Target-resolution FPS and production
+distant-cloud rendering remain open.
