@@ -135,6 +135,7 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._ErosionNoise, passData.commonData.erosionNoise);
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudMapTexture, passData.commonData.cloudMapTexture);
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudLutTexture, passData.commonData.cloudLutTexture);
+            BindPlanetCloudMap(cmd, in passData.commonData, passData.renderKernel);
             cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsAmbientProbeBuffer, passData.ambientProbeBuffer);
             cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsRegions, passData.commonData.regionsBuffer);
             cmd.SetComputeIntParam(passData.commonData.volumetricCloudsCS, HDShaderIDs._VolumetricCloudsRegionCount, passData.commonData.regionsCount);
@@ -257,6 +258,7 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._ErosionNoise, passData.commonData.erosionNoise);
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudMapTexture, passData.commonData.cloudMapTexture);
             cmd.SetComputeTextureParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._CloudLutTexture, passData.commonData.cloudLutTexture);
+            BindPlanetCloudMap(cmd, in passData.commonData, passData.renderKernel);
             cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsAmbientProbeBuffer, passData.ambientProbeBuffer);
             cmd.SetComputeBufferParam(passData.commonData.volumetricCloudsCS, passData.renderKernel, HDShaderIDs._VolumetricCloudsRegions, passData.commonData.regionsBuffer);
             cmd.SetComputeIntParam(passData.commonData.volumetricCloudsCS, HDShaderIDs._VolumetricCloudsRegionCount, passData.commonData.regionsCount);

@@ -1,4 +1,5 @@
 #pragma kernel EvaluateCloudMap
+#pragma kernel EvaluatePlanetCloudMap
 
 #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
 
@@ -10,6 +11,21 @@ CBUFFER_START(UnityCloudMapGenerator)
     float _CumulonimbusMapMultiplier;
     float _AltostratusMapMultiplier;
 CBUFFER_END
+
+CBUFFER_START(UnityPlanetCloudMapGenerator)
+    int _PlanetCloudMapResolution;
+    float _PlanetCloudMapSeed;
+    float _PlanetCloudMapFrequency;
+    float _PlanetCloudCoverage;
+    float _PlanetCloudContrast;
+    float _PlanetCloudOpenSky;
+    float _PlanetCloudBands;
+    int _PlanetStormCount;
+    float _PlanetStormRadius;
+    float _PlanetStormStrength;
+CBUFFER_END
+
+RWTexture2DArray<float4> _PlanetCloudMapRW;
 
 SamplerState linear_repeat_sampler;
 Texture2D<float> _CumulusMap;
@@ -122,4 +138,136 @@ void EvaluateCloudMap(uint2 currentCoord : SV_DispatchThreadID)
     }
 
     _CloudMapTextureRW[currentCoord] = float4(cloudCoverage, cloudRain, cloudType, cloudMaxHeight);
+}
+
+// Planetary coverage bake.
+// A flat cloud map cannot describe a whole planet: Simple mode is a single constant texel and an authored map
+// repeats, so the visible structure comes only from the tiling shape noise. Coverage is baked instead into a
+// cube map addressed by the surface direction, which has neither a pole nor a longitude seam.
+
+float3 PlanetCoverageHash(float3 p)
+{
+    p = float3(dot(p, float3(127.1, 311.7, 74.7)), dot(p, float3(269.5, 183.3, 246.1)), dot(p, float3(113.5, 271.9, 124.6)));
+    return frac(sin(p) * 43758.5453123) * 2.0 - 1.0;
+}
+
+float PlanetCoverageNoise(float3 position)
+{
+    float3 cell = floor(position), offset = position - cell;
+    float3 weight = offset * offset * (3.0 - 2.0 * offset);
+    float result = 0.0;
+    [unroll] for (int corner = 0; corner < 8; ++corner)
+    {
+        float3 corner3 = float3(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
+        float3 gradient = PlanetCoverageHash(cell + corner3 + _PlanetCloudMapSeed);
+        float3 blend = lerp(1.0 - weight, weight, corner3);
+        result += blend.x * blend.y * blend.z * dot(gradient, offset - corner3);
+    }
+    return result;
+}
+
+float PlanetCoverageFbm(float3 position, int octaves)
+{
+    float sum = 0.0, amplitude = 0.5, normalization = 0.0;
+    for (int octave = 0; octave < octaves; ++octave)
+    {
+        sum += amplitude * PlanetCoverageNoise(position);
+        normalization += amplitude;
+        // Lacunarity slightly off two keeps successive octaves from sharing the same lattice planes.
+        position *= 2.03;
+        amplitude *= 0.5;
+    }
+    return sum / max(normalization, 1e-5);
+}
+
+// Cyclonic systems. The large field above decides where weather gathers, but it has no rotation in it, and a
+// spiral of that size is the feature that reads as a planet with weather rather than as scattered cloud.
+// The result is signed: arms make cloud more likely, the lanes between them and the eye less. Adding coverage
+// only would be invisible inside an already solid sheet and would show up as a painted swirl everywhere else.
+float PlanetStormBias(float3 direction, float warp)
+{
+    float result = 0.0;
+    for (int index = 0; index < _PlanetStormCount; ++index)
+    {
+        float2 noise = frac(sin(float2(index * 12.9898 + _PlanetCloudMapSeed, index * 78.233 + _PlanetCloudMapSeed * 1.37)) * 43758.5453);
+        // Cyclones form in the middle latitudes, alternating hemispheres so a low count still covers both.
+        float hemisphere = (index & 1) ? 1.0 : -1.0;
+        float latitude = radians(lerp(22.0, 58.0, noise.y)) * hemisphere;
+        float longitude = noise.x * TWO_PI;
+        float3 centre = float3(cos(latitude) * cos(longitude), sin(latitude), cos(latitude) * sin(longitude));
+
+        float angle = acos(clamp(dot(direction, centre), -1.0, 1.0));
+        // The same noise that shapes the surrounding weather also distorts the spiral, so its arms break up
+        // instead of reading as drawn geometry.
+        float radial = angle / max(_PlanetStormRadius, 1e-4) * (1.0 + warp * 0.28);
+        if (radial >= 1.0)
+            continue;
+
+        // A tangent frame at the centre gives the bearing the arms wind around.
+        float3 east = normalize(cross(abs(centre.y) > 0.99 ? float3(1, 0, 0) : float3(0, 1, 0), centre));
+        float3 north = cross(centre, east);
+        float bearing = atan2(dot(direction, north), dot(direction, east)) + warp * 0.7;
+        // Logarithmic arms, turning the other way in the other hemisphere.
+        float arms = cos(2.0 * (bearing * hemisphere + 1.6 * log(max(radial, 0.04))));
+        float profile = 1.0 - smoothstep(0.30, 1.0, radial);
+        float eye = smoothstep(0.02, 0.10, radial);
+        result += profile * (eye * arms - (1.0 - eye)) * (0.6 + 0.4 * (warp * 0.5 + 0.5));
+    }
+    return clamp(result, -1.0, 1.0) * _PlanetStormStrength;
+}
+
+float3 PlanetCubeDirection(uint face, float2 uv)
+{
+    float u = uv.x * 2.0 - 1.0, v = uv.y * 2.0 - 1.0;
+    float3 direction;
+    if (face == 0) direction = float3(1.0, -v, -u);
+    else if (face == 1) direction = float3(-1.0, -v, u);
+    else if (face == 2) direction = float3(u, 1.0, v);
+    else if (face == 3) direction = float3(u, -1.0, -v);
+    else if (face == 4) direction = float3(u, -v, 1.0);
+    else direction = float3(-u, -v, -1.0);
+    return normalize(direction);
+}
+
+[numthreads(8, 8, 1)]
+void EvaluatePlanetCloudMap(uint3 currentCoord : SV_DispatchThreadID)
+{
+    if (any(currentCoord.xy >= (uint2)_PlanetCloudMapResolution) || currentCoord.z >= 6)
+        return;
+
+    float3 direction = PlanetCubeDirection(currentCoord.z, (currentCoord.xy + 0.5f) / _PlanetCloudMapResolution);
+    float3 position = direction * _PlanetCloudMapFrequency;
+
+    // Warping the domain turns round noise blobs into the drawn-out filaments and hooks of a real cloud field.
+    float3 warp = float3(PlanetCoverageFbm(position + 5.2, 3), PlanetCoverageFbm(position + 13.7, 3), PlanetCoverageFbm(position + 27.3, 3));
+    float field = PlanetCoverageFbm(position + warp * 0.6, 6) * 0.5 + 0.5;
+
+    // A much larger field decides where the planet is mostly open sky and where systems gather. Without it the
+    // coverage is statistically the same everywhere, which is what makes a uniform sky read as a repeating tile.
+    float province = PlanetCoverageFbm(direction * max(_PlanetCloudMapFrequency * 0.35, 0.35) + 41.3, 3) * 0.5 + 0.5;
+
+    // Latitude bands, against the planet rotation: a convective belt at the equator, dry subtropics near 28
+    // degrees and a stormy belt near 55. This is the pattern that makes a planet read as a climate rather than
+    // as evenly scattered weather; it is a shape, not a circulation model.
+    float latitude = degrees(asin(clamp(direction.y, -1.0, 1.0)));
+    float distanceToEquator = abs(latitude);
+    float bands = 1.0
+        + 0.60 * exp(-Sq(distanceToEquator / 12.0))
+        - 0.55 * exp(-Sq((distanceToEquator - 28.0) / 13.0))
+        + 0.35 * exp(-Sq((distanceToEquator - 55.0) / 16.0));
+    float coverageHere = saturate(_PlanetCloudCoverage * lerp(1.0, bands, _PlanetCloudBands));
+
+    // A storm shifts how easily cloud forms around it rather than being stamped over the field. Drawn on top it
+    // reads as a painted swirl; as a bias it keeps the ragged edges of the same warped noise as its surroundings.
+    float storm = PlanetStormBias(direction, PlanetCoverageFbm(position * 1.7 + 71.9, 3));
+
+    float threshold = 1.0 - coverageHere - (province - 0.5) * _PlanetCloudOpenSky * 0.8 - storm * 0.55;
+    float width = lerp(0.40, 0.05, _PlanetCloudContrast);
+    float coverage = smoothstep(threshold - width, threshold + width, field);
+
+    // Rain stays zero: in this channel it only raises the extinction, which traces the storm geometry as a grey
+    // stain instead of reading as weather. Rain at the surface remains the separate authored regions. Cloud type
+    // keeps the value the flat preset produced, because the Simple control mode resolves it against a
+    // single-column table and varying it would have no effect there.
+    _PlanetCloudMapRW[currentCoord] = float4(coverage, 0.0, 0.25, 1.0);
 }

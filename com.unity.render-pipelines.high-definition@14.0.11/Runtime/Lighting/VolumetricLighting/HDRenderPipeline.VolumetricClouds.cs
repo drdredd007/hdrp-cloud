@@ -103,6 +103,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Initialize the additional sub components
             InitializeVolumetricCloudsMap();
+            InitializeVolumetricCloudsPlanetMap();
             InitializeVolumetricCloudsShadows();
             InitializeVolumetricCloudsAmbientProbe();
             InitializeVolumetricCloudsRegions();
@@ -118,6 +119,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Release the additional sub components
             ReleaseVolumetricCloudsMap();
+            ReleaseVolumetricCloudsPlanetMap();
             ReleaseVolumetricCloudsShadows();
             ReleaseVolumetricCloudsAmbientProbe();
             ReleaseVolumetricCloudsRegions();
@@ -525,6 +527,10 @@ namespace UnityEngine.Rendering.HighDefinition
             public Texture3D erosionNoise;
             public Texture cloudMapTexture;
             public Texture cloudLutTexture;
+            // Planet coverage, bound for every kernel: a compute shader rejects a declared texture that only
+            // exists as a global, so this cannot ride on the global placement bindings.
+            public Texture planetCloudMap;
+            public int planetCloudMapActive;
             public BlueNoise.DitheredTextureSet ditheredTextureSet;
             public Light sunLight;
 
@@ -575,6 +581,9 @@ namespace UnityEngine.Rendering.HighDefinition
                 commonData.cloudMapTexture = settings.cloudMap.value != null ? settings.cloudMap.value : Texture2D.blackTexture;
                 commonData.cloudLutTexture = settings.cloudLut.value != null ? settings.cloudLut.value : Texture2D.blackTexture;
             }
+
+            commonData.planetCloudMap = m_PlanetCloudMap != null ? (Texture)m_PlanetCloudMap : CoreUtils.blackCubeTexture;
+            commonData.planetCloudMapActive = m_PlanetCloudMapActive ? 1 : 0;
 
             commonData.worley128RGBA = m_Asset.renderPipelineResources.textures.worleyNoise128RGBA;
             commonData.erosionNoise = ErosionNoiseTypeToTexture(cloudModelData.erosionNoise);
@@ -682,6 +691,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Evaluate the cloud map
             PreRenderVolumetricCloudMap(renderGraph, hdCamera, in settings);
+            PreRenderVolumetricCloudsPlanetMap(renderGraph, hdCamera);
         }
     }
 }

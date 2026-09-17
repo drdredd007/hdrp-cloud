@@ -110,6 +110,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 cmd.SetComputeTextureParam(parameters.commonData.volumetricCloudsCS, parameters.renderKernel, HDShaderIDs._ErosionNoise, parameters.commonData.erosionNoise);
                 cmd.SetComputeTextureParam(parameters.commonData.volumetricCloudsCS, parameters.renderKernel, HDShaderIDs._CloudMapTexture, parameters.commonData.cloudMapTexture);
                 cmd.SetComputeTextureParam(parameters.commonData.volumetricCloudsCS, parameters.renderKernel, HDShaderIDs._CloudLutTexture, parameters.commonData.cloudLutTexture);
+                BindPlanetCloudMap(cmd, in parameters.commonData, parameters.renderKernel);
                 cmd.SetComputeBufferParam(parameters.commonData.volumetricCloudsCS, parameters.renderKernel, HDShaderIDs._VolumetricCloudsAmbientProbeBuffer, ambientProbeBuffer);
                 cmd.SetComputeBufferParam(parameters.commonData.volumetricCloudsCS, parameters.renderKernel, HDShaderIDs._VolumetricCloudsRegions, parameters.commonData.regionsBuffer);
                 cmd.SetComputeIntParam(parameters.commonData.volumetricCloudsCS, HDShaderIDs._VolumetricCloudsRegionCount, parameters.commonData.regionsCount);

@@ -69,6 +69,16 @@ StructuredBuffer<VolumetricCloudsRegionData> _VolumetricCloudsRegions;
 int _VolumetricCloudsRegionCount;
 
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetaryWeather.hlsl"
+// Cloud coverage baked for the whole planet, addressed by the direction from its centre in local orientation.
+// A flat cloud map has no planetary structure: Simple mode is one constant texel and an authored map repeats.
+// Declared here and not with the shared placement, so that shaders without cloud kernels do not have to bind it.
+TEXTURECUBE(_PlanetCloudMap);
+int _PlanetCloudMapActive;
+bool PlanetCloudMapActive() { return PlanetWeatherActive() && _PlanetCloudMapActive != 0; }
+float4 SamplePlanetCloudMap(float3 localDirection)
+{
+    return SAMPLE_TEXTURECUBE_LOD(_PlanetCloudMap, s_linear_clamp_sampler, localDirection, 0);
+}
 float3 CloudPlanetPosition(float3 absolutePosition)
 {
     return PlanetWeatherActive()?PlanetWeatherPosition(GetCameraRelativePositionWS(absolutePosition)):absolutePosition+float3(0,_EarthRadius,0);
@@ -455,13 +465,34 @@ float3 AnimateCloudMapPosition(float3 positionPS)
     return positionPS + float3(_WindVector.x, 0.0, _WindVector.y) * _LargeWindSpeed;
 }
 
+// Two fixed directions in the planet basis, away from the axes of the noise lattice, that give the shear below
+// a pair of smooth coordinates across the sphere without a pole or a seam.
+#define PLANET_SHAPE_SHEAR_A float3(0.8085, 0.3582, -0.4677)
+#define PLANET_SHAPE_SHEAR_B float3(-0.3164, 0.8746, 0.3684)
+
 // Animation of the cloud shape position
 float3 AnimateBaseNoisePosition(float3 positionPS)
 {
+    float3 windOffset = float3(_WindVector.x, 0.0, _WindVector.y) * _MediumWindSpeed;
+    if (PlanetWeatherActive())
+    {
+        // The stock shear below hides the repetition of the noise lattice by making the sampled slice depend on
+        // where you are, but it shears along the world vertical. On a planet the vertical is radial, so the
+        // shear stops separating neighbouring tiles away from the local equator and the lattice reads as a grid
+        // over the globe. Shearing along the local up restores the effect everywhere.
+        float3 up = normalize(positionPS);
+        float shear = dot(positionPS, PLANET_SHAPE_SHEAR_A) / 3.0f + dot(positionPS, PLANET_SHAPE_SHEAR_B) / 7.0f;
+        // Planet-scale coordinates leave little float precision for metre-scale detail, so the shear is folded
+        // into a single tile. The noise repeats exactly over that period, so the sampled value is unchanged.
+        float period = NOISE_TEXTURE_NORMALIZATION_FACTOR / max(_ShapeScale, 1e-3f);
+        positionPS += up * (shear - period * round(shear / period));
+        // Wind displaces the clouds along the surface, and its vertical part along the local up.
+        return positionPS + windOffset - up * dot(windOffset, up) + up * _VerticalShapeWindDisplacement;
+    }
     // We reduce the top-view repetition of the pattern
     positionPS.y += (positionPS.x / 3.0f + positionPS.z / 7.0f);
     // We add the contribution of the wind displacements
-    return positionPS + float3(_WindVector.x, 0.0, _WindVector.y) * _MediumWindSpeed + float3(0.0, _VerticalShapeWindDisplacement, 0.0);
+    return positionPS + windOffset + float3(0.0, _VerticalShapeWindDisplacement, 0.0);
 }
 
 // Animation of the cloud erosion position
@@ -489,7 +520,13 @@ void GetCloudCoverageData(float3 positionPS, out CloudCoverageData data)
     float2 normalizedPosition = AnimateCloudMapPosition(positionPS).xz / _NormalizationFactor * _CloudMapTiling.xy + _CloudMapTiling.zw - 0.5;
     // Read the data from the texture
     float4 cloudMapData =  SAMPLE_TEXTURE2D_LOD(_CloudMapTexture, s_linear_repeat_sampler, float2(normalizedPosition), 0);
-    if(PlanetWeatherActive())
+    if(PlanetCloudMapActive())
+    {
+        // The wind displacement is metres in the planet basis; normalising it back onto the sphere turns it
+        // into the matching tangential drift of the coverage field.
+        cloudMapData=SamplePlanetCloudMap(normalize(AnimateCloudMapPosition(positionPS)));
+    }
+    else if(PlanetWeatherActive())
     {
         float3 weights=pow(abs(normalize(positionPS)),4);weights/=max(dot(weights,1),.0001);
         float3 mapPosition=AnimateCloudMapPosition(positionPS)/_NormalizationFactor;

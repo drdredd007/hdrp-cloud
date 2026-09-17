@@ -106,6 +106,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 // Input textures
                 cmd.SetComputeTextureParam(parameters.commonData.volumetricCloudsCS, parameters.shadowsKernel, HDShaderIDs._CloudMapTexture, parameters.commonData.cloudMapTexture);
                 cmd.SetComputeTextureParam(parameters.commonData.volumetricCloudsCS, parameters.shadowsKernel, HDShaderIDs._CloudLutTexture, parameters.commonData.cloudLutTexture);
+                BindPlanetCloudMap(cmd, in parameters.commonData, parameters.shadowsKernel);
                 cmd.SetComputeTextureParam(parameters.commonData.volumetricCloudsCS, parameters.shadowsKernel, HDShaderIDs._Worley128RGBA, parameters.commonData.worley128RGBA);
                 cmd.SetComputeTextureParam(parameters.commonData.volumetricCloudsCS, parameters.shadowsKernel, HDShaderIDs._ErosionNoise, parameters.commonData.erosionNoise);
                 cmd.SetComputeBufferParam(parameters.commonData.volumetricCloudsCS, parameters.shadowsKernel, HDShaderIDs._VolumetricCloudsRegions, parameters.commonData.regionsBuffer);
