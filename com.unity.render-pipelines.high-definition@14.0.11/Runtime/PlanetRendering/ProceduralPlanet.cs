@@ -7,6 +7,8 @@ using Unity.Mathematics;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
+    public enum PlanetTerrainStyle { EarthLike=1, Rocky=2 }
+
     [Serializable]
     public struct PlanetDefinition
     {
@@ -16,7 +18,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public double3 Center;
         public static PlanetDefinition Prototype => new PlanetDefinition
         {Id=1,Seed=7243,GeneratorVersion=1,Radius=6371000.0/3,Relief=6000};
-        public bool IsValid => Id>0 && GeneratorVersion==1 && Radius>0 && Relief>=0 && Relief<Radius*.1 &&
+        public bool IsValid => Id>0 && (GeneratorVersion==1 || GeneratorVersion==2) && Radius>0 && Relief>=0 && Relief<Radius*.1 &&
             math.isfinite(Radius) && math.isfinite(Relief) && math.all(math.isfinite(Center));
     }
     // Stable face/quadtree address: the same address and height field will be used by surface LOD.
@@ -77,6 +79,12 @@ namespace UnityEngine.Rendering.HighDefinition
             float3 p=(float3)direction;
             float3 shift=new float3(definition.Seed%101,definition.Seed%79,definition.Seed%67)*.137f;
             float continents=noise.snoise(p*2.7f+shift);
+            if(definition.GeneratorVersion==2)
+            {
+                float ridges=1-math.abs(noise.snoise(p*23+shift));
+                float rocky=.35f+.3f*continents+.2f*ridges+.08f*noise.snoise(p*91-shift);
+                return math.clamp(rocky,0,1)*definition.Relief;
+            }
             float detail=.24f*noise.snoise(p*11+shift)+.07f*noise.snoise(p*39-shift);
             return math.clamp((continents+detail-.08f)*definition.Relief,-definition.Relief,definition.Relief);
         }
@@ -94,6 +102,11 @@ namespace UnityEngine.Rendering.HighDefinition
         public static float4 Color(PlanetDefinition definition,double3 direction)
         {
             double height=Height(definition,direction);
+            if(definition.GeneratorVersion==2)
+            {
+                float shade=math.saturate((float)(height/math.max(1,definition.Relief)));
+                return new float4(math.lerp(new float3(.09f,.085f,.08f),new float3(.32f,.30f,.27f),shade),1);
+            }
             float polar=math.saturate(((float)math.abs(direction.y)-.9f)*15);
             float3 color;
             if(height<=0)color=math.lerp(new float3(.009f,.032f,.075f),new float3(.02f,.12f,.16f),math.saturate(1+(float)(height/math.max(1,definition.Relief))*3));

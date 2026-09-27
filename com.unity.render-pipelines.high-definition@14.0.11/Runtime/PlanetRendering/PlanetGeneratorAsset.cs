@@ -9,6 +9,7 @@ namespace UnityEngine.Rendering.HighDefinition
         [HideInInspector] public int PlanetId=1;
         [Header("Surface")]
         public int Seed=7243;
+        public PlanetTerrainStyle TerrainStyle=PlanetTerrainStyle.EarthLike;
         public double Radius=6371000.0/3;
         public double Relief=6000;
         public Vector3 Orientation=new Vector3(0,0,35);
@@ -19,7 +20,7 @@ namespace UnityEngine.Rendering.HighDefinition
         [Tooltip("Patches generated per rendered frame (GPU dispatches).")][Range(1,128)] public int PatchesPerFrame=32;
         [Header("Atmosphere")]
         public PlanetAtmosphereSettings Atmosphere=PlanetAtmosphereSettings.EarthLike;
-        public PlanetDefinition Definition => new PlanetDefinition {Id=PlanetId,Seed=Seed,GeneratorVersion=1,Radius=Radius,Relief=Relief};
+        public PlanetDefinition Definition => new PlanetDefinition {Id=PlanetId,Seed=Seed,GeneratorVersion=(int)TerrainStyle,Radius=Radius,Relief=Relief};
         public PlanetLodSettings Lod => new PlanetLodSettings {MaximumLevel=MaximumLevel,PatchBudget=PatchBudget,PixelError=PixelError,PatchesPerFrame=PatchesPerFrame};
     }
     public struct PlanetLodSettings : IEquatable<PlanetLodSettings>

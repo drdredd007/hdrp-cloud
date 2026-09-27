@@ -28,12 +28,34 @@ Shader "SpaceRunner/Planet Far Surface"
             float _PlanetAtmosphere;
             // 1 to light with HDRP directional lights when the camera has any; otherwise the explicit light below.
             float _PlanetUseSceneLights;
+            float3 _DetailOrigin;
+            float4x4 _DetailRotation;
+            // Coordinates remain planet-local across camera moves, patch rebases and planet rotation.
+            float DetailHash(float3 p)
+            {
+                p=p-floor(p/256.0)*256.0;
+                p=frac(p*0.1031);p+=dot(p,p.yzx+33.33);
+                return frac((p.x+p.y)*p.z);
+            }
+            float DetailNoise(float3 p)
+            {
+                float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);
+                return lerp(lerp(lerp(DetailHash(i),DetailHash(i+float3(1,0,0)),f.x),
+                    lerp(DetailHash(i+float3(0,1,0)),DetailHash(i+float3(1,1,0)),f.x),f.y),
+                    lerp(lerp(DetailHash(i+float3(0,0,1)),DetailHash(i+float3(1,0,1)),f.x),
+                    lerp(DetailHash(i+float3(0,1,1)),DetailHash(i+float3(1,1,1)),f.x),f.y),f.z);
+            }
+            float FilteredDetail(float3 p)
+            {
+                float footprint=max(length(ddx(p)),length(ddy(p)));
+                return lerp(DetailNoise(p),0.5,smoothstep(0.3,1.0,footprint));
+            }
             // Diagnostics (PlanetFarPass.DebugView): 1 tints skirt vertices (index >= _PlanetMainVertexCount).
             float _PlanetDebugView;
             int _PlanetMainVertexCount;
             // Far layout only: edges (bit 0 v=0, 1 u=1, 2 v=1, 3 u=0) adjacent to a one-level-coarser patch.
             int _PlanetStitchMask;
-            struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;float skirt:TEXCOORD2;};
+            struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;float skirt:TEXCOORD2;float3 detail:TEXCOORD3;};
             PlanetVertex PlanetFetch(uint id){return _PlanetVertices[(uint)_PlanetBaseVertex+id];}
             // T-junction removal: an odd vertex on a stitched edge (and its skirt vertex) moves to the midpoint of its
             // even neighbours, which coincide with the coarser patch's edge vertices, so both sides share one edge line.
@@ -70,13 +92,21 @@ Shader "SpaceRunner/Planet Far Surface"
                 PlanetVertex input=PlanetStitchedVertex(vertexID);
                 PlanetVaryings o;
                 o.relative=mul((float3x3)_PlanetRotation,input.position)+_PatchOffset;
+                o.detail=mul((float3x3)_DetailRotation,input.position*_LayerToMeters)+_DetailOrigin;
                 o.position=mul(_FarViewProjection,float4(o.relative,1));
                 o.normal=mul((float3x3)_PlanetRotation,input.normal);o.color=input.color;o.skirt=vertexID>=(uint)_PlanetMainVertexCount?1:0;return o;
             }
             float4 PlanetFrag(PlanetVaryings input):SV_Target
             {
                 float3 normal=normalize(input.normal);
-                float3 brdf=input.color.rgb*INV_PI;
+                float3 radialUp=normalize(input.relative*_LayerToMeters-_PlanetCenterRelative);
+                float slope=1.0-saturate(dot(normal,radialUp));
+                float broad=FilteredDetail(input.detail/16.0);
+                float fine=FilteredDetail(input.detail);
+                float3 albedo=input.color.rgb*(0.78+0.30*broad+0.14*fine);
+                // Exposed slopes are slightly lighter rock. Material detail never displaces collision geometry.
+                albedo=lerp(albedo,albedo*1.18,smoothstep(0.04,0.35,slope));
+                float3 brdf=albedo*INV_PI;
                 float3 radiance=0;
                 if(_PlanetUseSceneLights>0 && _DirectionalLightCount>0)
                 {
@@ -103,7 +133,7 @@ Shader "SpaceRunner/Planet Far Surface"
                 else
                 {
                     float sun=saturate(dot(normal,normalize(_PlanetLightDirection)));
-                    radiance=input.color.rgb*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb+0.001);
+                    radiance=albedo*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb+0.001);
                 }
                 if(_PlanetDebugView>0 && input.skirt>0)radiance=float3(1,0,1)*_PlanetLightLux;
                 return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);

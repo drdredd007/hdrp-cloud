@@ -121,6 +121,7 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeFloatParam(generator,"_PlanetSeedDryness",definition.Seed*.01f);
             cmd.SetComputeFloatParam(generator,"_PlanetRadius",(float)definition.Radius);
             cmd.SetComputeFloatParam(generator,"_PlanetRelief",(float)definition.Relief);
+            cmd.SetComputeIntParam(generator,"_PlanetGeneratorVersion",definition.GeneratorVersion);
             cmd.SetComputeIntParam(generator,"_PlanetResolution",Resolution);
             cmd.SetComputeIntParam(generator,"_PlanetBaseVertex",slot*SlotVertexCount);
             cmd.SetComputeIntParam(generator,"_PlanetVertexCount",SlotVertexCount);

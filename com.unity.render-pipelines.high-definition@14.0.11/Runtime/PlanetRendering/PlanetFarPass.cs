@@ -106,9 +106,12 @@ namespace UnityEngine.Rendering.HighDefinition
             properties.SetFloat("_LayerToMeters",1000);
             properties.SetMatrix("_FarViewProjection",projection*view);
             properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
+            properties.SetMatrix("_DetailRotation",Matrix4x4.identity);
             for(int i=0;i<geometry.Active.Count;i++)
             {
                 var key=geometry.Active[i];
+                var detailOrigin=PlanetSurfaceCache.Pivot(Definition,key);
+                properties.SetVector("_DetailOrigin",(Vector3)(float3)(detailOrigin-math.floor(detailOrigin/4096)*4096));
                 var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(q,PlanetSurfaceCache.Pivot(Definition,key)));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
                 properties.SetInteger("_PlanetBaseVertex",geometry.Slot(key)*farPatches.SlotVertexCount);
@@ -127,6 +130,8 @@ namespace UnityEngine.Rendering.HighDefinition
                 // Unity-convention depth (clear 1, ZTest LEqual): Unity reverses both for reversed-Z platforms itself.
                 ctx.cmd.ClearRenderTarget(true,true,Color.clear,1);
                 var frame=nearGeometry.Frame;
+                properties.SetMatrix("_DetailRotation",Matrix4x4.Rotate((Quaternion)new quaternion((float4)frame.Rotation)));
+                properties.SetVector("_DetailOrigin",(Vector3)(float3)(frame.Position-math.floor(frame.Position/4096)*4096));
                 var relative=(Definition.Center-CameraPosition)+PlanetField.Rotate(q,frame.Position);
                 var localRotation=PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation);
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));

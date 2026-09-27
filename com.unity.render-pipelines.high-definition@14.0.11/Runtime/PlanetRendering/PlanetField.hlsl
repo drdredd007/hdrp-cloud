@@ -9,6 +9,7 @@
 float3 _PlanetSeedShift;
 float _PlanetSeedDryness;
 float _PlanetRadius, _PlanetRelief;
+int _PlanetGeneratorVersion;
 
 struct PlanetVertex
 {
@@ -73,6 +74,12 @@ float PlanetHeight(float3 direction)
 {
     float3 shift = _PlanetSeedShift;
     float continents = PlanetSimplex(direction * 2.7 + shift);
+    if (_PlanetGeneratorVersion == 2)
+    {
+        float ridges = 1.0 - abs(PlanetSimplex(direction * 23.0 + shift));
+        float rocky = 0.35 + 0.3 * continents + 0.2 * ridges + 0.08 * PlanetSimplex(direction * 91.0 - shift);
+        return saturate(rocky) * _PlanetRelief;
+    }
     float detail = 0.24 * PlanetSimplex(direction * 11.0 + shift) + 0.07 * PlanetSimplex(direction * 39.0 - shift);
     return clamp((continents + detail - 0.08) * _PlanetRelief, -_PlanetRelief, _PlanetRelief);
 }
@@ -99,6 +106,8 @@ float3 PlanetNormal(float3 direction)
 float4 PlanetColor(float3 direction)
 {
     float height = PlanetHeight(direction);
+    if (_PlanetGeneratorVersion == 2)
+        return float4(lerp(float3(0.09,0.085,0.08),float3(0.32,0.30,0.27),saturate(height/max(1.0,_PlanetRelief))),1.0);
     float polar = saturate((abs(direction.y) - 0.9) * 15.0);
     float3 color;
     if (height <= 0.0)
