@@ -24,6 +24,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public Color LightColor=Color.white;
         public float LightLux=50000;
         public bool Enabled=true;
+        [NonSerialized] public PlanetFarPass OccludingPass;
+        bool renderedThisFrame,renderedNear;
         // Aerial perspective and sun transmittance from HDRP's PhysicallyBasedSky, applied only while the
         // camera's resolved sky describes this planet (the application configures it, see PlanetAtmosphere).
         public bool EnableAtmosphere=true;
@@ -66,6 +68,7 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         protected override void Execute(CustomPassContext ctx)
         {
+            renderedThisFrame=false;renderedNear=false;
             if(!EnableLocalSurface){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(ctx.hdCamera.camera==Observer)AtmosphereActive=false;
             if(!Enabled || ctx.hdCamera.camera!=Observer || !Definition.IsValid || (Altitude<10000 && !EnableLocalSurface) || Observer.orthographic)return;
@@ -142,10 +145,19 @@ namespace UnityEngine.Rendering.HighDefinition
             composite.SetTexture("_PlanetFarBuffer",farBuffer);
             composite.SetFloat("_PlanetHasNear",hasNear?1:0);
             composite.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
+            bool occluded=OccludingPass!=null&&OccludingPass.renderedThisFrame&&OccludingPass.Observer==Observer;
+            composite.SetFloat("_PlanetHasOccluder",occluded?1:0);
+            if(occluded)
+            {
+                composite.SetTexture("_PlanetOccluderFar",OccludingPass.farBuffer);
+                composite.SetTexture("_PlanetOccluderNear",OccludingPass.renderedNear?OccludingPass.nearBuffer:OccludingPass.farBuffer);
+                composite.SetFloat("_PlanetOccluderHasNear",OccludingPass.renderedNear?1:0);
+            }
             if(hasNear)composite.SetTexture("_PlanetNearBuffer",nearBuffer);
             CoreUtils.SetRenderTarget(ctx.cmd,ctx.cameraColorBuffer);
             ctx.cmd.SetViewport(new Rect(0,0,width,height));
             CoreUtils.DrawFullScreen(ctx.cmd,composite);
+            renderedThisFrame=true;renderedNear=hasNear;
             // Published after this camera's layers, consumed by opaque fog and cloud tracing.
             ctx.cmd.SetGlobalTexture("_PlanetWeatherFarDistance",farBuffer);
             ctx.cmd.SetGlobalTexture("_PlanetWeatherNearDistance",hasNear?nearBuffer:farBuffer);

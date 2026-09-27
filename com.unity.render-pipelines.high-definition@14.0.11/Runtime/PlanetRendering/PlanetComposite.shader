@@ -15,6 +15,9 @@ Shader "SpaceRunner/Planet Composite"
             TEXTURE2D(_PlanetFarBuffer);
             TEXTURE2D(_PlanetNearBuffer);
             float _PlanetHasNear;
+            TEXTURE2D(_PlanetOccluderFar);
+            TEXTURE2D(_PlanetOccluderNear);
+            float _PlanetHasOccluder,_PlanetOccluderHasNear;
             float _PlanetDebugView;
             // 1 when HDRP's resolved PhysicallyBasedSky describes this planet (see PlanetAtmosphere.Matches).
             float _PlanetAtmosphere;
@@ -51,6 +54,13 @@ Shader "SpaceRunner/Planet Composite"
                     if(local.a>0){far=local;if(_PlanetDebugView>0)far.rgb*=float3(1,.25,.25);}
                 }
                 if(far.a<=0)return _PlanetDebugView>0?float4(0,1,0,1):0;
+                if(_PlanetHasOccluder>0)
+                {
+                    float other=LOAD_TEXTURE2D(_PlanetOccluderFar,uint2(input.positionCS.xy)).a;
+                    if(_PlanetOccluderHasNear>0)
+                    {float localOther=LOAD_TEXTURE2D(_PlanetOccluderNear,uint2(input.positionCS.xy)).a;if(localOther>0)other=localOther;}
+                    if(other>0&&other<far.a)return 0;
+                }
                 float depth=LoadCameraDepth(input.positionCS.xy);
                 if(depth!=UNITY_RAW_FAR_CLIP_VALUE)
                 {
