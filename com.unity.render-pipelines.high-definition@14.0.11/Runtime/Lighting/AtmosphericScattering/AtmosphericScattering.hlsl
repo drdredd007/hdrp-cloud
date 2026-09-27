@@ -40,6 +40,45 @@ float3 GetFogColor(float3 V, float fragDist)
     return color;
 }
 
+// Integrate nearby geometry directly instead of subtracting two almost equal sky LUT samples.
+// This finite segment contains only air in front of the opaque endpoint.
+void EvaluateNearbyAtmosphere(float3 O, float3 V, float start, float end,
+                              out float3 color, out float3 opacity)
+{
+    color = opacity = 0;
+    float stepLength = max(0, end - start) * 0.25;
+    float cameraRadius = length(O);
+    float3 transmission = 1;
+    [unroll] for (int sampleIndex = 0; sampleIndex < 4; sampleIndex++)
+    {
+        float3 delta = -V * (start + (sampleIndex + 0.5) * stepLength);
+        float3 samplePosition = O + delta;
+        float radius = length(samplePosition);
+        // Difference of radii without subtracting planet-sized positions.
+        float height = max(0, (cameraRadius - _PlanetaryRadius) +
+            (2 * dot(O, delta) + dot(delta, delta)) / max(radius + cameraRadius, 1));
+        float3 extinction = AtmosphereExtinction(height);
+        float3 tau = extinction * stepLength;
+        float3 absorbed = 1 - exp(-tau);
+        // Preserve the small nonzero signal for centimetre/metre segments.
+        absorbed = lerp(absorbed, tau * (1 - tau * 0.5), step(tau, 0.001));
+        float3 source = 0;
+        for (uint lightIndex = 0; lightIndex < _DirectionalLightCount; lightIndex++)
+        {
+            DirectionalLightData light = _DirectionalLightDatas[lightIndex];
+            if (asint(light.distanceFromCamera) < 0) continue;
+            float3 L = -light.forward.xyz;
+            float phaseCos = dot(L, V);
+            source += light.color.rgb * EvaluateSunColorAttenuation(dot(samplePosition / max(radius, 1), L),
+                max(radius, _PlanetaryRadius + 0.01)) *
+                (AirScatter(height) * AirPhase(phaseCos) + AerosolScatter(height) * AerosolPhase(phaseCos));
+        }
+        color += transmission * source * absorbed / extinction;
+        opacity += transmission * absorbed;
+        transmission *= 1 - absorbed;
+    }
+}
+
 // All units in meters!
 // Assumes that there is NO sky occlusion along the ray AT ALL.
 // We evaluate atmospheric scattering for the sky and other celestial bodies
@@ -62,6 +101,10 @@ void EvaluatePbrAtmosphere(float3 worldSpaceCameraPos, float3 V, float distAlong
     float3 N; float r; // These params correspond to the entry point
     float  tEntry = IntersectAtmosphere(O, V, N, r).x;
     float  tExit  = IntersectAtmosphere(O, V, N, r).y;
+    // A sky ray can hit the atmosphere behind an opaque object. That atmosphere
+    // must contribute neither extinction nor light to the camera-object segment.
+    if (tEntry < 0 || tFrag <= tEntry || tFrag == 0) return;
+
 
     float NdotV  = dot(N, V);
     float cosChi = -NdotV;
@@ -78,6 +121,12 @@ void EvaluatePbrAtmosphere(float3 worldSpaceCameraPos, float3 V, float distAlong
 
     if (rayIntersectsAtmosphere)
     {
+        float nearbyWeight = 1 - smoothstep(128.0, 256.0, tFrag);
+        float3 nearbyColor = 0, nearbyOpacity = 0;
+        if (nearbyWeight > 0)
+            EvaluateNearbyAtmosphere(O, V, tEntry, min(tFrag, tExit), nearbyColor, nearbyOpacity);
+        if (nearbyWeight < 1)
+        {
         float2 Z = R * n;
         float r0 = r, cosChi0 = cosChi;
 
@@ -228,6 +277,10 @@ void EvaluatePbrAtmosphere(float3 worldSpaceCameraPos, float3 V, float distAlong
 
             skyColor += radiance;
         }
+
+        }
+        skyColor = lerp(skyColor, nearbyColor, nearbyWeight);
+        skyOpacity = lerp(skyOpacity, nearbyOpacity, nearbyWeight);
 
         skyColor   = Desaturate(skyColor,   _ColorSaturation);
         skyOpacity = Desaturate(skyOpacity, _AlphaSaturation) * _AlphaMultiplier;
