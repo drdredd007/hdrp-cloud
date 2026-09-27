@@ -15,6 +15,9 @@ Shader "SpaceRunner/Planet Composite"
             TEXTURE2D(_PlanetFarBuffer);
             TEXTURE2D(_PlanetNearBuffer);
             float _PlanetHasNear;
+            TEXTURE2D(_PlanetAccumulatedDepth);
+            float _PlanetHasAccumulatedDepth;
+            float _PlanetLayerWeight;
             TEXTURE2D(_PlanetOccluderFar);
             TEXTURE2D(_PlanetOccluderNear);
             float _PlanetHasOccluder,_PlanetOccluderHasNear;
@@ -54,6 +57,11 @@ Shader "SpaceRunner/Planet Composite"
                     if(local.a>0){far=local;if(_PlanetDebugView>0)far.rgb*=float3(1,.25,.25);}
                 }
                 if(far.a<=0)return _PlanetDebugView>0?float4(0,1,0,1):0;
+                if(_PlanetHasAccumulatedDepth>0)
+                {
+                    float previous=LOAD_TEXTURE2D(_PlanetAccumulatedDepth,uint2(input.positionCS.xy)).a;
+                    if(previous>0 && previous<far.a)return 0;
+                }
                 if(_PlanetHasOccluder>0)
                 {
                     float other=LOAD_TEXTURE2D(_PlanetOccluderFar,uint2(input.positionCS.xy)).a;
@@ -70,7 +78,28 @@ Shader "SpaceRunner/Planet Composite"
                 }
                 float3 color=far.rgb;
                 if(_PlanetAtmosphere>0 && _PlanetDebugView<=0)color=ApplyAtmosphere(color,input.positionCS.xy,far.a);
-                return float4(color,1);
+                return float4(color,_PlanetHasAccumulatedDepth>0?_PlanetLayerWeight:1);
+            }
+            ENDHLSL
+        }
+        Pass
+        {
+            ZWrite Off ZTest Always Cull Off
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma vertex Vert
+            #pragma fragment MergeDepth
+            #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
+            TEXTURE2D(_PlanetFarBuffer);TEXTURE2D(_PlanetNearBuffer);TEXTURE2D(_PlanetAccumulatedDepth);
+            float _PlanetHasNear;
+            float4 MergeDepth(Varyings input):SV_Target
+            {
+                uint2 pixel=uint2(input.positionCS.xy);
+                float distance=LOAD_TEXTURE2D(_PlanetFarBuffer,pixel).a;
+                if(_PlanetHasNear>0){float n=LOAD_TEXTURE2D(_PlanetNearBuffer,pixel).a;if(n>0)distance=n;}
+                float previous=LOAD_TEXTURE2D(_PlanetAccumulatedDepth,pixel).a;
+                if(previous>0 && (distance<=0 || previous<distance))distance=previous;
+                return float4(0,0,0,distance);
             }
             ENDHLSL
         }

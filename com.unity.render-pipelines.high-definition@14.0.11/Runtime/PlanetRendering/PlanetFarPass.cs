@@ -26,6 +26,9 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool Enabled=true;
         [NonSerialized] public PlanetFarPass OccludingPass;
         bool renderedThisFrame,renderedNear;
+        [NonSerialized] public PlanetLayerDepth LayerDepth;
+        public float LayerWeight=1;
+        public void ReleaseResources()=>Cleanup();
         // Aerial perspective and sun transmittance from HDRP's PhysicallyBasedSky, applied only while the
         // camera's resolved sky describes this planet (the application configures it, see PlanetAtmosphere).
         public bool EnableAtmosphere=true;
@@ -90,7 +93,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 {name="Planet far color + ray distance in metres",filterMode=FilterMode.Point};farBuffer.Create();
             }
             // The scaled layer uses its own projection/depth. Its alpha stores unscaled ray distance.
-            var projection=GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.001f,30000),true);
+            var projection=GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.001f,Mathf.Max(30000,(float)((math.length(Definition.Center-CameraPosition)+Definition.Radius+Definition.Relief)*PlanetField.FarScale*1.1))),true);
             var view=Matrix4x4.Scale(new Vector3(1,1,-1))*Matrix4x4.Rotate(Quaternion.Inverse(Observer.transform.rotation));
             surface.SetMatrix("_FarViewProjection",projection*view);surface.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
             surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor);surface.SetFloat("_PlanetLightLux",LightLux);
@@ -147,6 +150,9 @@ namespace UnityEngine.Rendering.HighDefinition
                     ctx.cmd.DrawProcedural(nearPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,nearPatches.PatchIndexCount,1,properties);
                 }
             }
+            composite.SetFloat("_PlanetHasAccumulatedDepth",LayerDepth!=null?1:0);
+            composite.SetFloat("_PlanetLayerWeight",LayerWeight);
+            if(LayerDepth!=null)composite.SetTexture("_PlanetAccumulatedDepth",LayerDepth.Current);
             composite.SetTexture("_PlanetFarBuffer",farBuffer);
             composite.SetFloat("_PlanetHasNear",hasNear?1:0);
             composite.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
@@ -163,6 +169,7 @@ namespace UnityEngine.Rendering.HighDefinition
             ctx.cmd.SetViewport(new Rect(0,0,width,height));
             CoreUtils.DrawFullScreen(ctx.cmd,composite);
             renderedThisFrame=true;renderedNear=hasNear;
+            if(LayerDepth!=null)LayerDepth.Merge(ctx,composite);
             // Published after this camera's layers, consumed by opaque fog and cloud tracing.
             ctx.cmd.SetGlobalTexture("_PlanetWeatherFarDistance",farBuffer);
             ctx.cmd.SetGlobalTexture("_PlanetWeatherNearDistance",hasNear?nearBuffer:farBuffer);
