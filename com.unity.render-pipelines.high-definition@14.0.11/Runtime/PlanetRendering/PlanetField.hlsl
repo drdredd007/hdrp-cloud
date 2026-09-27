@@ -74,14 +74,19 @@ float PlanetHeight(float3 direction)
 {
     float3 shift = _PlanetSeedShift;
     float continents = PlanetSimplex(direction * 2.7 + shift);
+    float height = 0;
     if (_PlanetGeneratorVersion == 2)
     {
         float ridges = 1.0 - abs(PlanetSimplex(direction * 23.0 + shift));
         float rocky = 0.35 + 0.3 * continents + 0.2 * ridges + 0.08 * PlanetSimplex(direction * 91.0 - shift);
-        return saturate(rocky) * _PlanetRelief;
+        height = saturate(rocky) * _PlanetRelief;
     }
-    float detail = 0.24 * PlanetSimplex(direction * 11.0 + shift) + 0.07 * PlanetSimplex(direction * 39.0 - shift);
-    return clamp((continents + detail - 0.08) * _PlanetRelief, -_PlanetRelief, _PlanetRelief);
+    else
+    {
+        float detail = 0.24 * PlanetSimplex(direction * 11.0 + shift) + 0.07 * PlanetSimplex(direction * 39.0 - shift);
+        height = clamp((continents + detail - 0.08) * _PlanetRelief, -_PlanetRelief, _PlanetRelief);
+    }
+    return height;
 }
 
 // PlanetField.Surface(d) - d0 * R, without forming the radius-scale position (float cancellation).
