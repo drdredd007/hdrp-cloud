@@ -16,8 +16,9 @@ Shader "SpaceRunner/Planet Composite"
             TEXTURE2D(_PlanetNearBuffer);
             float _PlanetHasNear;
             float _PlanetDebugView;
-            // 1 when HDRP's resolved PhysicallyBasedSky describes this planet (see PlanetAtmosphere.Matches).
-            float _PlanetAtmosphere;
+            // 1 when the camera has a resolved spherical PhysicallyBasedSky. It may belong to a different
+            // body than the one rendered here (for example a moon viewed through its parent planet's atmosphere).
+            float _PlanetViewAtmosphere;
             // Points this close to the sea-level sphere are shaded as "ground" by the sky tables,
             // which avoids the numerically unstable segment subtraction right at the horizon.
             #define PLANET_SEA_LEVEL_BAND 50.0
@@ -59,7 +60,7 @@ Shader "SpaceRunner/Planet Composite"
                     if(nearDistance<far.a)return 0;
                 }
                 float3 color=far.rgb;
-                if(_PlanetAtmosphere>0 && _PlanetDebugView<=0)color=ApplyAtmosphere(color,input.positionCS.xy,far.a);
+                if(_PlanetViewAtmosphere>0 && _PlanetDebugView<=0)color=ApplyAtmosphere(color,input.positionCS.xy,far.a);
                 return float4(color,1);
             }
             ENDHLSL

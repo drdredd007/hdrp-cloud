@@ -24,12 +24,17 @@ namespace UnityEngine.Rendering.HighDefinition
         public Color LightColor=Color.white;
         public float LightLux=50000;
         public bool Enabled=true;
-        // Aerial perspective and sun transmittance from HDRP's PhysicallyBasedSky, applied only while the
-        // camera's resolved sky describes this planet (the application configures it, see PlanetAtmosphere).
+        // Legacy umbrella switch. SurfaceAtmosphere affects lighting on this body's own surface; ViewAtmosphere
+        // applies the currently resolved PhysicallyBasedSky between the camera and this body. Keeping them separate
+        // allows a moon/planet to be seen through the observer planet's atmosphere without borrowing its ground lighting.
         public bool EnableAtmosphere=true;
+        public bool EnableSurfaceAtmosphere=true;
+        public bool EnableViewAtmosphere=true;
         // Light the surface with HDRP directional lights when the camera has any, instead of LightDirection/LightLux.
         public bool UseSceneLights=true;
-        public bool AtmosphereActive {get;private set;}
+        public bool SurfaceAtmosphereActive {get;private set;}
+        public bool ViewAtmosphereActive {get;private set;}
+        public bool AtmosphereActive=>SurfaceAtmosphereActive || ViewAtmosphereActive;
         // Diagnostics: 0 off; 1 without atmosphere: skirts magenta, uncovered layer pixels green, near-layer pixels tinted red.
         public int DebugView;
         // Optional; PlanetPatchGenerator is otherwise loaded from this module's Resources.
@@ -67,9 +72,10 @@ namespace UnityEngine.Rendering.HighDefinition
         protected override void Execute(CustomPassContext ctx)
         {
             if(!EnableLocalSurface){nearGeometry.Dispose();ReleaseNearBuffer();}
-            if(ctx.hdCamera.camera==Observer)AtmosphereActive=false;
+            if(ctx.hdCamera.camera==Observer){SurfaceAtmosphereActive=false;ViewAtmosphereActive=false;}
             if(!Enabled || ctx.hdCamera.camera!=Observer || !Definition.IsValid || (Altitude<10000 && !EnableLocalSurface) || Observer.orthographic)return;
-            AtmosphereActive=EnableAtmosphere && PlanetAtmosphere.Matches(ctx.hdCamera,Definition,CameraPosition);
+            SurfaceAtmosphereActive=EnableAtmosphere && EnableSurfaceAtmosphere && PlanetAtmosphere.Matches(ctx.hdCamera,Definition,CameraPosition);
+            ViewAtmosphereActive=EnableAtmosphere && EnableViewAtmosphere && PlanetAtmosphere.HasResolvedAtmosphere(ctx.hdCamera);
             var centerRelative=(float3)(Definition.Center-CameraPosition);
             int width=ctx.hdCamera.actualWidth,height=ctx.hdCamera.actualHeight;
             var q=(double4)((quaternion)PlanetRotation).value;
@@ -87,12 +93,15 @@ namespace UnityEngine.Rendering.HighDefinition
                 {name="Planet far color + ray distance in metres",filterMode=FilterMode.Point};farBuffer.Create();
             }
             // The scaled layer uses its own projection/depth. Its alpha stores unscaled ray distance.
-            var projection=GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.001f,30000),true);
+            // Grow the far plane for celestial bodies: FarScale=.001 means the legacy 30000 limit was only 30,000 km.
+            double bodyFar=(math.length(Definition.Center-CameraPosition)+Definition.Radius+Definition.Relief)*PlanetField.FarScale;
+            float farClip=(float)math.max(30000.0,bodyFar*1.05);
+            var projection=GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.001f,farClip),true);
             var view=Matrix4x4.Scale(new Vector3(1,1,-1))*Matrix4x4.Rotate(Quaternion.Inverse(Observer.transform.rotation));
             surface.SetMatrix("_FarViewProjection",projection*view);surface.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
             surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor);surface.SetFloat("_PlanetLightLux",LightLux);
             properties.SetVector("_PlanetCenterRelative",(Vector3)centerRelative);
-            properties.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
+            properties.SetFloat("_PlanetSurfaceAtmosphere",SurfaceAtmosphereActive?1:0);
             properties.SetFloat("_PlanetUseSceneLights",UseSceneLights?1:0);
             properties.SetFloat("_PlanetDebugView",DebugView);composite.SetFloat("_PlanetDebugView",DebugView);
             properties.SetInteger("_PlanetMainVertexCount",PlanetGpuPatchBackend.Row*PlanetGpuPatchBackend.Row);
@@ -141,7 +150,7 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             composite.SetTexture("_PlanetFarBuffer",farBuffer);
             composite.SetFloat("_PlanetHasNear",hasNear?1:0);
-            composite.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
+            composite.SetFloat("_PlanetViewAtmosphere",ViewAtmosphereActive?1:0);
             if(hasNear)composite.SetTexture("_PlanetNearBuffer",nearBuffer);
             CoreUtils.SetRenderTarget(ctx.cmd,ctx.cameraColorBuffer);
             ctx.cmd.SetViewport(new Rect(0,0,width,height));
