@@ -83,6 +83,19 @@ namespace UnityEngine.Rendering.HighDefinition
             sky.groundTint.Override(settings.GroundTint);
         }
 
+        // True when the camera has a spherical Custom PhysicallyBasedSky whose global LUTs can be used
+        // as view atmosphere even for another celestial body.
+        public static bool HasResolvedAtmosphere(HDCamera camera)=>camera!=null && HasResolvedAtmosphere(camera.volumeStack);
+        public static bool HasResolvedAtmosphere(VolumeStack stack)
+        {
+            if(stack==null)return false;
+            var environment=stack.GetComponent<VisualEnvironment>();
+            var sky=stack.GetComponent<PhysicallyBasedSky>();
+            return environment!=null && sky!=null &&
+                environment.skyType.value==(int)SkyType.PhysicallyBased &&
+                sky.type.value==PhysicallyBasedSkyModel.Custom && sky.sphericalMode.value;
+        }
+
         // True when the camera's resolved volume stack renders a PhysicallyBasedSky for this planet:
         // sky type, Custom spherical model, radius and centre (cameraPosition is the observer position
         // in the planet's double frame, whose Unity-space counterpart is the camera transform).
@@ -91,11 +104,8 @@ namespace UnityEngine.Rendering.HighDefinition
         // cameraWorld: the camera transform position (Unity world space) that corresponds to cameraPosition.
         public static bool Matches(VolumeStack stack,Vector3 cameraWorld,in PlanetDefinition definition,double3 cameraPosition)
         {
-            if(stack==null || !definition.IsValid)return false;
-            var environment=stack.GetComponent<VisualEnvironment>();
+            if(!definition.IsValid || !HasResolvedAtmosphere(stack))return false;
             var sky=stack.GetComponent<PhysicallyBasedSky>();
-            if(environment==null || sky==null || environment.skyType.value!=(int)SkyType.PhysicallyBased)return false;
-            if(sky.type.value!=PhysicallyBasedSkyModel.Custom || !sky.sphericalMode.value)return false;
             double radius=definition.Radius;
             if(math.abs(sky.planetaryRadius.value-radius)>AbsoluteTolerance+RelativeTolerance*radius)return false;
             var expected=(double3)(float3)cameraWorld+(definition.Center-cameraPosition);

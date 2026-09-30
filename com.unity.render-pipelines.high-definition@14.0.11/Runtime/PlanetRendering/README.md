@@ -81,14 +81,14 @@ Only centre/rotation change per frame; they are outside HDRP's table precomputat
 The camera must clear with Sky. One PhysicallyBasedSky exists per camera, so one planet has
 an atmosphere at a time.
 
-PlanetFarPass samples the same data only when PlanetAtmosphere.Matches confirms that the
-camera's resolved volume stack describes this planet (sky type, radius and centre within float
-tolerance); otherwise layers are unchanged. With a match:
-- the composite applies EvaluatePbrAtmosphere over the stored metric ray distance
-  (transmittance and in-scattering), so limb, haze and terminator agree with the sky pass;
-- the surface shader uses HDRP directional lights (UseSceneLights; LightDirection/LightLux
-  remain the fallback when a camera has none, e.g. the generator preview) with per-point
-  sun transmittance and the sky's ground irradiance table as ambient.
+PlanetFarPass separates two uses of atmosphere. Surface atmosphere is enabled only when
+PlanetAtmosphere.Matches confirms that the resolved sky belongs to the rendered body; it supplies
+sun transmittance and ground irradiance to that body's surface. View atmosphere only requires a
+resolved spherical Custom PhysicallyBasedSky and applies its EvaluatePbrAtmosphere over the stored
+metric ray distance. This lets a distant moon or planet be viewed through the observer planet's
+atmosphere without incorrectly using the observer planet's ground-lighting tables on the moon.
+The far projection grows with body distance, so the old 30,000 km scaled clip no longer rejects
+Earth-Moon-scale distances.
 
 HDRP change: PhysicallyBasedSkyRenderer.PrecomputationData.BindGlobalBuffers (an empty stub in
 14.0.11) now publishes the ground irradiance and in-scattered radiance tables globally.

@@ -24,8 +24,9 @@ Shader "SpaceRunner/Planet Far Surface"
             float _PlanetLightLux, _LayerToMeters;
             // Planet centre relative to the camera in metres, world axes.
             float3 _PlanetCenterRelative;
-            // 1 when HDRP's resolved PhysicallyBasedSky describes this planet (tables and constants are bound).
-            float _PlanetAtmosphere;
+            // 1 only when the resolved PhysicallyBasedSky belongs to this rendered body.
+            // View-only atmosphere for distant bodies is applied later in PlanetComposite.
+            float _PlanetSurfaceAtmosphere;
             // 1 to light with HDRP directional lights when the camera has any; otherwise the explicit light below.
             float _PlanetUseSceneLights;
             // Diagnostics (PlanetFarPass.DebugView): 1 tints skirt vertices (index >= _PlanetMainVertexCount).
@@ -89,7 +90,7 @@ Shader "SpaceRunner/Planet Far Surface"
                         DirectionalLightData light=_DirectionalLightDatas[i];
                         float3 L=-light.forward;
                         float3 irradiance=light.color*light.diffuseDimmer;
-                        if(_PlanetAtmosphere>0 && asint(light.distanceFromCamera)>=0)
+                        if(_PlanetSurfaceAtmosphere>0 && asint(light.distanceFromCamera)>=0)
                         {
                             // Same models as the sky's analytic ground: sun transmittance to the point and
                             // precomputed sky irradiance for a horizontal surface.
