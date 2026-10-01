@@ -61,7 +61,9 @@ Shader "Hidden/HDRP/OpaqueAtmosphericScattering"
                 // PlanetComposite already applied the PBR atmosphere; apply only weather fog again.
                 posInput.deviceDepth=UNITY_RAW_FAR_CLIP_VALUE;
                 }
-            EvaluateAtmosphericScattering(posInput, V, color, opacity); // Premultiplied alpha
+            // Owned AIR already transformed the opaque/planet background. Apply
+            // native fog once; cloud/transparent endpoints still use AIR prefixes.
+            EvaluateAtmosphericScattering(posInput, V, color, opacity, _PlanetMediaTransparentParameters.w<1.5); // Premultiplied alpha
         }
 
         float4 Frag(Varyings input) : SV_Target

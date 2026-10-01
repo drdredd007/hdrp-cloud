@@ -69,6 +69,7 @@ StructuredBuffer<VolumetricCloudsRegionData> _VolumetricCloudsRegions;
 int _VolumetricCloudsRegionCount;
 
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetaryWeather.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetWeatherLighting.hlsl"
 // Cloud coverage baked for the whole planet, addressed by the direction from its centre in local orientation.
 // A flat cloud map has no planetary structure: Simple mode is one constant texel and an authored map repeats.
 // Declared here and not with the shared placement, so that shaders without cloud kernels do not have to bind it.
@@ -173,6 +174,11 @@ struct EnvironmentLighting
 // This functions evaluates the sun color attenuation at a given point (if the physicaly based sky is active)
 void EvaluateSunColorAttenuation(float3 evaluationPointWS, float3 sunDirection, inout float3 sunColor)
 {
+    if(PlanetWeatherOwnsLighting())
+    {
+        sunColor*=PlanetWeatherSunTransmission(GetCameraRelativePositionWS(evaluationPointWS),sunDirection);
+        return;
+    }
 #ifdef PHYSICALLY_BASED_SUN
     if(_PhysicallyBasedSun == 1)
     // TODO: move this into a shared function
@@ -244,6 +250,14 @@ EnvironmentLighting EvaluateEnvironmentLighting(CloudRay ray, float3 entryEvalua
     // Replace only the lower ambient component; the sky probe and upper lighting remain shared and unchanged.
     bottomLighting = lerp(bottomLighting, _CustomBottomLighting.rgb, _CustomBottomLighting.w);
     lighting.ambientTermBottom = bottomLighting * GetCurrentExposureMultiplier();
+    if(PlanetWeatherOwnsLighting())
+    {
+        float visibility=PlanetWeatherAmbientVisibility(GetCameraRelativePositionWS(entryEvaluationPointWS));
+        // Authored lower lighting stays an intentional independent floor.
+        lighting.ambientTermTop*=visibility;
+        lighting.ambientTermBottom=lerp(max(SampleSH9(_VolumetricCloudsAmbientProbeBuffer,-cloudUp),0)*visibility,
+            _CustomBottomLighting.rgb,_CustomBottomLighting.w)*GetCurrentExposureMultiplier();
+    }
 
     // evaluate the attenuation at both points (entrance and exit of the cloud layer)
     EvaluateSunColorAttenuation(entryEvaluationPointWS, lighting.sunDirection, lighting.sunColor0);

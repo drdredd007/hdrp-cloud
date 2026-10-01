@@ -14,6 +14,8 @@ Shader "SpaceRunner/Planet Far Surface"
             #pragma fragment PlanetFrag
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Sky/PhysicallyBasedSky/PhysicallyBasedSkyCommon.hlsl"
+            #include "PlanetMediaBody.hlsl"
+            #include "PlanetCelestialLights.hlsl"
             // Vertex layout shared with PlanetPatchGenerator.compute (PlanetVertex, 40 bytes).
             struct PlanetVertex {float3 position;float3 normal;float4 color;};
             StructuredBuffer<PlanetVertex> _PlanetVertices;
@@ -28,6 +30,18 @@ Shader "SpaceRunner/Planet Far Surface"
             float _PlanetAtmosphere;
             // 1 to light with HDRP directional lights when the camera has any; otherwise the explicit light below.
             float _PlanetUseSceneLights;
+            float4 _PlanetLightRotation;
+            float _PlanetOwnAir;
+            float4 _PlanetOwnAirExtinction,_PlanetOwnAerosol,_PlanetOwnDimensions;
+            float3 PlanetOwnSunTransmission(float3 p,float3 L)
+            {
+                if(_PlanetOwnAir<=0)return 1;
+                PlanetMediaBody b=(PlanetMediaBody)0;
+                b.CenterRadius.w=_PlanetOwnDimensions.x;b.Limits.x=_PlanetOwnDimensions.y;
+                b.AirExtinction=_PlanetOwnAirExtinction;b.AirScattering.w=_PlanetOwnAerosol.y;
+                b.AerosolExtinction.x=_PlanetOwnAerosol.x;
+                return MediaAirTransmissionToSun(b,p,L);
+            }
             float3 _DetailOrigin;
             float4x4 _DetailRotation;
             // Coordinates remain planet-local across camera moves, patch rebases and planet rotation.
@@ -108,32 +122,42 @@ Shader "SpaceRunner/Planet Far Surface"
                 albedo=lerp(albedo,albedo*1.18,smoothstep(0.04,0.35,slope));
                 float3 brdf=albedo*INV_PI;
                 float3 radiance=0;
-                if(_PlanetUseSceneLights>0 && _DirectionalLightCount>0)
+                uint directionalCount=_PlanetCelestialLightDataReady!=0?_PlanetCelestialLightCount:_DirectionalLightCount;
+                if(_PlanetUseSceneLights>0 && directionalCount>0)
                 {
                     // Planet-centred position: the terrain point in the sky's own frame.
                     float3 position=input.relative*_LayerToMeters-_PlanetCenterRelative;
                     float radial=length(position);
                     float3 up=position/max(radial,1);
-                    for(uint i=0;i<_DirectionalLightCount;i++)
+                    for(uint i=0;i<directionalCount;i++)
                     {
                         DirectionalLightData light=_DirectionalLightDatas[i];
                         float3 L=-light.forward;
+                        L+=2*cross(_PlanetLightRotation.xyz,cross(_PlanetLightRotation.xyz,L)+_PlanetLightRotation.w*L);
                         float3 irradiance=light.color*light.diffuseDimmer;
+                        if(_PlanetCelestialLightDataReady!=0)
+                        {
+                            PlanetCelestialLightData celestial=_PlanetCelestialLightDatas[i];
+                            irradiance=celestial.Color.rgb*celestial.Dimmers.x;
+                        }
                         if(_PlanetAtmosphere>0 && asint(light.distanceFromCamera)>=0)
                         {
                             // Same models as the sky's analytic ground: sun transmittance to the point and
                             // precomputed sky irradiance for a horizontal surface.
                             float r=max(radial,_PlanetaryRadius+1);
                             radiance+=brdf*SampleGroundIrradianceTexture(dot(up,L))*irradiance;
-                            irradiance*=EvaluateSunColorAttenuation(dot(up,L),r);
+                            if(_PlanetOwnAir<=0)irradiance*=EvaluateSunColorAttenuation(dot(up,L),r);
                         }
+                        irradiance*=PlanetOwnSunTransmission(position,L);
                         radiance+=brdf*irradiance*saturate(dot(normal,L));
                     }
                 }
                 else
                 {
                     float sun=saturate(dot(normal,normalize(_PlanetLightDirection)));
-                    radiance=albedo*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb+0.001);
+                    float3 p=input.relative*_LayerToMeters-_PlanetCenterRelative;
+                    radiance=albedo*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb*
+                        PlanetOwnSunTransmission(p,normalize(_PlanetLightDirection))+0.001);
                 }
                 if(_PlanetDebugView>0 && input.skirt>0)radiance=float3(1,0,1)*_PlanetLightLux;
                 return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);

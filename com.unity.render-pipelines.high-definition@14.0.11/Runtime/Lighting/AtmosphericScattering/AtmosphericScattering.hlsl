@@ -15,7 +15,10 @@
 #endif
 
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetaryWeather.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/AtmosphericScattering/PlanetWeatherLighting.hlsl"
 TEXTURE3D(_VBufferLighting);
+TEXTURE3D(_PlanetMediaTransparentScattering);
+TEXTURE3D(_PlanetMediaTransparentTransmission);
 
 float3 ExpLerp(float3 A, float3 B, float t, float x, float y)
 {
@@ -35,6 +38,7 @@ float3 GetFogColor(float3 V, float fragDist)
         float mipLevel = (1.0 - _MipFogMaxMip * saturate((fragDist - _MipFogNear) / (_MipFogFar - _MipFogNear))) * (ENVCONSTANTS_CONVOLUTION_MIP_COUNT - 1);
         // For the atmospheric scattering, we use the GGX convoluted version of the cubemap. That matches the of the idnex 0
         color *= SampleSkyTexture(-V, mipLevel, 0).rgb; // '_FogColor' is the tint
+        color *= PlanetWeatherAmbientVisibility(GetCurrentViewPosition());
     }
 
     return color;
@@ -305,7 +309,7 @@ float3 GetViewForwardDir1(float4x4 viewMatrix)
     return -viewMatrix[2].xyz;
 }
 
-void EvaluateAtmosphericScattering(PositionInputs posInput, float3 V, out float3 color, out float3 opacity)
+void EvaluateAtmosphericScattering(PositionInputs posInput, float3 V, out float3 color, out float3 opacity, bool includePlanetAir)
 {
     color = opacity = 0;
 
@@ -322,6 +326,23 @@ void EvaluateAtmosphericScattering(PositionInputs posInput, float3 V, out float3
     // Note1: remember the hacked value of 'posInput.positionWS'.
     // Note2: we do not adjust it anymore to account for the distance to the planet. This can lead to wrong results (since the planet does not write depth).
     float fogFragDist = distance(posInput.positionWS, GetCurrentViewPosition());
+
+    float3 planetAirColor=0,planetAirOpacity=0;
+    bool hasPlanetAir=includePlanetAir && _PlanetMediaTransparentParameters.w>0;
+    if (hasPlanetAir)
+    {
+        float nearDistance = _PlanetMediaTransparentParameters.x;
+        float slices = _PlanetMediaTransparentParameters.z;
+        float depth = saturate(log2(max(fogFragDist, nearDistance) / nearDistance) * _PlanetMediaTransparentParameters.y);
+        float3 uvw = float3(posInput.positionNDC, (depth * (slices - 1) + .5) / slices);
+        planetAirColor = SAMPLE_TEXTURE3D_LOD(_PlanetMediaTransparentScattering, s_linear_clamp_sampler, uvw, 0).rgb;
+        float3 transmission = SAMPLE_TEXTURE3D_LOD(_PlanetMediaTransparentTransmission, s_linear_clamp_sampler, uvw, 0).rgb;
+        planetAirOpacity = 1 - saturate(transmission);
+        // The independent full-medium path retains its original ownership.
+        // Native-weather mode owns AIR here and continues into native fog.
+        if(_PlanetMediaTransparentParameters.w<1.5)
+        { color=planetAirColor;opacity=planetAirOpacity;return; }
+    }
 
     if (_FogEnabled)
     {
@@ -431,6 +452,15 @@ void EvaluateAtmosphericScattering(PositionInputs posInput, float3 V, out float3
 #endif
     }
 #endif
+    if(hasPlanetAir)
+        CompositeOver(color,opacity,planetAirColor,planetAirOpacity,color,opacity);
+}
+
+// Mode 3 keeps native clouds' required AIR prefix, while respecting the user's
+// option to disable that bounded AIR lookup on ordinary transparent materials.
+void EvaluateAtmosphericScattering(PositionInputs posInput,float3 V,out float3 color,out float3 opacity)
+{
+    EvaluateAtmosphericScattering(posInput,V,color,opacity,_PlanetMediaTransparentParameters.w!=3);
 }
 
 

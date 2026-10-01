@@ -720,7 +720,7 @@ void UPSAMPLE_KERNEL(uint3 finalCoord : SV_DispatchThreadID,
     // Compute the fog attenuation of the clouds
     float3 fogColor;
     float3 fogOpacity;
-    EvaluateAtmosphericScattering(cloudPosInput, viewDir, fogColor, fogOpacity);
+    EvaluateAtmosphericScattering(cloudPosInput, viewDir, fogColor, fogOpacity, true);
 #ifdef USE_INTERMEDIATE_BUFFER
     currentClouds.xyz = currentClouds.xyz * (1 - fogOpacity) + fogColor * (1.0 - (_CubicTransmittance ? currentClouds.a * currentClouds.a : currentClouds.a));
 
@@ -827,7 +827,7 @@ void COMBINE_KERNEL(uint3 finalCoord : SV_DispatchThreadID,
     // Compute the fog attenuation of the clouds
     float3 fogColor;
     float3 fogOpacity;
-    EvaluateAtmosphericScattering(cloudPosInput, viewDir, fogColor, fogOpacity);
+    EvaluateAtmosphericScattering(cloudPosInput, viewDir, fogColor, fogOpacity, true);
     currentClouds.xyz = currentClouds.xyz * (1 - fogOpacity) + fogColor * (1.0 - currentClouds.a);
 
 #ifdef USE_INTERMEDIATE_BUFFER

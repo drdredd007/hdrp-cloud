@@ -110,6 +110,10 @@ namespace UnityEngine.Rendering.HighDefinition
             public NativeArray<DirectionalLightData> directionalLights;
             [WriteOnly]
             [NativeDisableContainerSafetyRestriction]
+            public NativeArray<PlanetCelestialLightData> celestialDirectionalLights;
+            public bool recordCelestialLights;
+            [WriteOnly]
+            [NativeDisableContainerSafetyRestriction]
             public NativeArray<LightsPerView> lightsPerView;
             [WriteOnly]
             [NativeDisableContainerSafetyRestriction]
@@ -645,6 +649,15 @@ namespace UnityEngine.Rendering.HighDefinition
                     lightData.nonLightMappedOnly = 0;
                 }
 
+                // Keep an independent optional output before camera-global PBS attenuation.
+                // Neither the native DirectionalLightData nor its geometry lighting is changed.
+                if (recordCelestialLights)
+                    celestialDirectionalLights[outputIndex] = new PlanetCelestialLightData
+                    {
+                        Color = new Vector4(lightData.color.x, lightData.color.y, lightData.color.z, lightRenderData.interactsWithSky ? 1 : 0),
+                        Direction = new Vector4(-lightData.forward.x, -lightData.forward.y, -lightData.forward.z, lightData.lightDimmer),
+                        Dimmers = new Vector4(lightData.diffuseDimmer, lightData.specularDimmer, lightData.volumetricLightDimmer, lightRenderData.angularDiameter)
+                    };
                 // TODO: This won't work with anything but the PBR sky.
                 // A new virtual API was added to SkySetting to compute Atmospheric Attenuation but it's not accessible from within a burst job.
                 // Need to figure out how to compute that properly.
@@ -762,6 +775,8 @@ namespace UnityEngine.Rendering.HighDefinition
                 gpuLightCounters = m_LightTypeCounters,
                 lights = m_Lights,
                 directionalLights = m_DirectionalLights,
+                celestialDirectionalLights = m_CelestialDirectionalLights,
+                recordCelestialLights = PlanetMediaCameraRegistry.IsActive(hdCamera.camera),
                 lightsPerView = m_LightsPerView,
                 lightBounds = m_LightBounds,
                 lightVolumes = m_LightVolumes

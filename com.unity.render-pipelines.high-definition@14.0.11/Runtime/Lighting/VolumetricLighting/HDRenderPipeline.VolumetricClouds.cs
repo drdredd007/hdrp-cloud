@@ -266,6 +266,7 @@ namespace UnityEngine.Rendering.HighDefinition
         // Function to evaluate if a camera should have volumetric clouds
         static bool HasVolumetricClouds(HDCamera hdCamera, in VolumetricClouds settings)
         {
+            if (PlanetMediaCameraRegistry.IsActive(hdCamera.camera) && !PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera)) return false;
             // If the current volume does not enable the feature, quit right away.
             return hdCamera.frameSettings.IsEnabled(FrameSettingsField.VolumetricClouds) && settings.enable.value;
         }
@@ -397,6 +398,33 @@ namespace UnityEngine.Rendering.HighDefinition
                 cb._SunRight = Vector3.right;
                 cb._SunUp = Vector3.forward;
                 cb._SunLightColor = Vector3.zero;
+            }
+            if(PlanetaryWeather.IsActive(hdCamera) && PlanetMediaCameraRegistry.TryGetNativeWeatherLighting(hdCamera.camera,out var weatherLight))
+            {
+                cb._PhysicallyBasedSun=weatherLight.HasAtmosphere?1:0;
+                cb._SunDirection=weatherLight.Direction;
+                cb._SunLightColor=(Vector3)(Vector4)weatherLight.Color*weatherLight.Lux*settings.sunLightDimmer.value;
+                if(weatherLight.UseSceneLights)
+                {
+                    int selected=-1;float strength=-1;
+                    for(int i=0;i<m_GpuLightsBuilder.directionalLightCount;i++)
+                    {
+                        var raw=m_GpuLightsBuilder.celestialDirectionalLights[i];
+                        float value=Mathf.Max(raw.Color.x,Mathf.Max(raw.Color.y,raw.Color.z))*raw.Direction.w;
+                        if(raw.Color.w>0 && value>strength){selected=i;strength=value;}
+                    }
+                    cb._SunLightColor=Vector3.zero;
+                    if(selected>=0)
+                    {
+                        var raw=m_GpuLightsBuilder.celestialDirectionalLights[selected];
+                        cb._SunDirection=weatherLight.Rotation*(Vector3)raw.Direction;
+                        cb._SunLightColor=(Vector3)raw.Color*raw.Direction.w*settings.sunLightDimmer.value;
+                    }
+                }
+                // Spherical weather has no planar shadow cookie; these axes are used only
+                // by its native lighting. The source GameObject and geometry lights stay intact.
+                cb._SunRight=Vector3.Cross(cb._SunDirection,Mathf.Abs(cb._SunDirection.y)<.99f?Vector3.up:Vector3.forward).normalized;
+                cb._SunUp=Vector3.Cross(cb._SunRight,cb._SunDirection).normalized;
             }
 
             // Compute the theta angle for the wind direction

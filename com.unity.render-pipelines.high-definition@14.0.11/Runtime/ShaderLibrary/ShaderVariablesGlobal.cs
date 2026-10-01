@@ -269,5 +269,11 @@ namespace UnityEngine.Rendering.HighDefinition
         public Vector4 _ColorPyramidUvScaleAndLimitPrevFrame;
         public Vector4 _PlanetWeatherCenterRadius;
         public Matrix4x4 _PlanetWeatherWorldToLocal;
+        public Vector4 _PlanetWeatherLightRotation;
+        public Vector4 _PlanetWeatherFallbackSun;
+        public Vector4 _PlanetWeatherFallbackColor;
+        public Vector4 _PlanetWeatherLighting; // owned native weather, has own atmosphere
+        public Vector4 _PlanetMediaTransparentParameters; // near distance, inverse log2 range, slice count, active
+        public Vector4 _PlanetMediaTransparentGridSize; // width, height, inverse width, inverse height
     }
 }

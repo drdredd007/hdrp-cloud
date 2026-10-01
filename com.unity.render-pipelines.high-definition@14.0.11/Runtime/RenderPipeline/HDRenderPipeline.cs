@@ -933,6 +933,7 @@ namespace UnityEngine.Rendering.HighDefinition
             base.Dispose(disposing);
 
             HDLightRenderDatabase.instance.Cleanup();
+            ReleasePlanetCelestialLights();
             ReleaseScreenSpaceShadows();
 
             if (m_RayTracingSupported)
@@ -2384,6 +2385,9 @@ namespace UnityEngine.Rendering.HighDefinition
                 bool enableBakeShadowMask = PrepareLightsForGPU(cmd, hdCamera, cullingResults, hdProbeCullingResults, m_CurrentDebugDisplaySettings, aovRequest);
 
                 UpdateGlobalConstantBuffers(hdCamera, cmd);
+                // Native fog evaluates before custom planet passes. Publish the current
+                // camera's unattenuated celestial records before its volumetric lighting.
+                BindPlanetCelestialLights(cmd,hdCamera.camera);
 
                 // Do the same for ray tracing if allowed
                 if (m_RayTracingSupported)

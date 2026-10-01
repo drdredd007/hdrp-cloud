@@ -69,11 +69,22 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             cb._PlanetWeatherCenterRadius=Vector4.zero;
             cb._PlanetWeatherWorldToLocal=Matrix4x4.identity;
+            cb._PlanetWeatherLightRotation=new Vector4(0,0,0,1);
+            cb._PlanetWeatherFallbackSun=cb._PlanetWeatherFallbackColor=cb._PlanetWeatherLighting=Vector4.zero;
             if(!IsActive(camera))return;
             var value=camera.volumeStack.GetComponent<PlanetaryWeather>();
             var center=value.center.value-camera.camera.transform.position;
             cb._PlanetWeatherCenterRadius=new Vector4(center.x,center.y,center.z,value.radius.value);
             cb._PlanetWeatherWorldToLocal=Matrix4x4.Rotate(Quaternion.Inverse(Quaternion.Euler(value.rotation.value)));
+            if(PlanetMediaCameraRegistry.TryGetNativeWeatherLighting(camera.camera,out var lighting))
+            {
+                var q=lighting.Rotation;
+                cb._PlanetWeatherLightRotation=new Vector4(q.x,q.y,q.z,q.w);
+                var direction=lighting.Direction;
+                cb._PlanetWeatherFallbackSun=new Vector4(direction.x,direction.y,direction.z,lighting.Lux);
+                cb._PlanetWeatherFallbackColor=new Vector4(lighting.Color.r,lighting.Color.g,lighting.Color.b,lighting.UseSceneLights?1:0);
+                cb._PlanetWeatherLighting=new Vector4(1,lighting.HasAtmosphere?1:0,0,0);
+            }
         }
     }
 }

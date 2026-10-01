@@ -32,8 +32,11 @@ namespace UnityEngine.Rendering.HighDefinition
         // Aerial perspective and sun transmittance from HDRP's PhysicallyBasedSky, applied only while the
         // camera's resolved sky describes this planet (the application configures it, see PlanetAtmosphere).
         public bool EnableAtmosphere=true;
+        // Incoming sunlight belongs to this body, even when its view transport is composed elsewhere.
+        public PlanetAtmosphereSettings Atmosphere;
         // Light the surface with HDRP directional lights when the camera has any, instead of LightDirection/LightLux.
         public bool UseSceneLights=true;
+        public Quaternion CelestialLightRotation=Quaternion.identity;
         public bool AtmosphereActive {get;private set;}
         // Diagnostics: 0 off; 1 without atmosphere: skirts magenta, uncovered layer pixels green, near-layer pixels tinted red.
         public int DebugView;
@@ -76,6 +79,8 @@ namespace UnityEngine.Rendering.HighDefinition
             if(ctx.hdCamera.camera==Observer)AtmosphereActive=false;
             if(!Enabled || ctx.hdCamera.camera!=Observer || !Definition.IsValid || (Altitude<10000 && !EnableLocalSurface) || Observer.orthographic)return;
             AtmosphereActive=EnableAtmosphere && PlanetAtmosphere.Matches(ctx.hdCamera,Definition,CameraPosition);
+            if(RenderPipelineManager.currentPipeline is HDRenderPipeline pipeline)
+                pipeline.BindPlanetCelestialLights(ctx.cmd,Observer);
             var centerRelative=(float3)(Definition.Center-CameraPosition);
             int width=ctx.hdCamera.actualWidth,height=ctx.hdCamera.actualHeight;
             var q=(double4)((quaternion)PlanetRotation).value;
@@ -94,12 +99,27 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             // The scaled layer uses its own projection/depth. Its alpha stores unscaled ray distance.
             var projection=GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.001f,Mathf.Max(30000,(float)((math.length(Definition.Center-CameraPosition)+Definition.Radius+Definition.Relief)*PlanetField.FarScale*1.1))),true);
+            // Keep HDRP's pixel rays, including lens shift and temporal jitter. Only
+            // depth range differs in this scaled layer; a fresh symmetric projection
+            // disagrees with sky/media reconstruction and moves surfaces between pixels.
+            projection.SetRow(0,ctx.hdCamera.mainViewConstants.projMatrix.GetRow(0));
+            projection.SetRow(1,ctx.hdCamera.mainViewConstants.projMatrix.GetRow(1));
             var view=Matrix4x4.Scale(new Vector3(1,1,-1))*Matrix4x4.Rotate(Quaternion.Inverse(Observer.transform.rotation));
             surface.SetMatrix("_FarViewProjection",projection*view);surface.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
-            surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor);surface.SetFloat("_PlanetLightLux",LightLux);
+            surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor.linear);surface.SetFloat("_PlanetLightLux",LightLux);
             properties.SetVector("_PlanetCenterRelative",(Vector3)centerRelative);
             properties.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
             properties.SetFloat("_PlanetUseSceneLights",UseSceneLights?1:0);
+            properties.SetVector("_PlanetLightRotation",new Vector4(CelestialLightRotation.x,CelestialLightRotation.y,CelestialLightRotation.z,CelestialLightRotation.w));
+            properties.SetFloat("_PlanetOwnAir",Atmosphere.IsValid?1:0);
+            if(Atmosphere.IsValid)
+            {
+                float h=PlanetMediaMath.ScaleHeight(Atmosphere.AirMaximumAltitude),ah=PlanetMediaMath.ScaleHeight(Atmosphere.AerosolMaximumAltitude);
+                properties.SetVector("_PlanetOwnAirExtinction",new Vector4(PlanetMediaMath.Extinction(Atmosphere.AirOpacity.r,h),
+                    PlanetMediaMath.Extinction(Atmosphere.AirOpacity.g,h),PlanetMediaMath.Extinction(Atmosphere.AirOpacity.b,h),h));
+                properties.SetVector("_PlanetOwnAerosol",new Vector4(PlanetMediaMath.Extinction(Atmosphere.AerosolOpacity,ah),ah,0,0));
+                properties.SetVector("_PlanetOwnDimensions",new Vector4((float)Definition.Radius,Atmosphere.Depth,0,0));
+            }
             properties.SetFloat("_PlanetDebugView",DebugView);composite.SetFloat("_PlanetDebugView",DebugView);
             properties.SetInteger("_PlanetMainVertexCount",PlanetGpuPatchBackend.Row*PlanetGpuPatchBackend.Row);
             ctx.cmd.SetRenderTarget(farBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
@@ -139,7 +159,10 @@ namespace UnityEngine.Rendering.HighDefinition
                 var localRotation=PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation);
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
                 properties.SetFloat("_LayerToMeters",1);
-                properties.SetMatrix("_FarViewProjection",GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.05f,10000),true)*view);
+                var nearProjection=GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.05f,10000),true);
+                nearProjection.SetRow(0,ctx.hdCamera.mainViewConstants.projMatrix.GetRow(0));
+                nearProjection.SetRow(1,ctx.hdCamera.mainViewConstants.projMatrix.GetRow(1));
+                properties.SetMatrix("_FarViewProjection",nearProjection*view);
                 properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(localRotation));
                 properties.SetBuffer("_PlanetVertices",nearPatches.Vertices);
                 properties.SetInteger("_PlanetMainVertexCount",int.MaxValue);

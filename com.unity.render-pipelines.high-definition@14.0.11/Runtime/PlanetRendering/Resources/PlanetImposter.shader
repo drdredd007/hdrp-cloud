@@ -7,6 +7,8 @@ Shader "Hidden/SpaceRunner/Planet Imposter"
  #pragma vertex ImposterVert
  #pragma fragment ImposterFrag
  #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
+ #include "../PlanetMediaCommon.hlsl"
+ float _PlanetMediaTransport;
  struct Body {float4 screen;float4 radiance;};StructuredBuffer<Body> _PlanetImposters;
  TEXTURE2D(_PlanetAccumulatedDepth);
  struct Output {float4 position:SV_POSITION;float2 delta:TEXCOORD0;nointerpolation float4 light:TEXCOORD1;nointerpolation float2 shape:TEXCOORD2;};
@@ -32,7 +34,15 @@ Shader "Hidden/SpaceRunner/Planet Imposter"
    if(length(p.positionWS-GetCameraRelativePositionWS(_WorldSpaceCameraPos))<input.shape.y)return 0;
   }
   float profile=exp(-0.5*dot(input.delta,input.delta))/(TWO_PI*input.shape.x*input.shape.x);
-  return float4(input.light.rgb*profile*GetCurrentExposureMultiplier(),0);
+  float3 transmission=1;
+  if(_PlanetMediaTransport>0)
+  {
+   PositionInputs ray=GetPositionInput(input.position.xy,_ScreenSize.zw,.5,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
+   float3 direction=-GetWorldSpaceNormalizeViewDir(ray.positionWS),scattering;
+   float spread=2/max(1,_ScreenSize.y)/max(.001,abs(UNITY_MATRIX_P._m11));
+   PlanetMediaEvaluateRay(direction,input.shape.y,spread,false,scattering,transmission);
+  }
+  return float4(input.light.rgb*transmission*profile*GetCurrentExposureMultiplier(),0);
  }
  ENDHLSL
  } }

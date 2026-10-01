@@ -208,14 +208,20 @@ namespace UnityEngine.Rendering.HighDefinition
                     RenderSubsurfaceScattering(m_RenderGraph, hdCamera, colorBuffer, historyValidationTexture, ref lightingBuffers, ref prepassOutput);
 
                     var depthTexture = msaa ? prepassOutput.depthAsColor : prepassOutput.depthPyramidTexture;
-                    RenderSky(m_RenderGraph, hdCamera, colorBuffer, volumetricLighting, prepassOutput.depthBuffer, depthTexture);
+                    // Coordinate cameras own the visible background and all finite volume transport.
+                    // Sky lighting/reflection updates still run through the ordinary HDRP sky manager.
+                    bool planetMedia = PlanetMediaCameraRegistry.IsActive(hdCamera.camera);
+                    if (!planetMedia)
+                        RenderSky(m_RenderGraph, hdCamera, colorBuffer, volumetricLighting, prepassOutput.depthBuffer, depthTexture);
 
                     RenderCustomPass(m_RenderGraph, hdCamera, colorBuffer, prepassOutput, customPassCullingResults, cullingResults, CustomPassInjectionPoint.AfterOpaqueAndSky, aovRequest, aovCustomPassBuffers);
                     DoUserAfterOpaqueAndSky(m_RenderGraph, hdCamera, colorBuffer, prepassOutput.resolvedDepthBuffer, prepassOutput.resolvedNormalBuffer, prepassOutput.resolvedMotionVectorsBuffer);
 
-                    m_SkyManager.RenderOpaqueAtmosphericScattering(m_RenderGraph, hdCamera, colorBuffer, depthTexture, volumetricLighting, prepassOutput.depthBuffer);
-
-                    sunOcclusionTexture = RenderVolumetricClouds(m_RenderGraph, hdCamera, colorBuffer, prepassOutput.depthPyramidTexture, prepassOutput.motionVectorsBuffer, volumetricLighting, maxZMask);
+                    if (!planetMedia || PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera))
+                    {
+                        m_SkyManager.RenderOpaqueAtmosphericScattering(m_RenderGraph, hdCamera, colorBuffer, depthTexture, volumetricLighting, prepassOutput.depthBuffer);
+                        sunOcclusionTexture = RenderVolumetricClouds(m_RenderGraph, hdCamera, colorBuffer, prepassOutput.depthPyramidTexture, prepassOutput.motionVectorsBuffer, volumetricLighting, maxZMask);
+                    }
 
                     // Send all the geometry graphics buffer to client systems if required (must be done after the pyramid and before the transparent depth pre-pass)
                     SendGeometryGraphicsBuffers(m_RenderGraph, prepassOutput.normalBuffer, prepassOutput.depthPyramidTexture, hdCamera);

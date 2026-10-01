@@ -157,6 +157,12 @@ GLOBAL_CBUFFER_START(ShaderVariablesGlobal, b0)
     float4 _ColorPyramidUvScaleAndLimitPrevFrame;
     float4 _PlanetWeatherCenterRadius;
     float4x4 _PlanetWeatherWorldToLocal;
+    float4 _PlanetWeatherLightRotation;
+    float4 _PlanetWeatherFallbackSun;
+    float4 _PlanetWeatherFallbackColor;
+    float4 _PlanetWeatherLighting;
+    float4 _PlanetMediaTransparentParameters;
+    float4 _PlanetMediaTransparentGridSize;
 CBUFFER_END
 
 

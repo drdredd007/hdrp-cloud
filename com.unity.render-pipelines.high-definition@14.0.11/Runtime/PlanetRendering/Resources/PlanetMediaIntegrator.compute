@@ -1,0 +1,213 @@
+#pragma kernel IntegrateMedia
+#pragma kernel BakeMediaCoverage
+#pragma kernel BakeTransparentPrefix
+#pragma kernel ProbeMediaRay
+#pragma kernel ReconstructMedia
+#pragma only_renderers d3d11 vulkan metal playstation xboxone xboxseries switch
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
+RWTexture3D<float4> _PlanetMediaPrefixScatteringRW, _PlanetMediaPrefixTransmissionRW;
+#define PLANET_MEDIA_PREFIX_WRITER
+#include "../PlanetMediaCommon.hlsl"
+TEXTURE2D_X_FLOAT(_PlanetMediaOpaqueDepth);
+Texture2D<float4> _PlanetMediaLayerDepth;
+RWTexture2D<float4> _PlanetMediaScatteringRW;
+RWTexture2D<float4> _PlanetMediaTransmissionRW;
+Texture2D<float4> _PlanetMediaLowScattering, _PlanetMediaLowTransmission;
+float4 _PlanetMediaOutputSize;
+RWStructuredBuffer<uint> _PlanetMediaCoverageRW;
+Texture2D<float4> _PlanetMediaAuthoredMap, _PlanetMediaAuthoredLut;
+Texture2D<float4> _PlanetMediaCumulusMap, _PlanetMediaStratusMap, _PlanetMediaNimbusMap, _PlanetMediaRainMap;
+int _PlanetMediaBakeBody,_PlanetMediaBakeOffset,_PlanetMediaBakeResolution,_PlanetMediaBakeMode;
+float3 _PlanetMediaMapMultipliers;
+int _PlanetMediaTransparentRaySteps;
+int _PlanetMediaHasLayerDepth;
+RWStructuredBuffer<float4> _PlanetMediaRayProbeRW;
+int2 _PlanetMediaProbePixel;
+float4 MediaMapSample(Texture2D<float4> map,float3 position)
+{
+    PlanetMediaBody b=_PlanetMediaBodies[_PlanetMediaBakeBody];
+    float radius=b.CenterRadius.w,altitude=b.RegionMetadata.w>b.RegionMetadata.z?
+        (b.RegionMetadata.z+b.RegionMetadata.w)*.5:(b.Limits.y+b.Limits.z)*.5;
+    float normalization=sqrt(max(1,altitude*(2*radius+altitude)));
+    float3 p=position*radius/normalization;float3 weight=pow(abs(position),4);weight/=max(dot(weight,1),.0001);
+    float4 x=map.SampleLevel(s_linear_repeat_sampler,p.zy*b.CloudMapTiling.xy+b.CloudMapTiling.zw-.5,0);
+    float4 y=map.SampleLevel(s_linear_repeat_sampler,p.xz*b.CloudMapTiling.xy+b.CloudMapTiling.zw-.5,0);
+    float4 z=map.SampleLevel(s_linear_repeat_sampler,p.xy*b.CloudMapTiling.xy+b.CloudMapTiling.zw-.5,0);
+    return x*weight.x+y*weight.y+z*weight.z;
+}
+[numthreads(8,8,1)]
+void BakeMediaCoverage(uint3 id:SV_DispatchThreadID)
+{
+    uint resolution=(uint)_PlanetMediaBakeResolution;
+    if(any(id.xy>=resolution))return;
+    float4 value=1;
+    if(_PlanetMediaBakeMode==4)
+        value=_PlanetMediaAuthoredLut.SampleLevel(s_linear_clamp_sampler,(id.xy+.5)/resolution,0);
+    else
+    {
+        float3 direction=MediaCubeDirection(id.z,(id.xy+.5)/resolution);
+        PlanetMediaBody b=_PlanetMediaBodies[_PlanetMediaBakeBody];
+        if(_PlanetMediaBakeMode==1)value=float4(MediaProceduralCoverage(b,direction),0,.25,1);
+        else if(_PlanetMediaBakeMode==2)value=MediaMapSample(_PlanetMediaAuthoredMap,direction);
+        else if(_PlanetMediaBakeMode==3)
+        {
+            float cumulus=MediaMapSample(_PlanetMediaCumulusMap,direction).x*_PlanetMediaMapMultipliers.x;
+            float stratus=MediaMapSample(_PlanetMediaStratusMap,direction).x*_PlanetMediaMapMultipliers.y;
+            float nimbus=MediaMapSample(_PlanetMediaNimbusMap,direction).x;
+            float rain=MediaMapSample(_PlanetMediaRainMap,direction).x;
+            float type=0,coverage=0,height=0;
+            if(nimbus*_PlanetMediaMapMultipliers.z>0)
+            {
+                type=nimbus*.5+.5;
+                float blend=saturate((type-130.0/256)/(6.0/256));
+                height=blend;coverage=type<136.0/256?blend*_PlanetMediaMapMultipliers.z:.75*_PlanetMediaMapMultipliers.z;
+            }
+            else if(cumulus>.01)
+            { type=stratus>.01?48.0/256:96.0/256;coverage=max(cumulus,stratus);height=stratus>.01?1:.5; }
+            else if(stratus>.01){type=16.0/256;coverage=stratus;height=1;}
+            value=float4(coverage,rain,type,height);
+        }
+        else value=float4(1,0,.25,1); // Native Simple control's constant coverage texel.
+    }
+    uint4 channels=(uint4)round(saturate(value)*255);
+    uint packed=channels.x|(channels.y<<8)|(channels.z<<16)|(channels.w<<24);
+    uint index=(uint)_PlanetMediaBakeOffset+(id.z*resolution+id.y)*resolution+id.x;
+    _PlanetMediaCoverageRW[index]=packed;
+}
+void MediaReadCameraRay(float2 pixel,out float3 direction,out float endpoint)
+{
+    // Compute GetPositionInput adds the half-pixel center itself.
+    uint2 pixelId=(uint2)clamp(floor(pixel+.5),0,_ScreenSize.xy-1);
+    PositionInputs ray=GetPositionInput(pixel,_ScreenSize.zw,.5,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
+    direction=-GetWorldSpaceNormalizeViewDir(ray.positionWS);
+    endpoint=1e30;
+    float depth=LOAD_TEXTURE2D_X(_PlanetMediaOpaqueDepth,pixelId).x;
+    if(depth!=UNITY_RAW_FAR_CLIP_VALUE)
+    {
+        PositionInputs geometry=GetPositionInput(pixel,_ScreenSize.zw,depth,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
+        endpoint=length(geometry.positionWS-GetCurrentViewPosition());
+    }
+    if(_PlanetMediaHasLayerDepth!=0)
+    { float far=_PlanetMediaLayerDepth[pixelId].a; if(far>0)endpoint=min(endpoint,far); }
+}
+[numthreads(8,8,1)]
+void IntegrateMedia(uint3 id:SV_DispatchThreadID)
+{
+    UNITY_XR_ASSIGN_VIEW_INDEX(id.z);
+    if(any(id.xy>=uint2(_PlanetMediaOutputSize.xy)))return;
+    float2 pixel=(id.xy+.5)*_ScreenSize.xy*_PlanetMediaOutputSize.zw-.5;
+    float3 direction;float endpoint;MediaReadCameraRay(pixel,direction,endpoint);
+    float3 scattering,transmission;
+    float spread=2/max(1,_PlanetMediaOutputSize.y)/max(.001,abs(UNITY_MATRIX_P._m11));
+    PlanetMediaEvaluateRay(direction,endpoint,spread,true,scattering,transmission);
+    scattering*=GetCurrentExposureMultiplier();
+    _PlanetMediaScatteringRW[id.xy]=float4(scattering,endpoint);
+    _PlanetMediaTransmissionRW[id.xy]=float4(transmission,1);
+}
+// Bilateral reconstruction rejects unrelated opaque endpoints. If a thin foreground
+// has no compatible reduced-resolution sample, evaluate its exact ray instead of
+// borrowing the medium behind its silhouette. Celestial metric depth has the same
+// ownership rule as native opaque depth.
+bool MediaNeedsFeatureSample(float3 direction,float endpoint)
+{
+    float focalLength=.5*_PlanetMediaOutputSize.y*abs(UNITY_MATRIX_P._m11);
+    float spread=1/max(focalLength,.001);
+    bool required=false;
+    [loop] for(int featureBodyIndex=0;featureBodyIndex<_PlanetMediaBodyCount;featureBodyIndex++)
+    {
+        PlanetMediaBody body=_PlanetMediaBodies[featureBodyIndex];float2 interval;
+        float radius=body.CenterRadius.w,outerRadius=radius+MediaOuterHeight(body);
+        if(!MediaSphereRange(body.CenterRadius.xyz,outerRadius,direction,interval) || interval.x>=endpoint)continue;
+        float centerDistance=length(body.CenterRadius.xyz);
+        // Four identical taps can hide a symmetric radial-density extremum. For
+        // a small projected body use the exact intersecting ray, not a frame-wide
+        // fallback caused by another subpixel body elsewhere in the camera.
+        if(radius*focalLength/max(centerDistance,1)<8){required=true;break;}
+        float along=dot(body.CenterRadius.xyz,direction);
+        float closest=length(body.CenterRadius.xyz-direction*along),footprint=max(1,along*spread);
+        if(outerRadius-closest<footprint*2){required=true;break;}
+        if(body.CloudLighting.w>0)
+        {
+            float cloudRadius=radius+body.Limits.z;
+            if(abs(cloudRadius-closest)<footprint*2 &&
+                MediaSphereRange(body.CenterRadius.xyz,cloudRadius,direction,interval) && interval.x<endpoint)
+            {required=true;break;}
+        }
+    }
+    return required;
+}
+[numthreads(8,8,1)]
+void ReconstructMedia(uint3 id:SV_DispatchThreadID)
+{
+    UNITY_XR_ASSIGN_VIEW_INDEX(id.z);
+    if(any(id.xy>=uint2(_ScreenSize.xy)))return;
+    float3 direction;float endpoint;MediaReadCameraRay(id.xy,direction,endpoint);
+    float2 location=(id.xy+.5)*_PlanetMediaOutputSize.xy*_ScreenSize.zw-.5;
+    int2 basePixel=(int2)floor(location);float2 blend=frac(location);
+    float3 scattering=0,transmission=0;float acceptedWeight=0;
+    float3 minimumT=1,maximumT=0,minimumL=1e30,maximumL=0;
+    [unroll] for(int corner=0;corner<4;corner++)
+    {
+        int2 offset=int2(corner&1,corner>>1);
+        int2 samplePixel=clamp(basePixel+offset,0,(int2)_PlanetMediaOutputSize.xy-1);
+        float4 lowL=_PlanetMediaLowScattering[samplePixel];
+        float relativeDifference=abs(lowL.a-endpoint)/max(1,min(lowL.a,endpoint));
+        float tolerance=.02+1/max(1,min(lowL.a,endpoint));
+        float2 weights=lerp(1-blend,blend,(float2)offset);
+        float weight=weights.x*weights.y*(relativeDifference<=tolerance?1:0);
+        scattering+=lowL.rgb*weight;
+        transmission+=_PlanetMediaLowTransmission[samplePixel].rgb*weight;
+        acceptedWeight+=weight;
+        if(weight>1e-6)
+        {
+            float3 lowT=_PlanetMediaLowTransmission[samplePixel].rgb;
+            minimumT=min(minimumT,lowT);maximumT=max(maximumT,lowT);
+            minimumL=min(minimumL,lowL.rgb);maximumL=max(maximumL,lowL.rgb);
+        }
+    }
+    // Small planetary limbs and high-contrast cloud features are nonlinear over
+    // a reduced pixel. Keep the full-ray oracle in these regions as well.
+    bool smooth=all(maximumT-minimumT<=.02) && all(maximumL-minimumL<=max(.001,maximumL*.05));
+    if(acceptedWeight>1e-6 && smooth && !MediaNeedsFeatureSample(direction,endpoint))
+    { scattering/=acceptedWeight;transmission/=acceptedWeight; }
+    else
+    {
+        float spread=2/max(1,_ScreenSize.y)/max(.001,abs(UNITY_MATRIX_P._m11));
+        PlanetMediaEvaluateRay(direction,endpoint,spread,true,scattering,transmission);
+        scattering*=GetCurrentExposureMultiplier();
+    }
+    _PlanetMediaScatteringRW[id.xy]=float4(scattering,endpoint);
+    _PlanetMediaTransmissionRW[id.xy]=float4(transmission,1);
+}
+[numthreads(1,1,1)]
+void ProbeMediaRay(uint3 id:SV_DispatchThreadID)
+{
+    UNITY_XR_ASSIGN_VIEW_INDEX(0);
+    float3 direction;float endpoint;MediaReadCameraRay((uint2)_PlanetMediaProbePixel,direction,endpoint);
+    _PlanetMediaRayProbeRW[0]=float4(direction,endpoint);
+    _PlanetMediaRayProbeRW[1]=float4(_DirectionalLightCount,_PlanetCelestialLightCount,_PlanetMediaLightRotation.yw);
+    _PlanetMediaRayProbeRW[2]=0;_PlanetMediaRayProbeRW[3]=0;_PlanetMediaRayProbeRW[4]=0;
+    if(_PlanetCelestialLightCount>0 && _PlanetCelestialLightDataReady!=0)
+    {
+        PlanetCelestialLightData light=_PlanetCelestialLightDatas[0];
+        _PlanetMediaRayProbeRW[2]=light.Direction;
+        _PlanetMediaRayProbeRW[3]=light.Color;
+        _PlanetMediaRayProbeRW[4]=light.Dimmers;
+    }
+}
+[numthreads(8,8,1)]
+void BakeTransparentPrefix(uint3 id:SV_DispatchThreadID)
+{
+    UNITY_XR_ASSIGN_VIEW_INDEX(0);
+    if(any(id.xy>=uint2(_PlanetMediaTransparentGridSize.xy)))return;
+    float2 pixel=(id.xy+.5)*_ScreenSize.xy/_PlanetMediaTransparentGridSize.xy-.5;
+    PositionInputs ray=GetPositionInput(pixel,_ScreenSize.zw,.5,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
+    float3 direction=-GetWorldSpaceNormalizeViewDir(ray.positionWS);
+    MediaPrefixRecorder recorder=(MediaPrefixRecorder)0;
+    recorder.pixel=id.xy;recorder.enabled=true;recorder.distance=_PlanetMediaTransparentParameters.x;
+    recorder.growth=exp2(1/(_PlanetMediaTransparentParameters.y*(_PlanetMediaTransparentParameters.z-1)));
+    float endpoint=_PlanetMediaTransparentParameters.x*exp2(1/_PlanetMediaTransparentParameters.y);
+    float spread=2/max(1,_PlanetMediaTransparentGridSize.y)/max(.001,abs(UNITY_MATRIX_P._m11));
+    float3 scattering,transmission;
+    PlanetMediaIntegrateRay(direction,endpoint,spread,true,_PlanetMediaTransparentRaySteps,recorder,scattering,transmission);
+}

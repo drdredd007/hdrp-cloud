@@ -1561,6 +1561,15 @@ namespace UnityEngine.Rendering.HighDefinition
                 {
                     var mode = HDAdditionalSceneViewSettings.sceneViewAntialiasing;
 
+                    // Coordinate surfaces and sky are drawn before post-processing. Give
+                    // this owned preview spatial AA when the editor default is None;
+                    // do not change EditorPrefs or introduce temporal history into authoring.
+                    if (mode == AntialiasingMode.None && PlanetMediaCameraRegistry.IsActive(camera))
+                    {
+                        mode = AntialiasingMode.SubpixelMorphologicalAntiAliasing;
+                        SMAAQuality = HDAdditionalCameraData.SMAAQualityLevel.High;
+                    }
+
                     if (mode == AntialiasingMode.TemporalAntialiasing && !animateMaterials)
                         antialiasing = AntialiasingMode.None;
                     else

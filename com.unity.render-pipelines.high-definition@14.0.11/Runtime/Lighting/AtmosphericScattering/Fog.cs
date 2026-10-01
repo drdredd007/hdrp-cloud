@@ -152,11 +152,13 @@ namespace UnityEngine.Rendering.HighDefinition
 
         internal static bool IsFogEnabled(HDCamera hdCamera)
         {
+            if (PlanetMediaCameraRegistry.IsActive(hdCamera.camera) && !PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera)) return false;
             return hdCamera.frameSettings.IsEnabled(FrameSettingsField.AtmosphericScattering) && hdCamera.volumeStack.GetComponent<Fog>().enabled.value;
         }
 
         internal static bool IsVolumetricFogEnabled(HDCamera hdCamera)
         {
+            if (PlanetMediaCameraRegistry.IsActive(hdCamera.camera) && !PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera)) return false;
             var fog = hdCamera.volumeStack.GetComponent<Fog>();
 
             bool a = fog.enableVolumetricFog.value;
@@ -169,6 +171,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
         internal static bool IsPBRFogEnabled(HDCamera hdCamera)
         {
+            if (PlanetMediaCameraRegistry.IsActive(hdCamera.camera)) return false;
             var visualEnv = hdCamera.volumeStack.GetComponent<VisualEnvironment>();
             // Enable the stock aerial perspective only for the explicitly placed procedural planet.
             return PlanetaryWeather.IsActive(hdCamera) && (visualEnv.skyType.value == (int)SkyType.PhysicallyBased) && hdCamera.frameSettings.IsEnabled(FrameSettingsField.AtmosphericScattering);
@@ -196,12 +199,31 @@ namespace UnityEngine.Rendering.HighDefinition
 
         internal static void UpdateShaderVariablesGlobalCB(ref ShaderVariablesGlobal cb, HDCamera hdCamera)
         {
+            PlanetMediaCameraRegistry.TryGetTransparentTransport(hdCamera.camera, out cb._PlanetMediaTransparentParameters, out cb._PlanetMediaTransparentGridSize);
             PlanetaryWeather.Update(ref cb,hdCamera);
+            // Native clouds can be kilometres beyond the ordinary opaque clip plane.
+            // The same AIR prefix must cover their actual metric scattering endpoint.
+            if(PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera) && cb._PlanetMediaTransparentParameters.w>0 && PlanetaryWeather.IsActive(hdCamera))
+            {
+                var weather=hdCamera.volumeStack.GetComponent<PlanetaryWeather>();
+                var clouds=hdCamera.volumeStack.GetComponent<VolumetricClouds>();
+                if(clouds!=null && clouds.enable.value)
+                {
+                    double near=cb._PlanetMediaTransparentParameters.x;
+                    double existingFar=near*System.Math.Pow(2,1/cb._PlanetMediaTransparentParameters.y);
+                    double cloudTop=weather.CloudBottom(clouds.bottomAltitude.value)+clouds.altitudeRange.value;
+                    double distance=Vector3.Distance(weather.center.value,hdCamera.camera.transform.position);
+                    double far=System.Math.Max(existingFar,distance+weather.radius.value+System.Math.Max(0,cloudTop));
+                    if(!double.IsNaN(far) && !double.IsInfinity(far) && far>near && far<1e18)
+                        cb._PlanetMediaTransparentParameters.y=(float)(1/System.Math.Log(far/near,2));
+                }
+            }
             cb._PBRFogEnabled=IsPBRFogEnabled(hdCamera)?1:0;
             // TODO Handle user override
             var fogSettings = hdCamera.volumeStack.GetComponent<Fog>();
 
-            if (!hdCamera.frameSettings.IsEnabled(FrameSettingsField.AtmosphericScattering) || !fogSettings.enabled.value)
+            if (!hdCamera.frameSettings.IsEnabled(FrameSettingsField.AtmosphericScattering) || !fogSettings.enabled.value ||
+                (PlanetMediaCameraRegistry.IsActive(hdCamera.camera) && !PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera)))
             {
                 UpdateShaderVariablesGlobalCBNeutralParameters(ref cb);
             }

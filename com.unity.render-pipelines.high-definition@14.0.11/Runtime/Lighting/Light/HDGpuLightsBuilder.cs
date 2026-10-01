@@ -22,6 +22,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public NativeArray<LightData> lights => m_Lights;
         public int lightsCount => m_LightCount;
         public NativeArray<DirectionalLightData> directionalLights => m_DirectionalLights;
+        public NativeArray<PlanetCelestialLightData> celestialDirectionalLights => m_CelestialDirectionalLights;
         public int directionalLightCount => m_LightTypeCounters.IsCreated ? m_LightTypeCounters[(int)GPULightTypeCountSlots.Directional] : 0;
         public int punctualLightCount => m_LightTypeCounters.IsCreated ? m_LightTypeCounters[(int)GPULightTypeCountSlots.Punctual] : 0;
         public int areaLightCount => m_LightTypeCounters.IsCreated ? m_LightTypeCounters[(int)GPULightTypeCountSlots.Area] : 0;
@@ -100,6 +101,8 @@ namespace UnityEngine.Rendering.HighDefinition
 
             if (m_DirectionalLights.IsCreated)
                 m_DirectionalLights.Dispose();
+            if (m_CelestialDirectionalLights.IsCreated)
+                m_CelestialDirectionalLights.Dispose();
 
             if (m_LightsPerView.IsCreated)
                 m_LightsPerView.Dispose();
@@ -138,6 +141,7 @@ namespace UnityEngine.Rendering.HighDefinition
         private int m_LightCount = 0;
 
         private NativeArray<DirectionalLightData> m_DirectionalLights;
+        private NativeArray<PlanetCelestialLightData> m_CelestialDirectionalLights;
         private int m_DirectionalLightCapacity = 0;
         private int m_DirectionalLightCount = 0;
 
@@ -176,6 +180,7 @@ namespace UnityEngine.Rendering.HighDefinition
             {
                 m_DirectionalLightCapacity = Math.Max(Math.Max(m_DirectionalLightCapacity * 2, requestedDurectinalCount), ArrayCapacity);
                 m_DirectionalLights.ResizeArray(m_DirectionalLightCapacity);
+                m_CelestialDirectionalLights.ResizeArray(m_DirectionalLightCapacity);
             }
             m_DirectionalLightCount = directionalLightCount;
         }

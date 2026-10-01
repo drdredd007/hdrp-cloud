@@ -69,7 +69,48 @@ horizon. Without it, the legacy orbital cutoff remains. The application owns col
 readiness and safe descent. Production terrain streaming, transparent far objects and
 temporal history remain incomplete. The metric depth is consumed by planetary fog and
 clouds, but does not replace main HDRP depth for SSR/SSGI/DOF.
-## Atmosphere
+## Coordinate-owned sky and media (1 October 2026)
+
+The application can register a camera with `PlanetMediaCameraRegistry`, submit an
+arbitrary collection of `PlanetMediaBody`, and compose `PlanetStarSkyPass`, surface
+passes, and `PlanetMediaPass`. The visible sky uses a Universe-oriented Cubemap and
+solar discs. Cubemap sampling uses the pixel footprint mip level. Every atmospheric
+body contributes bounded AIR/aerosol transport up to the nearest opaque endpoint;
+physics membership does not select the visible atmosphere. Surface passes publish
+the aggregate minimum metric depth after all bodies have rendered.
+
+Coordinate camera adapters currently select one nearest eligible planet for stock
+spherical volumetric clouds and fog. They submit AIR-only independent media and
+register `nativeWeather=true`; custom multi-body cloud/fog transport remains a
+low-level prototype. Native density/noise/LUT, source profile overrides, seed and
+coverage are retained. Clouds use aggregate planetary depth, and atmospheric prefix
+transport before cloud samples is composed without scattering the background twice.
+Transparent fog-enabled alpha, additive and premultiplied materials read the prefix
+to their own depth together with native fog.
+
+Weather receives canonical directional lighting before nearest-PBS attenuation in
+the observer basis. Ordinary geometry LightLoop and shadow matrices keep their
+native basis. Incompatible geometry shadow maps are not sampled by this weather
+branch; spherical night occlusion remains. The existing spherical adapter uses
+full-resolution clouds without planar temporal accumulation or spherical cloud
+shadow maps. Independent atmospheric multiple scattering and per-planet ambient
+probes are not implemented.
+
+Far/near surface projections retain the actual HDRP XY projection rows (including
+lens shift and jitter) while changing only their depth range. Coordinate-owned
+Scene View cameras with native AA=None use camera-local SMAA High; global editor
+preferences and other cameras are preserved. This does not implement complete
+planet motion-vector/TAA history.
+
+The SpaceRunner adapter owns Universe sky settings, runtime exposure, editor
+exposure overrides, body selection and resource lifetime. Actual D3D11 numeric
+cloud/fog/transparent and star/projection/AA tests, saved scene configuration and
+limitations are recorded in
+[the application report](https://github.com/drdredd007/SpaceRunner/blob/master/Docs/Coordinates/RENDER_CORRECTIONS_2026-10-01.md).
+The fixed EV12 editor view remains separate from optional runtime histogram
+exposure and the explicit editor stars preview at EV0.
+
+## Legacy single-atmosphere cameras
 
 The atmosphere is stock HDRP PhysicallyBasedSky (Custom model, spherical mode), which already
 renders from inside the layer and from space. PlanetGeneratorAsset.Atmosphere stores its
