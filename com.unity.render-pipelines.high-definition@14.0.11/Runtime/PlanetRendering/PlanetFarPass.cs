@@ -7,6 +7,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering.HighDefinition;
+using SpaceRunner.PlanetTerrain;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
@@ -14,6 +15,13 @@ namespace UnityEngine.Rendering.HighDefinition
     [Serializable]
     public sealed class PlanetFarPass : CustomPass
     {
+        static readonly List<PlanetFarPass> liveOwners=new List<PlanetFarPass>();
+        public static PlanetFarPass[] LiveOwners=>liveOwners.ToArray();
+        PlanetDefinition? stagedSurface;SurfaceScatterExclusions stagedScatterExclusions;
+        PlanetSurfaceRegionFilterLease activeFilter,stagedFilter,retiredFilter;
+        PlanetSurfaceDescriptor activeFilterDescriptor;
+        public SurfaceRegionFilterStatus RegionalFilteringStatus {get;private set;}
+        public bool FilteringPending=>Definition.GeneratorVersion==3&&RegionalFilteringStatus==SurfaceRegionFilterStatus.Pending;
         public Camera Observer;
         public Shader PlanetShader,CompositeShader;
         public PlanetDefinition Definition;
@@ -49,14 +57,72 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetLodSettings LodSettings=PlanetLodSettings.Default;
         public bool IsRefining=>geometry.IsRefining;
         public bool EnableLocalSurface;
-        public int LocalSurfacePatchCount=>nearGeometry.Slots.Count;
+        public PlanetTerrainMaterialSettings NativeMaterialSettings;
+        public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
+        public PlanetScatterSettings ScatterSettings;
+        public SurfaceScatterPlanetId ScatterInstanceId;
+        public bool ScatterMaterialsReady;
+        [NonSerialized] public SurfaceScatterExclusions ScatterExclusions;
+        public int LocalSurfacePatchCount=>UsesNativeSurface?(nativeGeometry?.PatchCount??0):nearGeometry.Slots.Count;
         public bool HasLocalSurfaceAt(double3 position)
         {
             var q=(double4)((quaternion)PlanetRotation).value;
-            return EnableLocalSurface && nearGeometry.Covers(Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),position-Definition.Center),128);
+            var local=PlanetField.Rotate(new double4(-q.xyz,q.w),position-Definition.Center);
+            return UsesNativeSurface?nativeGeometry!=null&&nativeGeometry.Covers(Definition,local,0):EnableLocalSurface&&nearGeometry.Covers(Definition,local,128);
         }
         readonly PlanetNearSurfaceCache nearGeometry;
-        public PlanetFarPass(){geometry=new PlanetSurfaceCache(farPatches);nearGeometry=new PlanetNearSurfaceCache(nearPatches);}
+        PlanetNativeSurfaceRenderer nativeGeometry;
+        PlanetScatterRenderer scatter;
+        PlanetLayerDepth nativeOwnedDepth;
+        GraphicsBuffer neutralAttributes;
+        // An assigned but invalid native palette is an explicit native error, not a silent legacy-near substitution.
+        bool UsesNativeSurface=>EnableLocalSurface&&NativeMaterialSettings;
+        public string NativeSurfaceStatus=>nativeGeometry?.Status??"Native terrain is released";
+        public PlanetNativeSurfaceRenderer NativeRenderer=>nativeGeometry;
+        public PlanetScatterRenderer ScatterRenderer=>scatter;
+        public string ScatterStatus=>scatter?.Status??"Scatter is released";
+        public PlanetFarPass(){geometry=new PlanetSurfaceCache(farPatches);nearGeometry=new PlanetNearSurfaceCache(nearPatches);nativeGeometry=new PlanetNativeSurfaceRenderer(this);scatter=new PlanetScatterRenderer(this);liveOwners.Add(this);}
+        public bool TryPrepareSurfaceRevision(PlanetDefinition candidate,SurfaceScatterExclusions proposedExclusions,out string status)
+        {
+            status="Surface revision is not ready";
+            if(!candidate.IsValid||candidate.GeneratorVersion!=3||!Observer||!Enabled||nativeGeometry==null||scatter==null){status="A live native surface owner and valid signed revision are required";return false;}
+            if(!PlanetSurfaceDataRegistry.TryAcquire(candidate.Surface,out var lease)){status="Candidate surface snapshot is not registered";return false;}
+            using(lease)if(!PlanetSurfaceData.Compatible(candidate,lease.View)){status="Candidate definition and snapshot do not match";return false;}
+            if(proposedExclusions!=null&&!proposedExclusions.Planet.Equals(ScatterInstanceId)){status="Candidate exclusions belong to another planet instance";return false;}
+            if(retiredFilter!=null){status="The previous derived surface support is waiting for its first committed draw";return false;}
+            candidate.Center=Definition.Center;
+            if(stagedSurface.HasValue&&!stagedSurface.Value.Surface.Equals(candidate.Surface))CancelSurfaceRevision();
+            stagedSurface=candidate;stagedScatterExclusions=proposedExclusions;
+            if(stagedFilter!=null&&stagedFilter.IsDisposed){stagedFilter.Dispose();stagedFilter=null;}
+            if(stagedFilter==null&&!PlanetSurfaceRegionFiltering.TryAcquire(candidate.Surface,out stagedFilter,out var filterStatus))
+            {status="Candidate regional filtering: "+filterStatus;return false;}
+            bool filterReady=stagedFilter.IsReady;
+            bool nativeReady=nativeGeometry.PrepareRevision(candidate);
+            bool scatterReady=scatter.PrepareRevision(candidate,proposedExclusions);
+            status=!filterReady?"Candidate regional filtering: "+stagedFilter.Status:nativeReady?(scatterReady?"Whole render revision staged":scatter.Status):nativeGeometry.Status;
+            return filterReady&&nativeReady&&scatterReady;
+        }
+        public bool TryPrepareSurfaceRevision(PlanetDefinition candidate,out string status)=>TryPrepareSurfaceRevision(candidate,ScatterExclusions,out status);
+        public bool IsSurfaceRevisionReady(PlanetSurfaceDescriptor descriptor)=>stagedSurface.HasValue&&stagedSurface.Value.Surface.Equals(descriptor)&&
+            stagedFilter!=null&&stagedFilter.Status==SurfaceRegionFilterStatus.Ready&&nativeGeometry!=null&&scatter!=null&&nativeGeometry.RevisionReady(descriptor)&&scatter.RevisionReady(descriptor);
+        public bool TryCommitSurfaceRevision(PlanetDefinition candidate,out string status)
+        {
+            status="Whole render revision is not ready";if(!candidate.IsValid||!IsSurfaceRevisionReady(candidate.Surface))return false;
+            if(candidate.Radius!=stagedSurface.Value.Radius||candidate.Seed!=stagedSurface.Value.Seed||candidate.Relief!=stagedSurface.Value.Relief||candidate.GeneratorVersion!=3)
+            {status="Committed definition differs from the staged immutable field";return false;}
+            // Preflight both owners before either swap. Commit never schedules jobs or waits.
+            if(!nativeGeometry.CommitRevision(candidate.Surface)||!scatter.CommitRevision(candidate.Surface))throw new InvalidOperationException("Preflighted render revision changed during a main-thread commit.");
+            candidate.Center=Definition.Center;Definition=candidate;ScatterExclusions=stagedScatterExclusions;
+            retiredFilter=activeFilter;activeFilter=stagedFilter;stagedFilter=null;activeFilterDescriptor=candidate.Surface;
+            RegionalFilteringStatus=SurfaceRegionFilterStatus.Ready;
+            // Both caches compare the immutable descriptor before drawing and regenerate
+            // committed-field roots on that draw's command buffer. Commit does not
+            // release GPU storage or perform any generation work.
+            stagedSurface=null;stagedScatterExclusions=null;
+            status="Native terrain and scatter revision committed";return true;
+        }
+        public void CancelSurfaceRevision()
+        {nativeGeometry?.CancelRevision();scatter?.CancelRevision();stagedFilter?.Dispose();stagedFilter=null;stagedSurface=null;stagedScatterExclusions=null;}
         Material surface,composite;
         MaterialPropertyBlock properties;
         // Layer depth spans metres to thousands of kilometres; float depth keeps reversed-Z precision across it.
@@ -71,13 +137,24 @@ namespace UnityEngine.Rendering.HighDefinition
             if(!PlanetShader || !CompositeShader)throw new InvalidOperationException("Planet shaders must be serialized in the sample scene.");
             surface=CoreUtils.CreateEngineMaterial(PlanetShader);composite=CoreUtils.CreateEngineMaterial(CompositeShader);
             properties=new MaterialPropertyBlock();
+            if(nativeGeometry==null)nativeGeometry=new PlanetNativeSurfaceRenderer(this);
+            if(scatter==null)scatter=new PlanetScatterRenderer(this);
+            if(!liveOwners.Contains(this))liveOwners.Add(this);
         }
         protected override void Execute(CustomPassContext ctx)
         {
             renderedThisFrame=false;renderedNear=false;
-            if(!EnableLocalSurface){nearGeometry.Dispose();ReleaseNearBuffer();}
+            if(!EnableLocalSurface||UsesNativeSurface){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(ctx.hdCamera.camera==Observer)AtmosphereActive=false;
             if(!Enabled || ctx.hdCamera.camera!=Observer || !Definition.IsValid || (Altitude<10000 && !EnableLocalSurface) || Observer.orthographic)return;
+            retiredFilter?.Dispose();retiredFilter=null;
+            if(Definition.GeneratorVersion==3)
+            {
+                if(activeFilter!=null&&(activeFilter.IsDisposed||!activeFilterDescriptor.Equals(Definition.Surface))){activeFilter.Dispose();activeFilter=null;}
+                if(activeFilter==null)
+                {if(PlanetSurfaceRegionFiltering.TryAcquire(Definition.Surface,out activeFilter,out var filterStatus))activeFilterDescriptor=Definition.Surface;else RegionalFilteringStatus=filterStatus;}
+                if(activeFilter!=null){_ = activeFilter.IsReady;RegionalFilteringStatus=activeFilter.Status;}
+            }
             AtmosphereActive=EnableAtmosphere && PlanetAtmosphere.Matches(ctx.hdCamera,Definition,CameraPosition);
             if(RenderPipelineManager.currentPipeline is HDRenderPipeline pipeline)
                 pipeline.BindPlanetCelestialLights(ctx.cmd,Observer);
@@ -85,11 +162,20 @@ namespace UnityEngine.Rendering.HighDefinition
             int width=ctx.hdCamera.actualWidth,height=ctx.hdCamera.actualHeight;
             var q=(double4)((quaternion)PlanetRotation).value;
             var localCamera=PlanetField.Rotate(new double4(-q.xyz,q.w),CameraPosition-Definition.Center);
+            bool nativeCoverage=UsesNativeSurface&&nativeGeometry!=null&&nativeGeometry.DrawCoverage(ctx);
+            if(nativeCoverage&&LayerDepth==null)
+            {if(nativeOwnedDepth==null)nativeOwnedDepth=new PlanetLayerDepth();nativeOwnedDepth.Begin(ctx);}
+            var effectiveDepth=LayerDepth??(nativeCoverage?nativeOwnedDepth:null);
+            composite.SetFloat("_PlanetHasNativeCoverage",nativeCoverage?1:0);
+            if(nativeCoverage)composite.SetTexture("_PlanetNativeCoverage",nativeGeometry.Coverage);
             // Generation is enqueued before the draws below on the same command buffer.
             farPatches.Generator=Generator;nearPatches.Generator=Generator;
+            bool filteredSurface=Definition.GeneratorVersion==3;
+            if(farPatches.FilterRenderingDetail!=filteredSurface)
+            {geometry.Dispose();farPatches.FilterRenderingDetail=filteredSurface;}
             geometry.Update(ctx.cmd,Definition,localCamera,height,Observer.fieldOfView,LodSettings);
             var nearTarget=LocalSurfaceTarget ?? CameraPosition;
-            if(EnableLocalSurface && math.length(nearTarget-Definition.Center)-Definition.Radius<20000)
+            if(EnableLocalSurface && !UsesNativeSurface && math.length(nearTarget-Definition.Center)-Definition.Radius<20000)
                 nearGeometry.Update(ctx.cmd,Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),nearTarget-Definition.Center));
             else if(Altitude>30000){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(!farBuffer || farBuffer.width!=width || farBuffer.height!=height)
@@ -126,6 +212,13 @@ namespace UnityEngine.Rendering.HighDefinition
             // Unity-convention depth (clear 1, ZTest LEqual): Unity reverses both for reversed-Z platforms itself.
                 ctx.cmd.ClearRenderTarget(true,true,Color.clear,1);
             properties.SetBuffer("_PlanetVertices",farPatches.Vertices);
+            properties.SetBuffer("_PlanetParentVertices",farPatches.ParentVertices??farPatches.Vertices);
+            properties.SetInteger("_PlanetFilteredSurface",filteredSurface?1:0);
+            properties.SetBuffer("_PlanetTriangleIndices",farPatches.Indices);
+            properties.SetInteger("_PlanetNativeSurface",Definition.GeneratorVersion==3?1:0);
+            if(neutralAttributes==null){neutralAttributes=new GraphicsBuffer(GraphicsBuffer.Target.Structured,1,PlanetSurfaceVertexAttributes.Stride);neutralAttributes.SetData(new PlanetSurfaceVertexAttributes[1]);}
+            properties.SetBuffer("_PlanetAttributes",farPatches.Attributes??neutralAttributes);
+            properties.SetFloat("_PlanetTerrainPalette",NativeMaterialSettings&&NativeMaterialSettings.IsValid?1:0);
             properties.SetFloat("_LayerToMeters",1000);
             properties.SetMatrix("_FarViewProjection",projection*view);
             properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
@@ -135,13 +228,15 @@ namespace UnityEngine.Rendering.HighDefinition
                 var key=geometry.Active[i];
                 var detailOrigin=PlanetSurfaceCache.Pivot(Definition,key);
                 properties.SetVector("_DetailOrigin",(Vector3)(float3)(detailOrigin-math.floor(detailOrigin/4096)*4096));
+                if(NativeMaterialSettings&&NativeMaterialSettings.IsValid)
+                {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,detailOrigin,PlanetRotation);properties.SetVector("_DetailOrigin",Vector4.zero);}
                 var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(q,PlanetSurfaceCache.Pivot(Definition,key)));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
                 properties.SetInteger("_PlanetBaseVertex",geometry.Slot(key)*farPatches.SlotVertexCount);
                 properties.SetInteger("_PlanetStitchMask",geometry.StitchMask(key));
                 ctx.cmd.DrawProcedural(farPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,farPatches.PatchIndexCount,1,properties);
             }
-            bool hasNear=EnableLocalSurface && nearGeometry.Slots.Count>0 && Altitude<20000;
+            bool hasNear=EnableLocalSurface && !UsesNativeSurface && nearGeometry.Slots.Count>0 && Altitude<20000;
             if(hasNear)
             {
                 if(!nearBuffer || nearBuffer.width!=width || nearBuffer.height!=height)
@@ -165,6 +260,8 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetMatrix("_FarViewProjection",nearProjection*view);
                 properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(localRotation));
                 properties.SetBuffer("_PlanetVertices",nearPatches.Vertices);
+                properties.SetInteger("_PlanetFilteredSurface",0);
+                properties.SetBuffer("_PlanetTriangleIndices",nearPatches.Indices);
                 properties.SetInteger("_PlanetMainVertexCount",int.MaxValue);
                 properties.SetInteger("_PlanetStitchMask",0);
                 foreach(var slot in nearGeometry.Slots)
@@ -173,9 +270,9 @@ namespace UnityEngine.Rendering.HighDefinition
                     ctx.cmd.DrawProcedural(nearPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,nearPatches.PatchIndexCount,1,properties);
                 }
             }
-            composite.SetFloat("_PlanetHasAccumulatedDepth",LayerDepth!=null?1:0);
+            composite.SetFloat("_PlanetHasAccumulatedDepth",effectiveDepth!=null?1:0);
             composite.SetFloat("_PlanetLayerWeight",LayerWeight);
-            if(LayerDepth!=null)composite.SetTexture("_PlanetAccumulatedDepth",LayerDepth.Current);
+            if(effectiveDepth!=null)composite.SetTexture("_PlanetAccumulatedDepth",effectiveDepth.Current);
             composite.SetTexture("_PlanetFarBuffer",farBuffer);
             composite.SetFloat("_PlanetHasNear",hasNear?1:0);
             composite.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
@@ -192,9 +289,9 @@ namespace UnityEngine.Rendering.HighDefinition
             ctx.cmd.SetViewport(new Rect(0,0,width,height));
             CoreUtils.DrawFullScreen(ctx.cmd,composite);
             renderedThisFrame=true;renderedNear=hasNear;
-            if(LayerDepth!=null)LayerDepth.Merge(ctx,composite);
+            if(effectiveDepth!=null)effectiveDepth.Merge(ctx,composite);
             // Published after this camera's layers, consumed by opaque fog and cloud tracing.
-            ctx.cmd.SetGlobalTexture("_PlanetWeatherFarDistance",farBuffer);
+            ctx.cmd.SetGlobalTexture("_PlanetWeatherFarDistance",effectiveDepth!=null?effectiveDepth.Current:farBuffer);
             ctx.cmd.SetGlobalTexture("_PlanetWeatherNearDistance",hasNear?nearBuffer:farBuffer);
             ctx.cmd.SetGlobalInt("_PlanetWeatherHasNear",hasNear?1:0);
             ctx.cmd.SetGlobalInt("_PlanetWeatherDepthReady",1);
@@ -202,6 +299,8 @@ namespace UnityEngine.Rendering.HighDefinition
         void ReleaseBuffer(){if(farBuffer){farBuffer.Release();CoreUtils.Destroy(farBuffer);farBuffer=null;}}
         void ReleaseNearBuffer(){if(nearBuffer){nearBuffer.Release();CoreUtils.Destroy(nearBuffer);nearBuffer=null;}}
 
-        protected override void Cleanup(){geometry.Dispose();nearGeometry.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
+        protected override void Cleanup(){CancelSurfaceRevision();liveOwners.Remove(this);geometry.Dispose();nearGeometry.Dispose();nativeGeometry?.Dispose();nativeGeometry=null;scatter?.Dispose();scatter=null;nativeOwnedDepth?.Dispose();nativeOwnedDepth=null;neutralAttributes?.Dispose();neutralAttributes=null;
+            activeFilter?.Dispose();activeFilter=null;retiredFilter?.Dispose();retiredFilter=null;
+            ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
     }
 }

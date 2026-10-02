@@ -1,0 +1,7 @@
+{
+  "name": "SpaceRunner.PlanetTerrain",
+  "rootNamespace": "SpaceRunner.PlanetTerrain",
+  "references": ["Unity.Mathematics", "Unity.Collections", "Unity.Burst"],
+  "autoReferenced": true,
+  "noEngineReferences": false
+}

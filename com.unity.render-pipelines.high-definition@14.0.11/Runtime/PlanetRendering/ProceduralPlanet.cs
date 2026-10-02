@@ -16,9 +16,12 @@ namespace UnityEngine.Rendering.HighDefinition
 
         public double Radius,Relief;
         public double3 Center;
+        // Version 3 uses a signed, immutable SurfaceField snapshot. Existing serialized assets have a zero descriptor.
+        public PlanetSurfaceDescriptor Surface;
         public static PlanetDefinition Prototype => new PlanetDefinition
         {Id=1,Seed=7243,GeneratorVersion=1,Radius=6371000.0/3,Relief=6000};
-        public bool IsValid => Id>0 && (GeneratorVersion==1 || GeneratorVersion==2) && Radius>0 && Relief>=0 && Relief<Radius*.1 &&
+        public bool IsValid => Id>0 && (GeneratorVersion==1 || GeneratorVersion==2 || (GeneratorVersion==3 && Surface.IsBound)) && Radius>0 && Relief>=0 &&
+            (GeneratorVersion==3 || Relief<Radius*.1) && math.isfinite(Radius+Relief) &&
             math.isfinite(Radius) && math.isfinite(Relief) && math.all(math.isfinite(Center));
     }
     // Stable face/quadtree address: the same address and height field will be used by surface LOD.
@@ -75,6 +78,7 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public static double Height(PlanetDefinition definition,double3 direction)
         {
+            if(definition.GeneratorVersion==3)throw new ArgumentException("Signed terrain requires PlanetSurfaceData and an immutable snapshot; the legacy field cannot sample it.");
             // Noise coordinates depend only on planet-local direction, seed and generator version.
             float3 p=(float3)direction;
             float3 shift=new float3(definition.Seed%101,definition.Seed%79,definition.Seed%67)*.137f;

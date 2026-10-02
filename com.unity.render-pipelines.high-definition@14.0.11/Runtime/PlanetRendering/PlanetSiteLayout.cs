@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Unity.Mathematics;
+using SpaceRunner.PlanetTerrain;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
@@ -45,7 +46,10 @@ namespace UnityEngine.Rendering.HighDefinition
                 for(int z=0;z<=nz;z++)for(int x=0;x<=nx;x++)
                 {
                     var local=new double3(center.x+((double)x/nx-.5)*size.x,0,center.y+((double)z/nz-.5)*size.y);
-                    var direction=math.normalize(frame.ToPlanet(local));double height=frame.ToLocal(PlanetField.Surface(definition,direction)).y;
+                    var direction=math.normalize(frame.ToPlanet(local));
+                    if(PlanetSurfaceData.TrySurface(definition,direction,out var surface)!=SurfaceSampleStatus.Ready)
+                        throw new InvalidOperationException("The site's authoritative terrain samples are not ready.");
+                    double height=frame.ToLocal(surface).y;
                     minimum=math.min(minimum,height);maximum=math.max(maximum,height);
                 }
                 bottom=(float)minimum-2*scale;top=(float)maximum+scale;

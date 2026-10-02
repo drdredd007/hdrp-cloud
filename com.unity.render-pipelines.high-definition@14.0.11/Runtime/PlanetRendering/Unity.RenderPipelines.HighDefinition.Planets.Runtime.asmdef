@@ -1,5 +1,6 @@
 {
   "references": [
+    "SpaceRunner.PlanetTerrain",
     "Unity.RenderPipelines.HighDefinition.Runtime",
     "Unity.RenderPipelines.Core.Runtime",
     "Unity.Mathematics",

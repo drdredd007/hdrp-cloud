@@ -1,5 +1,6 @@
 using System;
 using Unity.Mathematics;
+using SpaceRunner.PlanetTerrain;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
@@ -15,6 +16,20 @@ namespace UnityEngine.Rendering.HighDefinition
         // Planet-local double frame: +Y is up, +Z follows heading, +X is right.
         public double3 Position,Right,Up,Forward;
         public double4 Rotation;
+        public bool IsValid
+        {
+            get
+            {
+                if(!math.all(math.isfinite(Position))||!math.all(math.isfinite(Right))||!math.all(math.isfinite(Up))||
+                    !math.all(math.isfinite(Forward))||!math.all(math.isfinite(Rotation)))return false;
+                if(math.abs(math.lengthsq(Right)-1)>1e-8||math.abs(math.lengthsq(Up)-1)>1e-8||
+                    math.abs(math.lengthsq(Forward)-1)>1e-8||math.abs(math.lengthsq(Rotation)-1)>1e-8||
+                    math.lengthsq(math.cross(Right,Up)-Forward)>1e-16)return false;
+                return math.lengthsq(Rotate(new double3(1,0,0))-Right)<1e-16&&
+                    math.lengthsq(Rotate(new double3(0,1,0))-Up)<1e-16&&math.lengthsq(Rotate(new double3(0,0,1))-Forward)<1e-16;
+            }
+        }
+        double3 Rotate(double3 v)=>v+2*math.cross(Rotation.xyz,math.cross(Rotation.xyz,v)+Rotation.w*v);
         public double3 ToPlanet(double3 local)=>Position+Right*local.x+Up*local.y+Forward*local.z;
         public double3 ToLocal(double3 planet)
         {
@@ -33,6 +48,11 @@ namespace UnityEngine.Rendering.HighDefinition
         public static bool TryResolve(PlanetDefinition definition,PlanetSurfaceAddress address,out PlanetSurfaceFrame frame)
         {
             frame=default;if(!definition.IsValid || !address.IsValid)return false;
+            if(definition.GeneratorVersion==3)
+            {
+                if(!PlanetSurfaceDataRegistry.TryAcquire(definition.Surface,out var lease))return false;
+                using(lease)return TryResolve(definition,address,lease.View,out frame);
+            }
             var radial=Direction(address.Latitude,address.Longitude);
             double longitude=math.radians(address.Longitude%360);
             var east=new double3(-math.sin(longitude),0,math.cos(longitude));
@@ -43,6 +63,26 @@ namespace UnityEngine.Rendering.HighDefinition
             double angle=math.radians(address.Heading%360),s=math.sin(angle),c=math.cos(angle);
             frame=new PlanetSurfaceFrame {Position=PlanetField.Surface(definition,radial)+radial*address.Height,
                 Right=right*c-forward*s,Up=up,Forward=forward*c+right*s};
+            frame.Rotation=Rotation(frame.Right,frame.Up,frame.Forward);
+            return math.all(math.isfinite(frame.Position)) && math.dot(frame.Position,radial)>0 && math.all(math.isfinite(frame.Rotation));
+        }
+        public static bool TryResolve(PlanetDefinition definition,PlanetSurfaceAddress address,in NativeSurfaceView view,out PlanetSurfaceFrame frame)
+        {
+            frame=default;if(!definition.IsValid || !address.IsValid)return false;
+            if(definition.GeneratorVersion!=3)return TryResolve(definition,address,out frame);
+            var radial=Direction(address.Latitude,address.Longitude);
+            if(PlanetSurfaceData.TrySurface(definition,view,radial,out var position)!=SurfaceSampleStatus.Ready)return false;
+            var up=radial;
+            if(address.AlignToTerrain)
+            {
+                if(PlanetSurfaceData.TryNormal(definition,view,radial,out var normal)!=SurfaceSampleStatus.Ready)return false;
+                up=math.normalize((double3)normal);
+            }
+            double longitude=math.radians(address.Longitude%360);
+            var east=new double3(-math.sin(longitude),0,math.cos(longitude));var north=math.normalize(math.cross(east,radial));
+            var forward=math.normalizesafe(north-up*math.dot(north,up),north);var right=math.normalize(math.cross(up,forward));forward=math.cross(right,up);
+            double angle=math.radians(address.Heading%360),s=math.sin(angle),c=math.cos(angle);
+            frame=new PlanetSurfaceFrame {Position=position+radial*address.Height,Right=right*c-forward*s,Up=up,Forward=forward*c+right*s};
             frame.Rotation=Rotation(frame.Right,frame.Up,frame.Forward);
             return math.all(math.isfinite(frame.Position)) && math.dot(frame.Position,radial)>0 && math.all(math.isfinite(frame.Rotation));
         }

@@ -35,12 +35,12 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public bool Covers(PlanetDefinition definition,double3 camera,double margin=0)
             => initialized && definition.IsValid && generated.Seed==definition.Seed && generated.Radius==definition.Radius && generated.Relief==definition.Relief &&
-                generated.GeneratorVersion==definition.GeneratorVersion && Covers(camera,margin);
+                generated.GeneratorVersion==definition.GeneratorVersion && generated.Surface.Equals(definition.Surface) && Covers(camera,margin);
         public void Update(CommandBuffer cmd,PlanetDefinition definition,double3 camera,int budget=PatchCount)
         {
             if(cmd==null || !definition.IsValid || !math.all(math.isfinite(camera)) || math.lengthsq(camera)<1)return;
             bool discarded=backend.Reserve(2*PatchCount);
-            if(discarded || !initialized || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius || generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion)
+            if(discarded || !initialized || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius || generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface))
             {Reset();generated=definition;initialized=true;}
             var local=Frame.ToLocal(camera);
             if(pending==null && (active.Count==0 || math.abs(local.x)>256 || math.abs(local.z)>256))

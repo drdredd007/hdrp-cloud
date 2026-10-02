@@ -14,6 +14,9 @@ namespace UnityEngine.Rendering.HighDefinition
     }
     public partial class HDRenderPipeline
     {
+        /// <summary>Native object transforms may use previous floating coordinates only while the camera retains its matching history.</summary>
+        public bool IsPlanetObjectMotionHistoryValid(Camera camera)
+            =>camera!=null&&HDCamera.GetOrCreate(camera).GetCameraFrameCount()>1;
         GraphicsBuffer planetCelestialLights;
         int planetCelestialLightCapacity;
         public bool BindPlanetCelestialLights(CommandBuffer cmd, Camera camera)

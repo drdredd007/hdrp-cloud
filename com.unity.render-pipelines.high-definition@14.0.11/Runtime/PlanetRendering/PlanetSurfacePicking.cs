@@ -1,4 +1,5 @@
 using Unity.Mathematics;
+using SpaceRunner.PlanetTerrain;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
@@ -19,6 +20,11 @@ namespace UnityEngine.Rendering.HighDefinition
             out PlanetSurfaceAddress address,out double distance)
         {
             address=default;distance=0;
+            if(definition.GeneratorVersion==3)
+            {
+                if(!PlanetSurfaceDataRegistry.TryAcquire(definition.Surface,out var lease))return false;
+                using(lease)return TryPick(definition,lease.View,planetRotation,rayOrigin,rayDirection,out address,out distance);
+            }
             if(!definition.IsValid || !math.all(math.isfinite(planetRotation)) || math.lengthsq(planetRotation)<1e-20 ||
                 !math.all(math.isfinite(rayOrigin)) || !math.all(math.isfinite(rayDirection)) || math.lengthsq(rayDirection)<1e-20)return false;
             var rotation=math.normalize(planetRotation);var inverse=new double4(-rotation.xyz,rotation.w);
@@ -46,6 +52,46 @@ namespace UnityEngine.Rendering.HighDefinition
                     double lo=previous,hi=current;
                     for(int step=0;step<40;step++)
                     {double mid=(lo+hi)*.5;if(Clearance(mid)>0)lo=mid;else hi=mid;}
+                    distance=(lo+hi)*.5;var point=math.normalize(origin+direction*distance);
+                    address=new PlanetSurfaceAddress {Latitude=math.degrees(math.asin(math.clamp(point.y,-1,1))),Longitude=math.degrees(math.atan2(point.z,point.x))};
+                    return address.IsValid;
+                }
+                previous=current;
+            }
+            return false;
+        }
+        public static bool TryPick(PlanetDefinition definition,in NativeSurfaceView view,double4 planetRotation,double3 rayOrigin,double3 rayDirection,
+            out PlanetSurfaceAddress address,out double distance)
+        {
+            address=default;distance=0;
+            if(definition.GeneratorVersion!=3)return TryPick(definition,planetRotation,rayOrigin,rayDirection,out address,out distance);
+            if(!definition.IsValid || !PlanetSurfaceData.Compatible(definition,view) || !math.all(math.isfinite(planetRotation)) ||
+                math.lengthsq(planetRotation)<1e-20 || !math.all(math.isfinite(rayOrigin)) || !CubeSurface.TryNormalize(rayDirection,out var unit))return false;
+            var rotation=math.normalize(planetRotation);var inverse=new double4(-rotation.xyz,rotation.w);
+            var origin=PlanetField.Rotate(inverse,rayOrigin-definition.Center);var direction=PlanetField.Rotate(inverse,unit);
+            double outer=definition.Radius+view.MaximumHeight,inner=definition.Radius+view.MinimumHeight;
+            double closest=-math.dot(origin,direction),miss=math.lengthsq(math.cross(origin,direction));
+            if(!math.isfinite(closest) || closest<=0 || !math.isfinite(miss) || miss>outer*outer)return false;
+            double start=math.max(0,closest-math.sqrt(math.max(0,outer*outer-miss)));
+            double end=miss<inner*inner?closest-math.sqrt(inner*inner-miss):closest;
+            var data=view;
+            bool Clearance(double t,out double value)
+            {
+                var point=origin+direction*t;double radius=math.length(point);value=0;
+                if(!(radius>0) || PlanetSurfaceData.TryHeight(definition,data,point/radius,out var height)!=SurfaceSampleStatus.Ready)return false;
+                value=radius-definition.Radius-height;return math.isfinite(value);
+            }
+            if(!Clearance(0,out var atOrigin) || atOrigin<0 || end<start)return false;
+            double previous=start;
+            for(int sample=0;sample<=1024;sample++)
+            {
+                double current=math.lerp(start,end,sample/1024.0);
+                if(!Clearance(current,out var clearance))return false;
+                if(clearance<=1e-7)
+                {
+                    double lo=previous,hi=current;
+                    for(int step=0;step<40;step++)
+                    {double mid=(lo+hi)*.5;if(!Clearance(mid,out var value))return false;if(value>0)lo=mid;else hi=mid;}
                     distance=(lo+hi)*.5;var point=math.normalize(origin+direction*distance);
                     address=new PlanetSurfaceAddress {Latitude=math.degrees(math.asin(math.clamp(point.y,-1,1))),Longitude=math.degrees(math.atan2(point.z,point.x))};
                     return address.IsValid;

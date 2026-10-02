@@ -16,10 +16,13 @@ Shader "SpaceRunner/Planet Far Surface"
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Sky/PhysicallyBasedSky/PhysicallyBasedSkyCommon.hlsl"
             #include "PlanetMediaBody.hlsl"
             #include "PlanetCelestialLights.hlsl"
+            #include "PlanetTerrainMaterialShared.hlsl"
             // Vertex layout shared with PlanetPatchGenerator.compute (PlanetVertex, 40 bytes).
-            struct PlanetVertex {float3 position;float3 normal;float4 color;};
-            StructuredBuffer<PlanetVertex> _PlanetVertices;
-            int _PlanetBaseVertex;
+            struct PlanetSurfaceVertexAttributes {float4 materialWeights;float4 erosionData;uint channels;};
+            StructuredBuffer<PlanetSurfaceVertexAttributes> _PlanetAttributes;
+            float _PlanetTerrainPalette;
+            ByteAddressBuffer _PlanetTriangleIndices;
+            int _PlanetNativeSurface;
             float4x4 _FarViewProjection, _PlanetRotation;
             float3 _PatchOffset, _PlanetLightDirection;
             float4 _PlanetLightColor;
@@ -68,37 +71,31 @@ Shader "SpaceRunner/Planet Far Surface"
             float _PlanetDebugView;
             int _PlanetMainVertexCount;
             // Far layout only: edges (bit 0 v=0, 1 u=1, 2 v=1, 3 u=0) adjacent to a one-level-coarser patch.
-            int _PlanetStitchMask;
-            struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;float skirt:TEXCOORD2;float3 detail:TEXCOORD3;};
-            PlanetVertex PlanetFetch(uint id){return _PlanetVertices[(uint)_PlanetBaseVertex+id];}
-            // T-junction removal: an odd vertex on a stitched edge (and its skirt vertex) moves to the midpoint of its
-            // even neighbours, which coincide with the coarser patch's edge vertices, so both sides share one edge line.
-            PlanetVertex PlanetStitchedVertex(uint id)
+            struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;float skirt:TEXCOORD2;float3 detail:TEXCOORD3;float4 masks:TEXCOORD4;};
+            #include "PlanetPatchMorph.hlsl"
+            float4 PlanetMaterialMasks(uint id)
             {
-                PlanetVertex v=PlanetFetch(id);
-                uint mask=(uint)_PlanetStitchMask;
-                if(mask==0)return v;
-                const uint resolution=32,row=33,main=row*row;
-                uint step=0;
-                if(id<main)
-                {
-                    uint x=id%row,y=id/row;
-                    if(y==0 && (x&1) && (mask&1))step=1;
-                    else if(x==resolution && (y&1) && (mask&2))step=row;
-                    else if(y==resolution && (x&1) && (mask&4))step=1;
-                    else if(x==0 && (y&1) && (mask&8))step=row;
-                }
-                else if(id<main+4*row)
-                {
-                    uint local=id-main,edge=local/row,j=local%row;
-                    if((j&1) && ((mask>>edge)&1))step=1;
-                }
-                if(step==0)return v;
-                PlanetVertex a=PlanetFetch(id-step),b=PlanetFetch(id+step);
-                v.position=(a.position+b.position)*0.5;
-                v.normal=normalize(a.normal+b.normal);
-                v.color=(a.color+b.color)*0.5;
-                return v;
+                if(_PlanetNativeSurface==0||_PlanetTerrainPalette<=0)return float4(0,0,1,0);
+                uint step=PlanetStitchStep(id);
+                PlanetSurfaceVertexAttributes v=_PlanetAttributes[(uint)_PlanetBaseVertex+id];
+                if((v.channels&1u)==0)return float4(0,0,1,0);
+                if(step==0)return v.materialWeights;
+                return (_PlanetAttributes[(uint)_PlanetBaseVertex+id-step].materialWeights+
+                    _PlanetAttributes[(uint)_PlanetBaseVertex+id+step].materialWeights)*0.5;
+            }
+            // Cheaper distant PBR: the same canonical albedo/metal/roughness with one direct GGX lobe.
+            // Native near meshes retain HDRP's complete LightLoop, shadow maps and indirect lighting.
+            float3 PlanetFarSpecular(float3 normal,float3 view,float3 light,float3 albedo,float metallic,float smoothness)
+            {
+                float3 halfVector=view+light;float halfLength=dot(halfVector,halfVector);if(halfLength<1e-8)return 0;
+                halfVector*=rsqrt(halfLength);float nL=saturate(dot(normal,light)),nV=max(.001,saturate(dot(normal,view)));
+                float nH=saturate(dot(normal,halfVector)),vH=saturate(dot(view,halfVector));
+                float roughness=max(.04,(1-smoothness)*(1-smoothness)),a2=roughness*roughness;
+                float denominator=nH*nH*(a2-1)+1;float distribution=a2/max(PI*denominator*denominator,1e-7);
+                float k=(roughness+1)*(roughness+1)*.125;
+                float visibility=(nL/max(nL*(1-k)+k,.001))*(nV/max(nV*(1-k)+k,.001));
+                float3 f0=lerp(.04,albedo,metallic),fresnel=f0+(1-f0)*pow(1-vH,5);
+                return distribution*visibility*fresnel/max(4*nV*nL,.001);
             }
             // Indexed procedural draw: SV_VertexID is the patch-local index from the shared index buffer.
             PlanetVaryings PlanetVert(uint vertexID:SV_VertexID)
@@ -108,19 +105,39 @@ Shader "SpaceRunner/Planet Far Surface"
                 o.relative=mul((float3x3)_PlanetRotation,input.position)+_PatchOffset;
                 o.detail=mul((float3x3)_DetailRotation,input.position*_LayerToMeters)+_DetailOrigin;
                 o.position=mul(_FarViewProjection,float4(o.relative,1));
-                o.normal=mul((float3x3)_PlanetRotation,input.normal);o.color=input.color;o.skirt=vertexID>=(uint)_PlanetMainVertexCount?1:0;return o;
+                o.normal=mul((float3x3)_PlanetRotation,input.normal);o.color=input.color;o.skirt=vertexID>=(uint)_PlanetMainVertexCount?1:0;
+                o.masks=PlanetMaterialMasks(vertexID);return o;
             }
-            float4 PlanetFrag(PlanetVaryings input):SV_Target
+            float4 PlanetFrag(PlanetVaryings input,uint primitiveID:SV_PrimitiveID):SV_Target
             {
+                // Read the whole indexed primitive: interpolated alpha could admit fragments
+                // of a triangle whose missing vertex was collapsed to a harmless finite position.
+                if(_PlanetNativeSurface!=0)
+                {
+                    uint3 ids=_PlanetTriangleIndices.Load3(primitiveID*12u);
+                    float ready=min(PlanetStitchedVertex(ids.x).color.a,min(PlanetStitchedVertex(ids.y).color.a,PlanetStitchedVertex(ids.z).color.a));
+                    clip(ready-1.0);
+                }
                 float3 normal=normalize(input.normal);
                 float3 radialUp=normalize(input.relative*_LayerToMeters-_PlanetCenterRelative);
                 float slope=1.0-saturate(dot(normal,radialUp));
                 float broad=FilteredDetail(input.detail/16.0);
                 float fine=FilteredDetail(input.detail);
                 float3 albedo=input.color.rgb*(0.78+0.30*broad+0.14*fine);
+                float metallic=0,smoothness=.4;
                 // Exposed slopes are slightly lighter rock. Material detail never displaces collision geometry.
                 albedo=lerp(albedo,albedo*1.18,smoothstep(0.04,0.35,slope));
+                if(_PlanetTerrainPalette>0)
+                {
+                    float3 normalPlanet=normalize(mul((float3x3)_PlanetRenderToLocal,normal));
+                    PlanetTerrainMaterialSample material=PlanetTerrainEvaluate(input.detail,normalPlanet,input.masks,_PlanetMaterialControls.z);
+                    albedo=material.albedo*material.ao;
+                    metallic=material.metallic;smoothness=material.smoothness;
+                    normal=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
+                }
                 float3 brdf=albedo*INV_PI;
+                if(_PlanetTerrainPalette>0)brdf*=1-metallic;
+                float3 viewDirection=normalize(-input.relative);
                 float3 radiance=0;
                 uint directionalCount=_PlanetCelestialLightDataReady!=0?_PlanetCelestialLightCount:_DirectionalLightCount;
                 if(_PlanetUseSceneLights>0 && directionalCount>0)
@@ -135,10 +152,12 @@ Shader "SpaceRunner/Planet Far Surface"
                         float3 L=-light.forward;
                         L+=2*cross(_PlanetLightRotation.xyz,cross(_PlanetLightRotation.xyz,L)+_PlanetLightRotation.w*L);
                         float3 irradiance=light.color*light.diffuseDimmer;
+                        float3 specularIrradiance=light.color*light.specularDimmer;
                         if(_PlanetCelestialLightDataReady!=0)
                         {
                             PlanetCelestialLightData celestial=_PlanetCelestialLightDatas[i];
                             irradiance=celestial.Color.rgb*celestial.Dimmers.x;
+                            specularIrradiance=celestial.Color.rgb*celestial.Dimmers.y;
                         }
                         if(_PlanetAtmosphere>0 && asint(light.distanceFromCamera)>=0)
                         {
@@ -148,8 +167,10 @@ Shader "SpaceRunner/Planet Far Surface"
                             radiance+=brdf*SampleGroundIrradianceTexture(dot(up,L))*irradiance;
                             if(_PlanetOwnAir<=0)irradiance*=EvaluateSunColorAttenuation(dot(up,L),r);
                         }
-                        irradiance*=PlanetOwnSunTransmission(position,L);
+                        float3 transmission=PlanetOwnSunTransmission(position,L);irradiance*=transmission;
                         radiance+=brdf*irradiance*saturate(dot(normal,L));
+                        if(_PlanetTerrainPalette>0)radiance+=PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness)*
+                            specularIrradiance*transmission*saturate(dot(normal,L));
                     }
                 }
                 else
@@ -158,6 +179,12 @@ Shader "SpaceRunner/Planet Far Surface"
                     float3 p=input.relative*_LayerToMeters-_PlanetCenterRelative;
                     radiance=albedo*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb*
                         PlanetOwnSunTransmission(p,normalize(_PlanetLightDirection))+0.001);
+                    if(_PlanetTerrainPalette>0)
+                    {
+                        float3 L=normalize(_PlanetLightDirection),transmission=PlanetOwnSunTransmission(p,L);
+                        radiance=(brdf+PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness))*
+                            _PlanetLightLux*sun*_PlanetLightColor.rgb*transmission+albedo*(_PlanetLightLux/PI)*.001;
+                    }
                 }
                 if(_PlanetDebugView>0 && input.skirt>0)radiance=float3(1,0,1)*_PlanetLightLux;
                 return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);

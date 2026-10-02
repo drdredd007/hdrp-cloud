@@ -1,0 +1,22 @@
+#ifndef SPACERUNNER_TERRAIN_LIT_SHARE_INCLUDED
+#define SPACERUNNER_TERRAIN_LIT_SHARE_INCLUDED
+// Native HDRP attributes and raster passes. No GPU vertex displacement or private depth buffer.
+#define ATTRIBUTES_NEED_NORMAL
+#define ATTRIBUTES_NEED_TANGENT
+#define ATTRIBUTES_NEED_TEXCOORD0
+#define ATTRIBUTES_NEED_TEXCOORD1
+#define ATTRIBUTES_NEED_TEXCOORD2
+#define ATTRIBUTES_NEED_TEXCOORD3
+#define ATTRIBUTES_NEED_COLOR
+#define VARYINGS_NEED_POSITION_WS
+#define VARYINGS_NEED_TANGENT_TO_WORLD
+#define VARYINGS_NEED_TEXCOORD0
+#define VARYINGS_NEED_TEXCOORD1
+#define VARYINGS_NEED_TEXCOORD2
+#define VARYINGS_NEED_TEXCOORD3
+#define VARYINGS_NEED_COLOR
+#ifdef _DOUBLESIDED_ON
+#define VARYINGS_NEED_CULLFACE
+#endif
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/VaryingMesh.hlsl"
+#endif

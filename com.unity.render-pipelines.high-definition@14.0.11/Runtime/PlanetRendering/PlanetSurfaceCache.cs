@@ -19,6 +19,9 @@ namespace UnityEngine.Rendering.HighDefinition
         PlanetLodSettings lastSettings;
         PlanetDefinition generated;
         bool initialized;
+        int lastErrorVersion=-1;
+        int lastFilterGeneration;
+        public PlanetLodDiagnostics LodDiagnostics { get; private set; }
         public PlanetSurfaceCache(IPlanetPatchBackend backend)
         {
             if(backend==null)throw new ArgumentNullException(nameof(backend));
@@ -41,15 +44,24 @@ namespace UnityEngine.Rendering.HighDefinition
             if(cmd==null || !definition.IsValid || !math.all(math.isfinite(camera)) || height<=0 || !math.isfinite(fov))return;
             var settings=requested.Clamped;
             bool discarded=backend.Reserve(RequiredSlots(settings));
+            int filterGeneration=0;
+            if(backend is PlanetGpuPatchBackend gpu&&gpu.FilterRenderingDetail&&definition.GeneratorVersion==3)
+            {gpu.PrepareRegionalFiltering(definition);filterGeneration=gpu.FilteringGeneration;}
             if(discarded || !initialized || generated.Id!=definition.Id || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius ||
-                generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion)
-                Restart(cmd,definition);
+                generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface)||lastFilterGeneration!=filterGeneration)
+            {Restart(cmd,definition);lastFilterGeneration=filterGeneration;}
             double altitude=math.length(camera)-definition.Radius;
+            int errorVersion=definition.GeneratorVersion==3?PlanetSurfaceDataRegistry.LodPreparationVersion(definition.Surface):0;
             if(pending==null && (lastHeight!=height || math.distance(lastCamera,camera)>math.max(10,altitude*.02) ||
-                math.abs(lastFov-fov)>.1f || !lastSettings.Equals(settings)))
+                math.abs(lastFov-fov)>.1f || !lastSettings.Equals(settings)||lastErrorVersion!=errorVersion))
             {
-                pending=PlanetLodSelector.Select(definition,camera,height,fov,settings,active);pendingIndex=0;
+                var selected=PlanetLodSelector.Select(definition,camera,height,fov,settings,out var diagnostics,active);
+                LodDiagnostics=diagnostics;lastErrorVersion=errorVersion;
                 lastCamera=camera;lastHeight=height;lastFov=fov;lastSettings=settings;
+                // Keep the completed bank while replacement error measurements are warming. A candidate
+                // starting from six roots must not replace a previously refined cover with provisional coarse leaves.
+                if(diagnostics.PreparationPending)return;
+                pending=selected;pendingIndex=0;
                 int needed=slots.Count;foreach(var key in pending)if(!slots.ContainsKey(key))needed++;
                 // Balancing can exceed the budget-based reservation; growing discards stored patches, so start over.
                 if(backend.Reserve(math.max(RequiredSlots(settings),needed))){Restart(cmd,definition);return;}
@@ -81,7 +93,7 @@ namespace UnityEngine.Rendering.HighDefinition
             for(int face=0;face<6;face++){var key=new PlanetPatchKey(face,0,0,0);active.Add(key);Generate(cmd,definition,key);}
             generated=definition;initialized=true;
         }
-        void Reset(){backend.ReleaseAll();slots.Clear();stitch.Clear();active.Clear();pending=null;initialized=false;lastHeight=0;}
+        void Reset(){backend.ReleaseAll();slots.Clear();stitch.Clear();active.Clear();pending=null;initialized=false;lastHeight=0;lastErrorVersion=-1;LodDiagnostics=default;}
         // Releases GPU storage; the cache can be updated again afterwards.
         public void Dispose(){Reset();backend.Dispose();}
     }

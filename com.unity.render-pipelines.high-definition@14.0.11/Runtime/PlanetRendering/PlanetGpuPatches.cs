@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using SpaceRunner.PlanetTerrain;
 using Unity.Mathematics;
 
 namespace UnityEngine.Rendering.HighDefinition
@@ -11,6 +12,14 @@ namespace UnityEngine.Rendering.HighDefinition
         public float3 Position,Normal;
         public float4 Color;
         public const int Stride=40;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PlanetSurfaceVertexAttributes
+    {
+        public float4 MaterialWeights,ErosionData;
+        public uint Channels;
+        public const int Stride=36;
     }
 
     public enum PlanetPatchLayout
@@ -45,8 +54,9 @@ namespace UnityEngine.Rendering.HighDefinition
         public static int IndexCount(PlanetPatchLayout layout)=>layout==PlanetPatchLayout.Far?Resolution*Resolution*6+4*Resolution*6:Resolution*Resolution*6;
 
         ComputeShader generator;
-        int farKernel=-1,localKernel=-1;
-        GraphicsBuffer vertices,indices;
+        int farKernel=-1,localKernel=-1,nativeFarKernel=-1,nativeLocalKernel=-1,filteredFarKernel=-1;
+        PlanetSurfaceGpuData surfaceData;
+        GraphicsBuffer vertices,indices,attributes,parentVertices;
         int capacity;
         readonly Stack<int> free=new Stack<int>();
         readonly HashSet<int> used=new HashSet<int>();
@@ -56,12 +66,29 @@ namespace UnityEngine.Rendering.HighDefinition
         public int PatchIndexCount=>IndexCount(Layout);
         public GraphicsBuffer Vertices=>vertices;
         public GraphicsBuffer Indices=>indices;
+        // Populated only by canonical version-3 generation; legacy backends allocate no attribute buffer.
+        public GraphicsBuffer Attributes=>attributes;
+        public GraphicsBuffer ParentVertices=>parentVertices;
+        // Physical/foundation callers retain Full. Rendering opts into explicit metric band support.
+        public bool FilterRenderingDetail {get;set;}
+        public SurfaceRegionFilterStatus FilteringStatus {get;private set;}
+        public int FilteringGeneration=>surfaceData?.FilterGeneration??0;
+        public bool PrepareRegionalFiltering(in PlanetDefinition definition)
+        {
+            if(definition.GeneratorVersion!=3){FilteringStatus=SurfaceRegionFilterStatus.Ready;return true;}
+            if(surfaceData==null||surfaceData.IsDisposed||!surfaceData.Key.Equals(definition.Surface))
+            {PlanetSurfaceGpuData.Release(surfaceData);surfaceData=PlanetSurfaceGpuData.Acquire(definition);}
+            surfaceData.ValidateDefinition(definition);
+            bool ready=surfaceData.PrepareFiltering(out var status);FilteringStatus=status;return ready;
+        }
+        public static double RenderFootprint(in PlanetDefinition definition,PlanetPatchKey key)
+            =>2*(definition.Radius+definition.Relief)/((1<<key.Level)*(double)Resolution);
         public int Capacity=>capacity;
         // Optional serialized reference; otherwise the shader is loaded from this module's Resources.
         public ComputeShader Generator
         {
             get=>generator;
-            set{if(value!=generator){generator=value;farKernel=localKernel=-1;}}
+            set{if(value!=generator){generator=value;farKernel=localKernel=nativeFarKernel=nativeLocalKernel=filteredFarKernel=-1;}}
         }
 
         public PlanetGpuPatchBackend(PlanetPatchLayout layout,ComputeShader generator=null){Layout=layout;this.generator=generator;}
@@ -71,6 +98,8 @@ namespace UnityEngine.Rendering.HighDefinition
             if(slots<=capacity && vertices!=null)return false;
             int next=math.max(slots,math.max(8,capacity*2));
             vertices?.Dispose();
+            parentVertices?.Dispose();parentVertices=null;
+            attributes?.Dispose();attributes=null;
             vertices=new GraphicsBuffer(GraphicsBuffer.Target.Structured,next*SlotVertexCount,PlanetVertex.Stride){name=$"Planet {Layout} patch vertices"};
             if(indices==null)indices=BuildIndices(Layout);
             capacity=next;free.Clear();used.Clear();
@@ -93,6 +122,11 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeIntParam(shader,"_PatchFace",key.Face);cmd.SetComputeIntParam(shader,"_PatchLevel",key.Level);
             cmd.SetComputeIntParam(shader,"_PatchX",key.X);cmd.SetComputeIntParam(shader,"_PatchY",key.Y);
             cmd.SetComputeFloatParam(shader,"_PatchSkirtDepth",(float)skirt);
+            if(definition.GeneratorVersion==3&&FilterRenderingDetail)
+            {
+                double footprint=RenderFootprint(definition,key);var bits=PlanetSurfaceGpuData.Pair(footprint,footprint*2);
+                cmd.SetComputeIntParams(shader,"_SurfaceRenderFootprints",unchecked((int)bits.x),unchecked((int)bits.y),unchecked((int)bits.z),unchecked((int)bits.w));
+            }
             cmd.DispatchCompute(shader,kernel,(SlotVertexCount+63)/64,1,1);
         }
         public void GenerateLocal(CommandBuffer cmd,int slot,in PlanetDefinition definition,in PlanetSurfaceFrame frame,int2 key,double size)
@@ -106,6 +140,7 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeFloatParam(shader,"_FrameHeight",(float)(radius-definition.Radius));
             cmd.SetComputeIntParam(shader,"_LocalKeyX",key.x);cmd.SetComputeIntParam(shader,"_LocalKeyZ",key.y);
             cmd.SetComputeFloatParam(shader,"_LocalCellSize",(float)(size/Resolution));
+            if(definition.GeneratorVersion==3)PlanetSurfaceGpuData.BindFrame(cmd,shader,definition,frame,size);
             cmd.DispatchCompute(shader,kernel,(SlotVertexCount+63)/64,1,1);
         }
 
@@ -115,8 +150,32 @@ namespace UnityEngine.Rendering.HighDefinition
             if(vertices==null || !used.Contains(slot))throw new ArgumentOutOfRangeException(nameof(slot));
             if(!generator)generator=Resources.Load<ComputeShader>(ResourceName);
             if(!generator)throw new InvalidOperationException("Planet patch generator compute shader is unavailable.");
-            if(farKernel<0){farKernel=generator.FindKernel("FarPatch");localKernel=generator.FindKernel("LocalPatch");}
-            kernel=layout==PlanetPatchLayout.Far?farKernel:localKernel;
+            if(definition.GeneratorVersion==3)
+            {
+                if(nativeFarKernel<0){nativeFarKernel=generator.FindKernel("NativeFarPatch");nativeLocalKernel=generator.FindKernel("NativeLocalPatch");}
+                kernel=layout==PlanetPatchLayout.Far?nativeFarKernel:nativeLocalKernel;
+                if(layout==PlanetPatchLayout.Far&&FilterRenderingDetail)
+                {if(filteredFarKernel<0)filteredFarKernel=generator.FindKernel("NativeFilteredFarPatch");kernel=filteredFarKernel;}
+                if(!generator.IsSupported(kernel))throw new NotSupportedException("The device cannot run the signed terrain kernel; legacy noise is not a valid replacement.");
+                if(surfaceData==null || surfaceData.IsDisposed || !surfaceData.Key.Equals(definition.Surface))
+                {PlanetSurfaceGpuData.Release(surfaceData);surfaceData=PlanetSurfaceGpuData.Acquire(definition);}
+                surfaceData.ValidateDefinition(definition);
+                if(layout==PlanetPatchLayout.Far&&FilterRenderingDetail)
+                {surfaceData.PrepareFiltering(out var status);FilteringStatus=status;}
+                surfaceData.Bind(cmd,generator,kernel);
+                if(attributes==null)attributes=new GraphicsBuffer(GraphicsBuffer.Target.Structured,capacity*SlotVertexCount,PlanetSurfaceVertexAttributes.Stride){name=$"Planet {Layout} canonical attributes"};
+                cmd.SetComputeBufferParam(generator,kernel,"_PlanetAttributes",attributes);
+                if(layout==PlanetPatchLayout.Far&&FilterRenderingDetail)
+                {
+                    if(parentVertices==null)parentVertices=new GraphicsBuffer(GraphicsBuffer.Target.Structured,capacity*SlotVertexCount,PlanetVertex.Stride){name="Planet parent-band patch vertices"};
+                    cmd.SetComputeBufferParam(generator,kernel,"_PlanetParentVertices",parentVertices);
+                }
+            }
+            else
+            {
+                if(farKernel<0){farKernel=generator.FindKernel("FarPatch");localKernel=generator.FindKernel("LocalPatch");}
+                kernel=layout==PlanetPatchLayout.Far?farKernel:localKernel;
+            }
             cmd.SetComputeVectorParam(generator,"_PlanetSeedShift",(Vector3)(new float3(definition.Seed%101,definition.Seed%79,definition.Seed%67)*.137f));
             cmd.SetComputeFloatParam(generator,"_PlanetSeedDryness",definition.Seed*.01f);
             cmd.SetComputeFloatParam(generator,"_PlanetRadius",(float)definition.Radius);
@@ -154,12 +213,13 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         static GraphicsBuffer BuildIndices(PlanetPatchLayout layout)
         {
-            var buffer=new GraphicsBuffer(GraphicsBuffer.Target.Index,IndexCount(layout),sizeof(int)){name=$"Planet {layout} patch indices"};
+            var buffer=new GraphicsBuffer(GraphicsBuffer.Target.Index|GraphicsBuffer.Target.Raw,IndexCount(layout),sizeof(int)){name=$"Planet {layout} patch indices"};
             buffer.SetData(BuildIndexArray(layout));return buffer;
         }
         public void Dispose()
         {
-            vertices?.Dispose();indices?.Dispose();vertices=null;indices=null;capacity=0;free.Clear();used.Clear();
+            PlanetSurfaceGpuData.Release(surfaceData);surfaceData=null;
+            vertices?.Dispose();indices?.Dispose();attributes?.Dispose();parentVertices?.Dispose();vertices=null;indices=null;attributes=null;parentVertices=null;capacity=0;free.Clear();used.Clear();
         }
     }
 }

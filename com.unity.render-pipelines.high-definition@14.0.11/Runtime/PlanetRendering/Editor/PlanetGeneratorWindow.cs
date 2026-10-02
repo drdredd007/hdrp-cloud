@@ -214,6 +214,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     texture=new RenderTexture(previewWidth,previewHeight,24,RenderTextureFormat.ARGB32){hideFlags=HideFlags.HideAndDontSave};texture.Create();
                 }
                 var definition=settings.Definition;pass.Definition=definition;pass.LodSettings=settings.Lod;pass.PlanetRotation=Quaternion.Euler(settings.Orientation);
+                pass.NativeMaterialSettings=settings.NativeMaterialSettings;pass.NativeSurfaceSettings=settings.NativeSurfaceSettings;
                 var radial=Quaternion.Euler(orbit.y,orbit.x,0)*Vector3.back;
                 pass.CameraPosition=(double3)(float3)radial*(definition.Radius+altitude);
                 previewCamera.transform.SetPositionAndRotation(Vector3.zero,Quaternion.LookRotation(-radial,Vector3.up));
@@ -238,6 +239,10 @@ namespace UnityEngine.Rendering.HighDefinition
     {
         internal static event Action<PlanetGeneratorAsset> SettingsChanged;
         public void DrawSettings(){serializedObject.Update();DrawPropertiesExcluding(serializedObject,"m_Script");if(serializedObject.ApplyModifiedProperties())SettingsChanged?.Invoke((PlanetGeneratorAsset)target);}
-        public override void OnInspectorGUI(){DrawSettings();if(GUILayout.Button("Open Planet Generator"))PlanetGeneratorWindow.Open((PlanetGeneratorAsset)target);}
+        public override void OnInspectorGUI()
+        {
+            DrawSettings();if(GUILayout.Button("Open Planet Generator"))PlanetGeneratorWindow.Open((PlanetGeneratorAsset)target);
+            if(GUILayout.Button("Terrain Bake / Gaea"))PlanetTerrainAuthoringWindow.Open((PlanetGeneratorAsset)target);
+        }
     }
 }

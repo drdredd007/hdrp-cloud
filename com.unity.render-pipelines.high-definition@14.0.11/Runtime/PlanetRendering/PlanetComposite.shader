@@ -15,6 +15,8 @@ Shader "SpaceRunner/Planet Composite"
             TEXTURE2D(_PlanetFarBuffer);
             TEXTURE2D(_PlanetNearBuffer);
             float _PlanetHasNear;
+            TEXTURE2D_X(_PlanetNativeCoverage);
+            float _PlanetHasNativeCoverage;
             TEXTURE2D(_PlanetAccumulatedDepth);
             float _PlanetHasAccumulatedDepth;
             float _PlanetLayerWeight;
@@ -49,6 +51,7 @@ Shader "SpaceRunner/Planet Composite"
 
             float4 Composite(Varyings input):SV_Target
             {
+                if(_PlanetHasNativeCoverage>0&&LOAD_TEXTURE2D_X(_PlanetNativeCoverage,uint2(input.positionCS.xy)).r>0)return 0;
                 float4 far=LOAD_TEXTURE2D(_PlanetFarBuffer,uint2(input.positionCS.xy));
                 if(_PlanetHasNear>0)
                 {
@@ -91,12 +94,14 @@ Shader "SpaceRunner/Planet Composite"
             #pragma fragment MergeDepth
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
             TEXTURE2D(_PlanetFarBuffer);TEXTURE2D(_PlanetNearBuffer);TEXTURE2D(_PlanetAccumulatedDepth);
+            TEXTURE2D_X(_PlanetNativeCoverage);float _PlanetHasNativeCoverage;
             float _PlanetHasNear;
             float4 MergeDepth(Varyings input):SV_Target
             {
                 uint2 pixel=uint2(input.positionCS.xy);
                 float distance=LOAD_TEXTURE2D(_PlanetFarBuffer,pixel).a;
                 if(_PlanetHasNear>0){float n=LOAD_TEXTURE2D(_PlanetNearBuffer,pixel).a;if(n>0)distance=n;}
+                if(_PlanetHasNativeCoverage>0){float n=LOAD_TEXTURE2D_X(_PlanetNativeCoverage,pixel).r;if(n>0)distance=n;}
                 float previous=LOAD_TEXTURE2D(_PlanetAccumulatedDepth,pixel).a;
                 if(previous>0 && (distance<=0 || previous<distance))distance=previous;
                 return float4(0,0,0,distance);
