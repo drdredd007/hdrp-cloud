@@ -40,7 +40,7 @@ namespace SpaceRunner.PlanetTerrain
             if (!IsValid || !recipe.IsValid || !math.all(math.isfinite(unitDirection)) || !math.isfinite(height) || !math.isfinite(slope) || slope < 0 || !math.isfinite(wetness))
                 throw new ArgumentException("Automatic material evaluation requires a valid profile and finite final surface samples.");
             double latitude = math.abs(unitDirection.y), altitude = math.max(0, height - recipe.SeaLevel);
-            double temperature = math.lerp(EquatorTemperature, PoleTemperature, math.pow(latitude, .75)) - altitude / 1000 * LapseRatePerKilometre;
+            double temperature = math.lerp(EquatorTemperature, PoleTemperature, (SurfaceRecipe.HasStructuralAuthority(recipe.AlgorithmVersion) ? math.sqrt(latitude) * math.sqrt(math.sqrt(latitude)) : math.pow(latitude, .75))) - altitude / 1000 * LapseRatePerKilometre;
             double rock = Smooth(RockSlopeStart, RockSlopeEnd, slope), snow = recipe.Style == SurfaceStyle.Rocky ? 0 : 1 - Smooth(SnowTemperatureStart, SnowTemperatureEnd, temperature);
             wetness = recipe.Style == SurfaceStyle.Rocky ? 0 : math.clamp(wetness, 0, 1);
             double sand = recipe.Style == SurfaceStyle.Rocky ? (1 - rock) * .35 : (1 - wetness) * (1 - snow) * (1 - rock);

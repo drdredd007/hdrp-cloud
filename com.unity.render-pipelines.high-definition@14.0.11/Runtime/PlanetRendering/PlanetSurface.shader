@@ -17,12 +17,10 @@ Shader "SpaceRunner/Planet Far Surface"
             #include "PlanetMediaBody.hlsl"
             #include "PlanetCelestialLights.hlsl"
             #include "PlanetTerrainMaterialShared.hlsl"
+            #include "PlanetTerrainAmbientLighting.hlsl"
+            #include "WorldOrogen/WorldOrogenBaseMap.hlsl"
             // Vertex layout shared with PlanetPatchGenerator.compute (PlanetVertex, 40 bytes).
-            struct PlanetSurfaceVertexAttributes {float4 materialWeights;float4 erosionData;uint channels;};
-            StructuredBuffer<PlanetSurfaceVertexAttributes> _PlanetAttributes;
-            float _PlanetTerrainPalette;
             ByteAddressBuffer _PlanetTriangleIndices;
-            int _PlanetNativeSurface;
             float4x4 _FarViewProjection, _PlanetRotation;
             float3 _PatchOffset, _PlanetLightDirection;
             float4 _PlanetLightColor;
@@ -73,16 +71,7 @@ Shader "SpaceRunner/Planet Far Surface"
             // Far layout only: edges (bit 0 v=0, 1 u=1, 2 v=1, 3 u=0) adjacent to a one-level-coarser patch.
             struct PlanetVaryings {float4 position:SV_POSITION;float3 relative:TEXCOORD0;float3 normal:TEXCOORD1;float4 color:COLOR;float skirt:TEXCOORD2;float3 detail:TEXCOORD3;float4 masks:TEXCOORD4;};
             #include "PlanetPatchMorph.hlsl"
-            float4 PlanetMaterialMasks(uint id)
-            {
-                if(_PlanetNativeSurface==0||_PlanetTerrainPalette<=0)return float4(0,0,1,0);
-                uint step=PlanetStitchStep(id);
-                PlanetSurfaceVertexAttributes v=_PlanetAttributes[(uint)_PlanetBaseVertex+id];
-                if((v.channels&1u)==0)return float4(0,0,1,0);
-                if(step==0)return v.materialWeights;
-                return (_PlanetAttributes[(uint)_PlanetBaseVertex+id-step].materialWeights+
-                    _PlanetAttributes[(uint)_PlanetBaseVertex+id+step].materialWeights)*0.5;
-            }
+            #include "PlanetPatchMaterialMorph.hlsl"
             // Cheaper distant PBR: the same canonical albedo/metal/roughness with one direct GGX lobe.
             // Native near meshes retain HDRP's complete LightLoop, shadow maps and indirect lighting.
             float3 PlanetFarSpecular(float3 normal,float3 view,float3 light,float3 albedo,float metallic,float smoothness)
@@ -135,6 +124,8 @@ Shader "SpaceRunner/Planet Far Surface"
                     metallic=material.metallic;smoothness=material.smoothness;
                     normal=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
                 }
+                if(_OrogenBaseColourEnabled>0)
+                {albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));normal=normalize(input.normal);metallic=0;smoothness=.4;}
                 float3 brdf=albedo*INV_PI;
                 if(_PlanetTerrainPalette>0)brdf*=1-metallic;
                 float3 viewDirection=normalize(-input.relative);
@@ -164,11 +155,14 @@ Shader "SpaceRunner/Planet Far Surface"
                             // Same models as the sky's analytic ground: sun transmittance to the point and
                             // precomputed sky irradiance for a horizontal surface.
                             float r=max(radial,_PlanetaryRadius+1);
-                            radiance+=brdf*SampleGroundIrradianceTexture(dot(up,L))*irradiance;
+                            // The nearest native body's camera probe replaces this old
+                            // horizontal, per-light approximation of the same sky diffuse.
+                            if(_PlanetNativeIndirect<=0)radiance+=brdf*SampleGroundIrradianceTexture(dot(up,L))*irradiance;
                             if(_PlanetOwnAir<=0)irradiance*=EvaluateSunColorAttenuation(dot(up,L),r);
                         }
                         float3 transmission=PlanetOwnSunTransmission(position,L);irradiance*=transmission;
-                        radiance+=brdf*irradiance*saturate(dot(normal,L));
+                        radiance+=brdf*irradiance*saturate(dot(normal,L))*
+                            PlanetNativeDirectDiffuseFactor(normal,viewDirection,L,smoothness);
                         if(_PlanetTerrainPalette>0)radiance+=PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness)*
                             specularIrradiance*transmission*saturate(dot(normal,L));
                     }
@@ -177,15 +171,17 @@ Shader "SpaceRunner/Planet Far Surface"
                 {
                     float sun=saturate(dot(normal,normalize(_PlanetLightDirection)));
                     float3 p=input.relative*_LayerToMeters-_PlanetCenterRelative;
-                    radiance=albedo*(_PlanetLightLux/PI)*(sun*_PlanetLightColor.rgb*
+                    radiance=albedo*(_PlanetLightLux/PI)*(sun*PlanetNativeDirectDiffuseFactor(normal,viewDirection,normalize(_PlanetLightDirection),smoothness)*_PlanetLightColor.rgb*
                         PlanetOwnSunTransmission(p,normalize(_PlanetLightDirection))+0.001);
                     if(_PlanetTerrainPalette>0)
                     {
                         float3 L=normalize(_PlanetLightDirection),transmission=PlanetOwnSunTransmission(p,L);
-                        radiance=(brdf+PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness))*
+                        radiance=(brdf*PlanetNativeDirectDiffuseFactor(normal,viewDirection,L,smoothness)+PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness))*
                             _PlanetLightLux*sun*_PlanetLightColor.rgb*transmission+albedo*(_PlanetLightLux/PI)*.001;
                     }
                 }
+                // One surface/environment term, independent of directional-light count.
+                radiance+=PlanetNativeEnvironmentLighting(albedo,metallic,smoothness,normal,viewDirection,input.relative*_LayerToMeters);
                 if(_PlanetDebugView>0 && input.skirt>0)radiance=float3(1,0,1)*_PlanetLightLux;
                 return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);
             }

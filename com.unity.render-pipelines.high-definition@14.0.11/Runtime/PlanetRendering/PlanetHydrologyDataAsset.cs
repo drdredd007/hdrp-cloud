@@ -10,6 +10,8 @@ namespace UnityEngine.Rendering.HighDefinition
     {
         [SerializeField, HideInInspector] byte[] payload;
         [NonSerialized] SurfaceHydrologyField cached;
+        /// <summary>Persisted payload size for authoring storage admission.</summary>
+        public long EncodedPayloadBytes=>payload?.LongLength??0;
 
         public void SetField(SurfaceHydrologyField field)
         {

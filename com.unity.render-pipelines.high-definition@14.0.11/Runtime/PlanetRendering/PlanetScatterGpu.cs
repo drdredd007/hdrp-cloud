@@ -31,8 +31,9 @@ namespace UnityEngine.Rendering.HighDefinition
         readonly bool materialsReady;
         readonly float baseRadius;
         readonly PlanetSurfaceGpuData surface;
+        readonly PlanetSurfaceGpuFamily surfaceFamily;
         readonly ComputeShader shader;
-        readonly int generateKernel,cullKernel,copyHistoryKernel;
+        readonly int generateKernel,cullKernel,copyHistoryKernel,generateGroupSize;
         GraphicsBuffer cells,excludedKeys,excludedCircles,candidates,poses,lodState,counters,historyCells;
         readonly GraphicsBuffer[] visible=new GraphicsBuffer[4],arguments=new GraphicsBuffer[4];
         readonly MaterialPropertyBlock[] properties=new MaterialPropertyBlock[4];
@@ -79,14 +80,20 @@ namespace UnityEngine.Rendering.HighDefinition
                 this.cellKeys[i]=key;cellData[i]=new int4(key.Face,key.Level,key.X,key.Y);
             }
             CandidateCount=checked(cellKeys.Count*species.CandidatesPerCell);
-            shader=Resources.Load<ComputeShader>(ResourceName);
-            if(!shader)throw new NotSupportedException("Planet scatter compute shader is unavailable.");
-            generateKernel=shader.FindKernel("GenerateCandidates");cullKernel=shader.FindKernel("CullAndPose");copyHistoryKernel=shader.FindKernel("CopyHistory");
-            if(!SystemInfo.supportsComputeShaders||!shader.IsSupported(generateKernel)||!shader.IsSupported(cullKernel)||!shader.IsSupported(copyHistoryKernel))
-                throw new NotSupportedException("This device cannot execute the canonical GPU scatter kernels.");
             surface=PlanetSurfaceGpuData.Acquire(definition);
             try
             {
+                // All programs share the exact placement/cull/history body. Prune only
+                // authorities that cannot execute for this immutable captured snapshot.
+                surfaceFamily=surface.PatchFamily;
+                shader=Resources.Load<ComputeShader>(FamilyResource(surfaceFamily));
+                if(!shader)throw new NotSupportedException("Planet scatter compute shader is unavailable.");
+                generateKernel=shader.FindKernel("GenerateCandidates");cullKernel=shader.FindKernel("CullAndPose");copyHistoryKernel=shader.FindKernel("CopyHistory");
+                if(!SystemInfo.supportsComputeShaders||!shader.IsSupported(generateKernel)||!shader.IsSupported(cullKernel)||!shader.IsSupported(copyHistoryKernel))
+                    throw new NotSupportedException("This device cannot execute the canonical GPU scatter kernels.");
+                shader.GetKernelThreadGroupSizes(generateKernel,out uint generationThreads,out uint generationY,out uint generationZ);
+                if(generationThreads==0||generationY!=1||generationZ!=1)throw new NotSupportedException("Scatter generation requires a one-dimensional thread group.");
+                generateGroupSize=checked((int)generationThreads);
                 cells=Buffer(cellData);historyCells=new GraphicsBuffer(GraphicsBuffer.Target.Structured,CellCount,4);
                 candidates=new GraphicsBuffer(GraphicsBuffer.Target.Structured,CandidateCount,PlanetScatterCandidateGpu.Stride);
                 poses=new GraphicsBuffer(GraphicsBuffer.Target.Structured,CandidateCount,PlanetScatterPoseGpu.Stride);
@@ -102,6 +109,18 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             catch{Dispose();throw;}
         }
+        static string FamilyResource(PlanetSurfaceGpuFamily family)
+        {
+            switch(family)
+            {
+                case PlanetSurfaceGpuFamily.Plain:return ResourceName;
+                case PlanetSurfaceGpuFamily.Orogen:return "PlanetOrogenScatter";
+                case PlanetSurfaceGpuFamily.LegacyStructure:return "PlanetStructureScatter";
+                case PlanetSurfaceGpuFamily.Drainage:return "PlanetDrainageScatter";
+                case PlanetSurfaceGpuFamily.Landform:return "PlanetLandformScatter";
+                default:throw new NotSupportedException("The captured sampler authority has no bounded scatter shader family.");
+            }
+        }
         static GraphicsBuffer Buffer<T>(T[] values)where T:struct
         {var b=new GraphicsBuffer(GraphicsBuffer.Target.Structured,math.max(1,values.Length),Marshal.SizeOf<T>());try{b.SetData(values.Length==0?new T[1]:values);return b;}catch{b.Dispose();throw;}}
         static void Bits(CommandBuffer cmd,ComputeShader shader,string name,uint4 bits)=>cmd.SetComputeIntParams(shader,name,
@@ -114,7 +133,7 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             if(disposed)throw new ObjectDisposedException(nameof(PlanetScatterGpu));
             if(count<1||count>CellCount-generatedCells)throw new ArgumentOutOfRangeException(nameof(count));
-            surface.Bind(cmd,shader,generateKernel);
+            surface.Bind(cmd,shader,generateKernel,surfaceFamily);
             Bits(cmd,shader,"_SurfaceRadiusAndNormal",PlanetSurfaceGpuData.Pair(definition.Radius,species.NormalSampleMetres));
             Bits(cmd,shader,"_ScatterPlanet",new uint4((uint)planet.High,(uint)(planet.High>>32),(uint)planet.Low,(uint)(planet.Low>>32)));
             Bits(cmd,shader,"_ScatterDensityHeightMinimum",PlanetSurfaceGpuData.Pair(species.DensityPerSquareMetre,species.MinimumHeight));
@@ -136,7 +155,8 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetComputeBufferParam(shader,generateKernel,"_ScatterPoses",poses);
             cmd.SetComputeBufferParam(shader,generateKernel,"_ScatterLodState",lodState);cmd.SetComputeBufferParam(shader,generateKernel,"_ScatterStatusCounters",counters);
             cmd.SetComputeBufferParam(shader,generateKernel,"_ScatterExcludedKeys",excludedKeys);cmd.SetComputeBufferParam(shader,generateKernel,"_ScatterExcludedCircles",excludedCircles);
-            cmd.DispatchCompute(shader,generateKernel,(count*species.CandidatesPerCell+63)/64,1,1);generatedCells+=count;generated=generatedCells==CellCount;
+            int groups=checked((int)(((long)count*species.CandidatesPerCell+generateGroupSize-1)/generateGroupSize));
+            cmd.DispatchCompute(shader,generateKernel,groups,1,1);generatedCells+=count;generated=generatedCells==CellCount;
         }
         public void CopyHistory(CommandBuffer cmd,PlanetScatterGpu previous)
         {

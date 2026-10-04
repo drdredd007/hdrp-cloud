@@ -428,7 +428,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     foreach(var coarse in coarseSources)
                     {
                         var allowance=result.HasAutomaticMaterials?PlanetTerrainGeneration.RepairAllowance(maximumBytes,retainedLevels,coarse.Tiles,result.Regions,result.AutomaticMaterialProfile):null;
-                        var candidate=new SurfaceSnapshot(result.Recipe,result.Revision,coarse.CanonicalTileLevel,coarse.Resolution,coarse.Tiles,result.Detail,result.Regions,result.Stamps,result.AutomaticMaterialProfile);
+                        var candidate=new SurfaceSnapshot(result.Recipe,result.Revision,coarse.CanonicalTileLevel,coarse.Resolution,coarse.Tiles,result.Detail,result.Regions,result.Stamps,result.AutomaticMaterialProfile,structuralField:result.StructuralField?.ForBakedResolution(coarse.Resolution));
                         var ready=candidate.HasAutomaticMaterials?SurfaceMaterialRepair.Rebuild(candidate,allowance,report,cancelled):candidate;
                         levels.Add(ready);retainedLevels=checked(retainedLevels+PlanetTerrainBakeCache.EstimateSnapshotBytes(ready));
                     }

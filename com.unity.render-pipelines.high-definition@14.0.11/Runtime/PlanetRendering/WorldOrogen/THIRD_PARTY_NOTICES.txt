@@ -1,0 +1,30 @@
+World Orogen Unity/GPU port
+
+Upstream: https://github.com/raguilar011095/planet_heightmap_generation
+Pinned source commit: cc2662b4edd52231c4f65d8765f3ef12cd82d9b7
+Upstream license: GNU General Public License, version 3. See LICENSE.txt.
+
+Files marked as derived from World Orogen retain that attribution and license.
+The Unity/GPU adaptations are modifications of the pinned upstream source.
+Source parameters and stage order are kept explicit for reproducible comparison.
+This notice does not replace licenses or notices of other package components.
+
+The upstream spherical mesh uses Delaunator 5.0.1. WorldOrogenDelaunator.cs is
+derived from that triangulator and retains its separate notice below.
+Source: https://github.com/mapbox/delaunator/tree/v5.0.1
+
+ISC License
+
+Copyright (c) 2021, Mapbox
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.

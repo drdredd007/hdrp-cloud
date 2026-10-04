@@ -8,7 +8,7 @@ using SpaceRunner.PlanetTerrain;
 namespace UnityEngine.Rendering.HighDefinition
 {
     // Metre-space surface data for a bounded local region; independent of the orbital LOD.
-    public sealed class PlanetLocalPatch : IDisposable
+    public sealed partial class PlanetLocalPatch : IDisposable
     {
         public NativeArray<float3> Positions,Normals;
         public NativeArray<float4> Colors;

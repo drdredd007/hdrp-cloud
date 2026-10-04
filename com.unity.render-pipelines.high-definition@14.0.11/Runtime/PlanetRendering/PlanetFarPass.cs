@@ -58,7 +58,13 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool IsRefining=>geometry.IsRefining;
         public bool EnableLocalSurface;
         public PlanetTerrainMaterialSettings NativeMaterialSettings;
+        [NonSerialized] public Texture2DArray BaseMapOverride;
+        public Texture2DArray BaseMapColour
+        {get{if(BaseMapOverride)return BaseMapOverride;return PlanetSurfaceDataRegistry.TryGetBaseColour(Definition.Surface,out var value)?value:null;}}
         public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
+        public PlanetOceanSettings OceanSettings=PlanetOceanSettings.Default;
+        readonly PlanetOceanRenderer ocean=new PlanetOceanRenderer();
+        public PlanetOceanRenderer OceanRenderer=>ocean;
         public PlanetScatterSettings ScatterSettings;
         public SurfaceScatterPlanetId ScatterInstanceId;
         public bool ScatterMaterialsReady;
@@ -163,9 +169,10 @@ namespace UnityEngine.Rendering.HighDefinition
             var q=(double4)((quaternion)PlanetRotation).value;
             var localCamera=PlanetField.Rotate(new double4(-q.xyz,q.w),CameraPosition-Definition.Center);
             bool nativeCoverage=UsesNativeSurface&&nativeGeometry!=null&&nativeGeometry.DrawCoverage(ctx);
-            if(nativeCoverage&&LayerDepth==null)
+            bool hasSea=ocean.WantsRender(this);
+            if((nativeCoverage||hasSea)&&LayerDepth==null)
             {if(nativeOwnedDepth==null)nativeOwnedDepth=new PlanetLayerDepth();nativeOwnedDepth.Begin(ctx);}
-            var effectiveDepth=LayerDepth??(nativeCoverage?nativeOwnedDepth:null);
+            var effectiveDepth=LayerDepth??((nativeCoverage||hasSea)?nativeOwnedDepth:null);
             composite.SetFloat("_PlanetHasNativeCoverage",nativeCoverage?1:0);
             if(nativeCoverage)composite.SetTexture("_PlanetNativeCoverage",nativeGeometry.Coverage);
             // Generation is enqueued before the draws below on the same command buffer.
@@ -173,8 +180,19 @@ namespace UnityEngine.Rendering.HighDefinition
             bool filteredSurface=Definition.GeneratorVersion==3;
             if(farPatches.FilterRenderingDetail!=filteredSurface)
             {geometry.Dispose();farPatches.FilterRenderingDetail=filteredSurface;}
-            geometry.Update(ctx.cmd,Definition,localCamera,height,Observer.fieldOfView,LodSettings);
             var nearTarget=LocalSurfaceTarget ?? CameraPosition;
+            double lodMargin=0;
+            if(EnableLocalSurface&&math.length(nearTarget-Definition.Center)-Definition.Radius<20000)
+                lodMargin=UsesNativeSurface&&NativeSurfaceSettings.IsValid?
+                    System.Math.Sqrt(2)*(NativeSurfaceSettings.ShadowHalfSize+NativeSurfaceSettings.RecenterDistance):
+                    System.Math.Sqrt(2)*(PlanetNearSurfaceCache.HalfSize+256);
+            // View relevance controls only far refinement. Native receivers/shadow casters and physical
+            // surface/scatter demand retain their independent banks and Full canonical sampling.
+            var lodLocalRotation=math.mul(math.conjugate((quaternion)PlanetRotation),(quaternion)Observer.transform.rotation);
+            var cameraProjection=Observer.projectionMatrix;
+            if(PlanetLodView.TryFromProjection(lodLocalRotation,cameraProjection,lodMargin,out var lodView))
+                geometry.Update(ctx.cmd,Definition,localCamera,height,lodView,LodSettings);
+            else geometry.Update(ctx.cmd,Definition,localCamera,height,Observer.fieldOfView,LodSettings);
             if(EnableLocalSurface && !UsesNativeSurface && math.length(nearTarget-Definition.Center)-Definition.Radius<20000)
                 nearGeometry.Update(ctx.cmd,Definition,PlanetField.Rotate(new double4(-q.xyz,q.w),nearTarget-Definition.Center));
             else if(Altitude>30000){nearGeometry.Dispose();ReleaseNearBuffer();}
@@ -194,7 +212,12 @@ namespace UnityEngine.Rendering.HighDefinition
             surface.SetMatrix("_FarViewProjection",projection*view);surface.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
             surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor.linear);surface.SetFloat("_PlanetLightLux",LightLux);
             properties.SetVector("_PlanetCenterRelative",(Vector3)centerRelative);
+            WorldOrogenBaseMapBinding.Bind(properties,BaseMapColour,PlanetRotation,double3.zero,Definition.Radius);
             properties.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
+            // Camera orchestration enables local surface only for its nearest body.
+            // Do not give that environment's SH to other planets, nor gate it on
+            // per-pixel coverage/readiness (which would pop while looking or warming).
+            properties.SetFloat("_PlanetNativeIndirect",UsesNativeSurface&&EnableLocalSurface?1:0);
             properties.SetFloat("_PlanetUseSceneLights",UseSceneLights?1:0);
             properties.SetVector("_PlanetLightRotation",new Vector4(CelestialLightRotation.x,CelestialLightRotation.y,CelestialLightRotation.z,CelestialLightRotation.w));
             properties.SetFloat("_PlanetOwnAir",Atmosphere.IsValid?1:0);
@@ -218,6 +241,7 @@ namespace UnityEngine.Rendering.HighDefinition
             properties.SetInteger("_PlanetNativeSurface",Definition.GeneratorVersion==3?1:0);
             if(neutralAttributes==null){neutralAttributes=new GraphicsBuffer(GraphicsBuffer.Target.Structured,1,PlanetSurfaceVertexAttributes.Stride);neutralAttributes.SetData(new PlanetSurfaceVertexAttributes[1]);}
             properties.SetBuffer("_PlanetAttributes",farPatches.Attributes??neutralAttributes);
+            properties.SetBuffer("_PlanetParentAttributes",farPatches.ParentAttributes??farPatches.Attributes??neutralAttributes);
             properties.SetFloat("_PlanetTerrainPalette",NativeMaterialSettings&&NativeMaterialSettings.IsValid?1:0);
             properties.SetFloat("_LayerToMeters",1000);
             properties.SetMatrix("_FarViewProjection",projection*view);
@@ -290,6 +314,7 @@ namespace UnityEngine.Rendering.HighDefinition
             CoreUtils.DrawFullScreen(ctx.cmd,composite);
             renderedThisFrame=true;renderedNear=hasNear;
             if(effectiveDepth!=null)effectiveDepth.Merge(ctx,composite);
+            if(hasSea)ocean.Render(ctx,this,effectiveDepth);
             // Published after this camera's layers, consumed by opaque fog and cloud tracing.
             ctx.cmd.SetGlobalTexture("_PlanetWeatherFarDistance",effectiveDepth!=null?effectiveDepth.Current:farBuffer);
             ctx.cmd.SetGlobalTexture("_PlanetWeatherNearDistance",hasNear?nearBuffer:farBuffer);
@@ -301,6 +326,6 @@ namespace UnityEngine.Rendering.HighDefinition
 
         protected override void Cleanup(){CancelSurfaceRevision();liveOwners.Remove(this);geometry.Dispose();nearGeometry.Dispose();nativeGeometry?.Dispose();nativeGeometry=null;scatter?.Dispose();scatter=null;nativeOwnedDepth?.Dispose();nativeOwnedDepth=null;neutralAttributes?.Dispose();neutralAttributes=null;
             activeFilter?.Dispose();activeFilter=null;retiredFilter?.Dispose();retiredFilter=null;
-            ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
+            ocean.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
     }
 }

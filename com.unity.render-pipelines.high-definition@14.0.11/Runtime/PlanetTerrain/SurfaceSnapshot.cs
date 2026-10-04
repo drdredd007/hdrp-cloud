@@ -24,8 +24,10 @@ namespace SpaceRunner.PlanetTerrain
         public SurfaceContentHash MaterialRulesDigest { get; }
         public SurfaceAutomaticMaterialProfile AutomaticMaterialProfile { get; }
         public SurfaceResolvedMaterials ResolvedMaterials { get; }
+        public SurfaceStructuralField StructuralField { get; }
+        public WorldOrogenDetailField OrogenDetail { get; }
         public bool HasAutomaticMaterials => AutomaticMaterialProfile.IsValid;
-        public bool MaterialsReady => !HasAutomaticMaterials || (ResolvedMaterials != null && ResolvedMaterials.StampLayers.Count == Stamps.Count);
+        public bool MaterialsReady => !HasAutomaticMaterials || StructuralField != null || (ResolvedMaterials != null && ResolvedMaterials.StampLayers.Count == Stamps.Count);
         public IReadOnlyList<SurfaceTileData> Tiles { get; }
         public IReadOnlyList<SurfaceRegionData> Regions { get; }
         public IReadOnlyList<SurfaceCraterStamp> Stamps { get; }
@@ -33,7 +35,8 @@ namespace SpaceRunner.PlanetTerrain
         public SurfaceSnapshot(SurfaceRecipe recipe, SurfaceRevision revision, int canonicalTileLevel, int resolution,
             IEnumerable<SurfaceTileData> tiles, SurfaceDetailRecipe detail = default,
             IEnumerable<SurfaceRegionData> regions = null, IEnumerable<SurfaceCraterStamp> stamps = null,
-            SurfaceAutomaticMaterialProfile automaticMaterialProfile = default, SurfaceResolvedMaterials resolvedMaterials = null)
+            SurfaceAutomaticMaterialProfile automaticMaterialProfile = default, SurfaceResolvedMaterials resolvedMaterials = null,
+            SurfaceStructuralField structuralField = null, WorldOrogenDetailField orogenDetail = null)
         {
             if (!recipe.IsValid || !revision.IsValid || revision.RecipeDigest != SurfaceHashing.Recipe(recipe) ||
                 canonicalTileLevel < 0 || canonicalTileLevel > SurfaceTileKey.MaximumLevel || !CubeSurface.ValidResolution(resolution))
@@ -43,6 +46,18 @@ namespace SpaceRunner.PlanetTerrain
             Recipe = recipe; Revision = revision; CanonicalTileLevel = canonicalTileLevel; Resolution = resolution; Detail = detail;
             if (automaticMaterialProfile.Version != 0 && !automaticMaterialProfile.IsValid) throw new ArgumentException("Invalid automatic material rules.");
             AutomaticMaterialProfile = automaticMaterialProfile;
+            if (SurfaceRecipe.HasStructuralAuthority(recipe.AlgorithmVersion) != (structuralField != null))
+                throw new ArgumentException("Algorithm three requires explicit persisted structural authority; algorithms one and two retain their baked semantics.");
+            if (structuralField != null && (canonicalTileLevel != 0 || structuralField.RawMacroResolution != resolution ||
+                structuralField.SourceRecipe.AlgorithmVersion != recipe.AlgorithmVersion ||
+                structuralField.SourceBaseDigest != revision.BaseDigest || structuralField.SourceRecipe.Radius != recipe.Radius || structuralField.SourceRecipe.Seed != recipe.Seed))
+                throw new ArgumentException("Structural authority must match the canonical grid, radius, seed and exact base provenance.");
+            StructuralField = structuralField;
+            if (orogenDetail != null && (structuralField != null || recipe.AlgorithmVersion != SurfaceRecipe.CurrentAlgorithmVersion ||
+                canonicalTileLevel != 0 || orogenDetail.SourceBaseDigest != revision.BaseDigest ||
+                orogenDetail.SourceRadius != recipe.Radius || orogenDetail.SeaLevel != recipe.SeaLevel))
+                throw new ArgumentException("WorldOrogen detail must match its retained base provenance, radius and sea level.");
+            OrogenDetail = orogenDetail;
             var tileList = tiles == null ? new List<SurfaceTileData>() : new List<SurfaceTileData>(tiles);
             foreach (var tile in tileList)
                 if (tile == null || tile.Key.Level != canonicalTileLevel || tile.Resolution != resolution ||
@@ -76,6 +91,8 @@ namespace SpaceRunner.PlanetTerrain
                 }
             this.stamps = stampList.ToArray();
             double min = recipe.MinimumHeight, max = recipe.MaximumHeight;
+            if (orogenDetail != null) { min -= orogenDetail.MaximumAmplitude; max += orogenDetail.MaximumAmplitude; }
+            if (structuralField != null) { min = math.min(min, structuralField.MinimumHeight); max = math.max(max, structuralField.MaximumHeight); }
             foreach (var region in this.regions)
                 if (region.Mode == SurfaceRegionMode.Replace)
                 { min = math.min(min, region.MinimumHeight); max = math.max(max, region.MaximumHeight); }
@@ -99,12 +116,16 @@ namespace SpaceRunner.PlanetTerrain
                 }
                 writer.Write(this.stamps.Length);
                 foreach(var stamp in this.stamps) { writer.Write(stamp.IdHigh); writer.Write(stamp.IdLow); SurfaceHashing.WriteVector(writer,stamp.CenterDirection); writer.Write(stamp.RadiusMetres); writer.Write(stamp.DepthMetres); writer.Write(stamp.RimWidthMetres); writer.Write(stamp.RimHeightMetres); }
+                if (StructuralField != null) { writer.Write(6); SurfaceHashing.WriteHash(writer, StructuralField.ContentDigest); }
+                if (OrogenDetail != null) { writer.Write(9); SurfaceHashing.WriteHash(writer, OrogenDetail.ContentDigest); }
             });
             MaterialRulesDigest = HasAutomaticMaterials ? SurfaceHashing.Compute(writer =>
             {
                 writer.Write(1); SurfaceAutomaticMaterialProfile.Write(writer,AutomaticMaterialProfile); SurfaceHashing.WriteRecipe(writer,Recipe);
                 writer.Write(this.tiles.Length); foreach(var tile in this.tiles) SurfaceHashing.WriteHash(writer,tile.ContentHash);
                 writer.Write(this.regions.Length); foreach(var region in this.regions) SurfaceHashing.WriteHash(writer,region.ContentHash);
+                if (StructuralField != null) SurfaceHashing.WriteHash(writer, StructuralField.ContentDigest);
+                if (OrogenDetail != null) SurfaceHashing.WriteHash(writer, OrogenDetail.ContentDigest);
             }) : default;
             if (resolvedMaterials != null)
             {
@@ -132,6 +153,7 @@ namespace SpaceRunner.PlanetTerrain
                 if (this.regions.Length > 0 && this.regions[this.regions.Length-1].Priority > int.MaxValue-resolvedMaterials.Layers.Count-resolvedMaterials.StampLayers.Count)
                     throw new ArgumentException("Reserve priorities below Int32.MaxValue for resolved material overlays.");
             }
+            if (StructuralField != null && resolvedMaterials != null) throw new ArgumentException("Algorithm three computes captured automatic rules on final Full geometry; baked resolved material overlays cannot replace those rules.");
             ResolvedMaterials = resolvedMaterials;
             ContentDigest = SurfaceHashing.Compute(writer =>
             {
@@ -151,6 +173,8 @@ namespace SpaceRunner.PlanetTerrain
                     writer.Write(4); SurfaceAutomaticMaterialProfile.Write(writer,AutomaticMaterialProfile); writer.Write(ResolvedMaterials != null);
                     if (ResolvedMaterials != null) SurfaceHashing.WriteHash(writer,ResolvedMaterials.ContentDigest);
                 }
+                if (StructuralField != null) { writer.Write(6); SurfaceHashing.WriteHash(writer, StructuralField.ContentDigest); }
+                if (OrogenDetail != null) { writer.Write(9); SurfaceHashing.WriteHash(writer, OrogenDetail.ContentDigest); }
             });
         }
 
@@ -203,6 +227,11 @@ namespace SpaceRunner.PlanetTerrain
         public readonly int CanonicalTileLevel, Resolution;
         public readonly double MinimumHeight, MaximumHeight;
         public readonly SurfaceDetailRecipe Detail;
+        public readonly NativeSurfaceStructuralView StructuralField;
+        public readonly NativeWorldOrogenDetailView OrogenDetail;
+        public readonly SurfaceAutomaticMaterialProfile AutomaticMaterialProfile;
+        public readonly NativeArray<int>.ReadOnly TileMaterialProvenance;
+        public readonly NativeArray<SurfaceAutomaticMaterialProfile>.ReadOnly RegionalMaterialProfiles;
         public readonly NativeArray<SurfaceTileHeader>.ReadOnly Tiles;
         public readonly NativeArray<float>.ReadOnly Heights;
         public readonly NativeArray<SurfaceRegionHeader>.ReadOnly Regions;
@@ -211,16 +240,23 @@ namespace SpaceRunner.PlanetTerrain
         public readonly NativeArray<SurfaceCraterStamp>.ReadOnly Stamps;
         internal NativeSurfaceView(SurfaceSnapshot snapshot, NativeArray<SurfaceTileHeader> tiles, NativeArray<float> heights,
             NativeArray<SurfaceRegionHeader> regions, NativeArray<float> regionHeights, NativeArray<float> regionMasks, NativeArray<SurfaceCraterStamp> stamps,
-            NativeArray<float4> materialWeights, NativeArray<float4> erosionData, NativeArray<float4> regionMaterialWeights, NativeArray<float4> regionErosionData)
+            NativeArray<float4> materialWeights, NativeArray<float4> erosionData, NativeArray<float4> regionMaterialWeights, NativeArray<float4> regionErosionData, NativeSurfaceStructuralView structuralField, NativeArray<int> tileProvenance, NativeArray<SurfaceAutomaticMaterialProfile> regionalProfiles,
+            NativeWorldOrogenDetailView orogenDetail = default)
         {
             Recipe = snapshot.Recipe; Revision = snapshot.Revision; ContentDigest = snapshot.ContentDigest;
             CanonicalTileLevel = snapshot.CanonicalTileLevel; Resolution = snapshot.Resolution;
-            MinimumHeight = snapshot.MinimumHeight; MaximumHeight = snapshot.MaximumHeight; Detail = snapshot.Detail;
+            MinimumHeight = snapshot.MinimumHeight; MaximumHeight = snapshot.MaximumHeight; Detail = snapshot.Detail; StructuralField = structuralField; AutomaticMaterialProfile = snapshot.AutomaticMaterialProfile;
+            OrogenDetail = orogenDetail;
+            TileMaterialProvenance = tileProvenance.AsReadOnly(); RegionalMaterialProfiles = regionalProfiles.AsReadOnly();
             Tiles = tiles.AsReadOnly(); Heights = heights.AsReadOnly(); Regions = regions.AsReadOnly();
             RegionHeights = regionHeights.AsReadOnly(); RegionMasks = regionMasks.AsReadOnly(); Stamps = stamps.AsReadOnly();
             MaterialWeights = materialWeights.AsReadOnly(); ErosionData = erosionData.AsReadOnly(); RegionMaterialWeights = regionMaterialWeights.AsReadOnly();
             RegionErosionData = regionErosionData.AsReadOnly();
         }
+        NativeSurfaceView(in NativeSurfaceView source,in NativeSurfaceLandformFilterView filter)
+        {this=source;StructuralField=source.StructuralField.WithLandformFilter(filter);}
+        /// <summary>Attach an explicitly retained renderer cache without changing canonical arrays, identity or physics ownership.</summary>
+        public NativeSurfaceView WithLandformFilter(in NativeSurfaceLandformFilterView filter)=>new NativeSurfaceView(this,filter);
     }
 
     /// <summary>Owns native copies. Dispose only after readers finish, or schedule release with their dependency.</summary>
@@ -233,6 +269,10 @@ namespace SpaceRunner.PlanetTerrain
         NativeArray<float4> materialWeights, erosionData, regionMaterialWeights, regionErosionData;
         NativeArray<SurfaceCraterStamp> stamps;
         readonly SurfaceSnapshot snapshot;
+        NativeSurfaceStructuralData structuralField;
+        NativeWorldOrogenDetailData orogenDetail;
+        NativeArray<int> tileProvenance;
+        NativeArray<SurfaceAutomaticMaterialProfile> regionalProfiles;
         bool disposed;
         public bool IsDisposed => disposed;
         public NativeSurfaceView View
@@ -240,7 +280,7 @@ namespace SpaceRunner.PlanetTerrain
             get
             {
                 if (disposed) throw new ObjectDisposedException(nameof(NativeSurfaceSnapshot));
-                return new NativeSurfaceView(snapshot, tiles, heights, regions, regionHeights, regionMasks, stamps, materialWeights, erosionData, regionMaterialWeights, regionErosionData);
+                return new NativeSurfaceView(snapshot, tiles, heights, regions, regionHeights, regionMasks, stamps, materialWeights, erosionData, regionMaterialWeights, regionErosionData, structuralField.View, tileProvenance, regionalProfiles, orogenDetail.View);
             }
         }
         internal NativeSurfaceSnapshot(SurfaceSnapshot snapshot, Allocator allocator)
@@ -249,15 +289,21 @@ namespace SpaceRunner.PlanetTerrain
             if (allocator == Allocator.None || allocator == Allocator.Invalid) throw new ArgumentException("Native copies require an owning allocator.", nameof(allocator));
             try
             {
+                structuralField = new NativeSurfaceStructuralData(snapshot.StructuralField, allocator);
+                orogenDetail = new NativeWorldOrogenDetailData(snapshot.OrogenDetail, allocator);
+                bool structuralMaterials = snapshot.StructuralField != null;
+                var resolved = structuralMaterials ? null : snapshot.ResolvedMaterials;
+                tileProvenance = new NativeArray<int>(structuralMaterials ? snapshot.Tiles.Count : 0, allocator);
+                regionalProfiles = new NativeArray<SurfaceAutomaticMaterialProfile>(structuralMaterials ? snapshot.Regions.Count : 0, allocator);
                 int heightCount = 0, regionCount = 0;
                 foreach (var tile in snapshot.Tiles) heightCount = checked(heightCount + tile.SampleCount);
                 foreach (var region in snapshot.Regions) regionCount = checked(regionCount + region.SampleCount);
-                if(snapshot.ResolvedMaterials != null) foreach(var layer in snapshot.ResolvedMaterials.Layers) regionCount = checked(regionCount+layer.SampleCount);
-                if(snapshot.ResolvedMaterials != null) foreach(var layer in snapshot.ResolvedMaterials.StampLayers) regionCount = checked(regionCount+layer.SampleCount);
+                if(resolved != null) foreach(var layer in resolved.Layers) regionCount = checked(regionCount+layer.SampleCount);
+                if(resolved != null) foreach(var layer in resolved.StampLayers) regionCount = checked(regionCount+layer.SampleCount);
                 tiles = new NativeArray<SurfaceTileHeader>(snapshot.Tiles.Count, allocator);
                 heights = new NativeArray<float>(heightCount, allocator);
                 materialWeights = new NativeArray<float4>(heightCount, allocator); erosionData = new NativeArray<float4>(heightCount, allocator);
-                int derivedCount=(snapshot.ResolvedMaterials?.Layers.Count??0)+(snapshot.ResolvedMaterials?.StampLayers.Count??0);
+                int derivedCount=(resolved?.Layers.Count??0)+(resolved?.StampLayers.Count??0);
                 regions = new NativeArray<SurfaceRegionHeader>(snapshot.Regions.Count+derivedCount, allocator);
                 regionHeights = new NativeArray<float>(regionCount, allocator); regionMasks = new NativeArray<float>(regionCount, allocator);
                 regionMaterialWeights = new NativeArray<float4>(regionCount, allocator);
@@ -266,12 +312,12 @@ namespace SpaceRunner.PlanetTerrain
                 int offset = 0;
                 for (int i = 0; i < snapshot.Tiles.Count; i++)
                 {
-                    var tile = snapshot.Tiles[i]; tiles[i] = new SurfaceTileHeader(tile.Key, tile.Resolution, offset, tile.MinimumHeight, tile.MaximumHeight, tile.ContentHash,
-                        snapshot.ResolvedMaterials == null ? tile.Channels : tile.Channels | SurfaceChannels.MaterialWeights, offset, tile.MeasuredLodErrorMetres);
+                    var tile = snapshot.Tiles[i]; if (structuralMaterials) tileProvenance[i] = (int)tile.MaterialProvenance; tiles[i] = new SurfaceTileHeader(tile.Key, tile.Resolution, offset, tile.MinimumHeight, tile.MaximumHeight, tile.ContentHash,
+                        (structuralMaterials && tile.MaterialProvenance != SurfaceMaterialProvenance.Authored ? tile.Channels & ~SurfaceChannels.MaterialWeights : resolved == null ? tile.Channels : tile.Channels | SurfaceChannels.MaterialWeights), offset, tile.MeasuredLodErrorMetres);
                     for (int j = 0; j < tile.SampleCount; j++)
                     {
                         heights[offset + j] = tile.HeightAt(j);
-                        if(snapshot.ResolvedMaterials != null) materialWeights[offset+j]=snapshot.ResolvedMaterials.Tiles[i].WeightAt(j);
+                        if(resolved != null) materialWeights[offset+j]=resolved.Tiles[i].WeightAt(j);
                         else if (tile.HasMaterialWeights) materialWeights[offset + j] = tile.MaterialWeightsAt(j);
                         if (tile.HasErosionData) erosionData[offset + j] = tile.ErosionDataAt(j);
                     }
@@ -280,10 +326,10 @@ namespace SpaceRunner.PlanetTerrain
                 offset = 0;
                 for (int i = 0; i < snapshot.Regions.Count; i++)
                 {
-                    var region = snapshot.Regions[i];
+                    var region = snapshot.Regions[i]; if (structuralMaterials) regionalProfiles[i] = region.AutomaticMaterialProfile;
                     regions[i] = new SurfaceRegionHeader(region.Projection, region.Resolution, offset, offset, region.Priority, region.BlendMetres,
                         region.MinimumHeight, region.MaximumHeight, region.Mode, region.DetailPolicy, region.BaseDigest, region.ContentHash,
-                        (region.HasMaterialWeights && snapshot.ResolvedMaterials == null ? SurfaceChannels.MaterialWeights : SurfaceChannels.None) |
+                        (region.HasMaterialWeights && resolved == null && (!structuralMaterials || region.MaterialProvenance == SurfaceMaterialProvenance.Authored) ? SurfaceChannels.MaterialWeights : SurfaceChannels.None) |
                         (region.HasErosionData ? SurfaceChannels.ErosionData : SurfaceChannels.None), offset);
                     for (int j = 0; j < region.SampleCount; j++)
                     {
@@ -293,21 +339,21 @@ namespace SpaceRunner.PlanetTerrain
                     }
                     offset += region.SampleCount;
                 }
-                if(snapshot.ResolvedMaterials != null) for(int i=0;i<snapshot.ResolvedMaterials.Layers.Count;i++)
+                if(resolved != null) for(int i=0;i<resolved.Layers.Count;i++)
                 {
-                    var layer=snapshot.ResolvedMaterials.Layers[i];
+                    var layer=resolved.Layers[i];
                     regions[snapshot.Regions.Count+i]=new SurfaceRegionHeader(layer.Projection,layer.Resolution,offset,offset,
                         int.MaxValue-derivedCount+1+i,layer.BlendMetres,0,0,SurfaceRegionMode.Delta,SurfaceDetailPolicy.Preserve,
-                        snapshot.Revision.BaseDigest,snapshot.ResolvedMaterials.ContentDigest,SurfaceChannels.MaterialWeights,offset);
+                        snapshot.Revision.BaseDigest,resolved.ContentDigest,SurfaceChannels.MaterialWeights,offset);
                     for(int j=0;j<layer.SampleCount;j++) { regionHeights[offset+j]=0; regionMasks[offset+j]=1; regionMaterialWeights[offset+j]=layer.WeightAt(j); }
                     offset+=layer.SampleCount;
                 }
-                if(snapshot.ResolvedMaterials != null) for(int i=0;i<snapshot.ResolvedMaterials.StampLayers.Count;i++)
+                if(resolved != null) for(int i=0;i<resolved.StampLayers.Count;i++)
                 {
-                    var layer=snapshot.ResolvedMaterials.StampLayers[i];
-                    regions[snapshot.Regions.Count+snapshot.ResolvedMaterials.Layers.Count+i]=new SurfaceRegionHeader(layer.Projection,layer.Resolution,offset,offset,
-                        int.MaxValue-snapshot.ResolvedMaterials.StampLayers.Count+1+i,layer.BlendMetres,0,0,SurfaceRegionMode.Delta,SurfaceDetailPolicy.Preserve,
-                        snapshot.Revision.BaseDigest,snapshot.ResolvedMaterials.ContentDigest,SurfaceChannels.MaterialWeights,offset);
+                    var layer=resolved.StampLayers[i];
+                    regions[snapshot.Regions.Count+resolved.Layers.Count+i]=new SurfaceRegionHeader(layer.Projection,layer.Resolution,offset,offset,
+                        int.MaxValue-resolved.StampLayers.Count+1+i,layer.BlendMetres,0,0,SurfaceRegionMode.Delta,SurfaceDetailPolicy.Preserve,
+                        snapshot.Revision.BaseDigest,resolved.ContentDigest,SurfaceChannels.MaterialWeights,offset);
                     for(int j=0;j<layer.SampleCount;j++){regionHeights[offset+j]=0;regionMasks[offset+j]=1;regionMaterialWeights[offset+j]=layer.WeightAt(j);}
                     offset+=layer.SampleCount;
                 }
@@ -318,6 +364,9 @@ namespace SpaceRunner.PlanetTerrain
         public void Dispose()
         {
             if (disposed) return;
+            structuralField?.Dispose();
+            orogenDetail?.Dispose();
+            if (tileProvenance.IsCreated) tileProvenance.Dispose(); if (regionalProfiles.IsCreated) regionalProfiles.Dispose();
             if (tiles.IsCreated) tiles.Dispose(); if (heights.IsCreated) heights.Dispose(); if (regions.IsCreated) regions.Dispose();
             if (regionHeights.IsCreated) regionHeights.Dispose(); if (regionMasks.IsCreated) regionMasks.Dispose(); if (stamps.IsCreated) stamps.Dispose();
             if (materialWeights.IsCreated) materialWeights.Dispose(); if (erosionData.IsCreated) erosionData.Dispose(); if (regionMaterialWeights.IsCreated) regionMaterialWeights.Dispose();
@@ -327,7 +376,10 @@ namespace SpaceRunner.PlanetTerrain
         public JobHandle Dispose(JobHandle readers)
         {
             if (disposed) return readers;
-            var result = readers;
+            var result = structuralField == null ? readers : structuralField.Dispose(readers);
+            if (orogenDetail != null) result = JobHandle.CombineDependencies(result, orogenDetail.Dispose(readers));
+            if (tileProvenance.IsCreated) result = JobHandle.CombineDependencies(result, tileProvenance.Dispose(readers));
+            if (regionalProfiles.IsCreated) result = JobHandle.CombineDependencies(result, regionalProfiles.Dispose(readers));
             if (tiles.IsCreated) result = JobHandle.CombineDependencies(result, tiles.Dispose(readers));
             if (heights.IsCreated) result = JobHandle.CombineDependencies(result, heights.Dispose(readers));
             if (regions.IsCreated) result = JobHandle.CombineDependencies(result, regions.Dispose(readers));

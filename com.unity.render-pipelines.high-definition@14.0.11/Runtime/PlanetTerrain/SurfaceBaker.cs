@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Unity.Collections;
 using Unity.Mathematics;
 
 namespace SpaceRunner.PlanetTerrain
@@ -18,7 +19,42 @@ namespace SpaceRunner.PlanetTerrain
             var graph = new SurfaceBakeGraph(captured.FaceResolution, recipe.Radius, cancelled);
             Report(progress, cancelled, "Topology", 1, 1);
             var state = new BakeState(graph);
-            GenerateMacro(recipe, captured, graph, state, progress, cancelled);
+            SurfaceGeomorphology geomorphology = null;
+            SurfaceDrainageField drainage=null;
+            SurfaceLandformField landform=null;SurfaceLandformBuildDiagnostics landformDiagnostics=default;
+            if(recipe.AlgorithmVersion==SurfaceRecipe.LandformAuthorityAlgorithmVersion)
+            {
+                Report(progress,cancelled,"Connected landform reconstruction",0,1);
+                var policy=captured.Landform.Clone();policy.MaximumWorkingBytes=math.min(policy.MaximumWorkingBytes,captured.MaximumWorkingBytes);
+                landform=SurfaceLandformBuilder.Build(recipe,captured,policy,out landformDiagnostics,cancelled,captured.EstimatedWorkingBytes(recipe));
+                geomorphology=SurfaceGeomorphology.Build(recipe,captured,cancelled);
+                using(var native=new NativeSurfaceLandformData(landform,Allocator.Persistent))
+                {
+                    for(int i=0;i<graph.NodeCount;i++)
+                    {
+                        CheckCancelled(cancelled,i);if(SurfaceLandformMath.TrySample(native.View,graph.Directions[i],out state.Ground[i])!=SurfaceSampleStatus.Ready)
+                            throw new InvalidOperationException("Admitted landform reconstruction does not cover the initial erosion graph.");
+                        state.Bedrock[i]=math.max(-recipe.Radius*.99,state.Ground[i]-(recipe.MaximumHeight-recipe.MinimumHeight)*captured.MaximumErosionDepthFraction);
+                    }
+                }
+                // The reference contains exactly the reconstruction seen by erosion, rather than a
+                // macro plateau before a later runtime river carving pass.
+                geomorphology=geomorphology.CaptureMacroGrid(graph,state.Ground,landform);
+                Report(progress,cancelled,"Connected landform reconstruction",1,1);
+            }
+            else if(recipe.AlgorithmVersion==SurfaceRecipe.DrainageAuthorityAlgorithmVersion)
+            {
+                Report(progress,cancelled,"Captured continents and catchments",0,1);
+                geomorphology=SurfaceGeomorphology.Build(recipe,captured,cancelled);
+                drainage=SurfaceDrainageBuilder.Build(recipe,captured,geomorphology,graph,out var macro,cancelled);
+                for(int i=0;i<macro.Length;i++)
+                {CheckCancelled(cancelled,i);state.Ground[i]=macro[i];state.Bedrock[i]=math.max(-recipe.Radius*.99,macro[i]-(recipe.MaximumHeight-recipe.MinimumHeight)*captured.MaximumErosionDepthFraction);}
+                geomorphology=geomorphology.CaptureMacroGrid(graph,state.Ground);
+                Report(progress,cancelled,"Captured continents and catchments",1,1);
+            }
+            else if (recipe.AlgorithmVersion == SurfaceRecipe.StructuralAlgorithmVersion || recipe.AlgorithmVersion == SurfaceRecipe.StructuralAuthorityAlgorithmVersion)
+                geomorphology = GenerateStructuralMacro(recipe, captured, graph, state, progress, cancelled);
+            else GenerateMacro(recipe, captured, graph, state, progress, cancelled);
             double initial = Volume(graph, state.Ground), eroded = 0, deposited = 0;
             int hydro = recipe.Style == SurfaceStyle.Rocky && !captured.EnableHydraulicOnRocky ? 0 : captured.HydraulicIterations;
             for (int iteration = 0; iteration < hydro; iteration++)
@@ -53,16 +89,30 @@ namespace SpaceRunner.PlanetTerrain
                 writer.Write(1); SurfaceHashing.WriteHash(writer, config);
                 foreach (var tile in finest.Tiles) SurfaceHashing.WriteHash(writer, tile.ContentHash);
             });
+            if (geomorphology != null) geomorphology = geomorphology.BindSource(baseDigest);
+            SurfaceStructuralField structuralField = null;
+            if (SurfaceRecipe.HasStructuralAuthority(recipe.AlgorithmVersion))
+            {
+                Report(progress, cancelled, "Structural authority", 0, 1);
+                structuralField = SurfaceStructuralField.Capture(recipe, geomorphology, finest.Tiles, cancelled,drainage,landform);
+                Report(progress, cancelled, "Structural authority", 1, 1);
+            }
+            var rules = structuralField == null ? SurfaceAutomaticMaterialProfile.FromBakeSettings(captured) :
+                new SurfaceAutomaticMaterialProfile(captured.EquatorTemperature, captured.PoleTemperature, captured.LapseRatePerKilometre,
+                    normalSampleMetres: math.min(1, recipe.Radius * .125));
             var snapshot = new SurfaceSnapshot(outputRecipe, new SurfaceRevision(SurfaceHashing.Recipe(outputRecipe), baseDigest, 1), 0,
-                finest.Resolution, finest.Tiles, automaticMaterialProfile: SurfaceAutomaticMaterialProfile.FromBakeSettings(captured));
+                finest.Resolution, finest.Tiles, automaticMaterialProfile: rules, structuralField: structuralField);
             snapshot = SurfaceMaterialRepair.Rebuild(snapshot,progress:progress,cancelled:cancelled);
             var hydrology = BuildHydrology(recipe, captured, graph, state, baseDigest, hydro, cancelled);
             double maximumSlope = MaxSlope(graph, state.Ground), area = Sum(graph.Areas), final = Volume(graph, state.Ground);
             var diagnostics = new SurfaceBakeDiagnostics(clock.Elapsed.TotalSeconds, graph.NodeCount, graph.EdgeCount,
-                SurfaceBakeSettings.EstimateWorkingBytes(captured.FaceResolution), eroded, deposited, initial, final, 0,
-                pyramid[pyramid.Count - 1].MeasuredErrorMetres, area, maximumSlope, hydro, PublishedVolume(graph, state.Ground));
+                landform==null?captured.EstimatedWorkingBytes(recipe):landformDiagnostics.EstimatedWorkingBytes, eroded, deposited, initial, final, 0,
+                pyramid[pyramid.Count - 1].MeasuredErrorMetres, area, maximumSlope, hydro, PublishedVolume(graph, state.Ground),
+                drainage==null?0:captured.ResolvedDrainageTopologyResolution(recipe),
+                drainage==null?0:6*captured.ResolvedDrainageTopologyResolution(recipe)*captured.ResolvedDrainageTopologyResolution(recipe)+2,
+                drainage==null?0:drainage.Nodes.Count);
             Report(progress, cancelled, "Complete", 1, 1);
-            return new SurfaceBakeResult(snapshot, diagnostics, pyramid, hydrology);
+            return new SurfaceBakeResult(snapshot, diagnostics, pyramid, hydrology, geomorphology);
         }
 
         internal static void CheckCancelled(Func<bool> cancelled, int index = 0)
@@ -138,6 +188,52 @@ namespace SpaceRunner.PlanetTerrain
                 state.Bedrock[i] = math.max(-recipe.Radius * .99, height - (recipe.MaximumHeight - recipe.MinimumHeight) * settings.MaximumErosionDepthFraction);
             }
             Report(progress, cancelled, "Macro", graph.NodeCount, graph.NodeCount);
+        }
+        static SurfaceGeomorphology GenerateStructuralMacro(SurfaceRecipe recipe, SurfaceBakeSettings settings, SurfaceBakeGraph graph, BakeState state,
+            Action<SurfaceBakeProgress> progress, Func<bool> cancelled)
+        {
+            Report(progress, cancelled, "Spherical provinces", 0, 1);
+            var structure = SurfaceGeomorphology.Build(recipe, settings, cancelled);
+            Report(progress, cancelled, "Spherical provinces", 1, 1);
+            var values = new double[graph.NodeCount]; var order = new int[graph.NodeCount];
+            for (int i = 0; i < graph.NodeCount; i++)
+            { CheckCancelled(cancelled, i); values[i] = structure.Sample(graph.Directions[i]).SignedCoastDistance; order[i] = i; }
+            Array.Sort(order, (a, b) => { int c = values[a].CompareTo(values[b]); return c != 0 ? c : a.CompareTo(b); });
+            double accumulated = 0, target = Sum(graph.Areas) * (1 - settings.LandFraction), threshold = values[order[0]];
+            foreach (int node in order) { accumulated += graph.Areas[node]; threshold = values[node]; if (accumulated >= target) break; }
+            structure = structure.CalibrateCoast(settings, threshold);
+            Report(progress, cancelled, "Continents and mountain belts", 0, graph.NodeCount);
+            if (recipe.AlgorithmVersion == SurfaceRecipe.StructuralAuthorityAlgorithmVersion)
+            {
+                // Evaluate the pre-erosion macro with the same portable domain math as every runtime/Burst/GPU
+                // reader. The 1x1 placeholder is never published or sampled as a height reference.
+                var raw = new float[24]; for (int i = 0; i < raw.Length; i++) raw[i] = (float)math.clamp(recipe.SeaLevel, recipe.MinimumHeight, recipe.MaximumHeight);
+                var provinces = new SurfaceGeologicalProvince[structure.Provinces.Count]; var boundaries = new SurfaceGeologicalBoundary[structure.Boundaries.Count];
+                for (int i = 0; i < provinces.Length; i++) provinces[i] = structure.Provinces[i];
+                for (int i = 0; i < boundaries.Length; i++) boundaries[i] = structure.Boundaries[i];
+                var controls = new SurfaceStructuralField(recipe, structure.ContentDigest, 1, raw, provinces, boundaries,
+                    structure.ShelfWidthMetres, structure.BeltWidthMetres, structure.RegionalFeatureScaleMetres, structure.CoastThresholdMetres,
+                    structure.MountainUpliftFraction, 0, 0, cancelled);
+                using (var native = new NativeSurfaceStructuralData(controls, Allocator.Persistent))
+                    for (int i = 0; i < graph.NodeCount; i++)
+                    {
+                        CheckCancelled(cancelled, i);
+                        if (SurfaceStructuralMath.TrySampleMacro(native.View, graph.Directions[i], out double height, out _) != SurfaceSampleStatus.Ready)
+                            throw new InvalidOperationException("The captured structural macro is not ready.");
+                        state.Ground[i] = height;
+                        state.Bedrock[i] = math.max(-recipe.Radius * .99, height - (recipe.MaximumHeight - recipe.MinimumHeight) * settings.MaximumErosionDepthFraction);
+                    }
+                Report(progress, cancelled, "Continents and mountain belts", graph.NodeCount, graph.NodeCount);
+                return structure.CaptureMacroGrid(graph, state.Ground);
+            }
+            for (int i = 0; i < graph.NodeCount; i++)
+            {
+                CheckCancelled(cancelled, i); double height = structure.Height(graph.Directions[i]);
+                state.Ground[i] = height;
+                state.Bedrock[i] = math.max(-recipe.Radius * .99, height - (recipe.MaximumHeight - recipe.MinimumHeight) * settings.MaximumErosionDepthFraction);
+            }
+            Report(progress, cancelled, "Continents and mountain belts", graph.NodeCount, graph.NodeCount);
+            return structure.CaptureMacroGrid(graph, state.Ground);
         }
         static double Noise(SurfaceDetailRecipe noise, double3 direction, double radius)
         {
@@ -333,12 +429,12 @@ namespace SpaceRunner.PlanetTerrain
                 for (int face = 0; face < 6; face++)
                 {
                     CheckCancelled(cancelled); int count = (resolution + 1) * (resolution + 1);
-                    var heights = new float[count]; var weights = new float4[count]; var erosion = new float4[count];
+                    var heights = new float[count]; var weights = SurfaceRecipe.HasStructuralAuthority(recipe.AlgorithmVersion) ? null : new float4[count]; var erosion = new float4[count];
                     for (int y = 0; y <= resolution; y++) for (int x = 0; x <= resolution; x++)
                     {
                         int node = graph.FaceNode(face, x * stride, y * stride), index = y * (resolution + 1) + x;
                         float height = (float)state.Ground[node]; if (!math.isfinite(height) || height <= -recipe.Radius) throw new InvalidOperationException("Bake generated invalid signed ground.");
-                        heights[index] = height; weights[index] = state.Weights[node]; erosion[index] = state.Erosion[node];
+                        heights[index] = height; if (weights != null) weights[index] = state.Weights[node]; erosion[index] = state.Erosion[node];
                     }
                     double faceError = 0;
                     if (resolution < finest)

@@ -23,7 +23,7 @@ namespace SpaceRunner.PlanetTerrain
             if (source == null || hydrology == null || !Projection.IsValid || Projection.Radius != source.Recipe.Radius || hydrology.Radius != source.Recipe.Radius ||
                 hydrology.SourceBaseDigest != source.Revision.BaseDigest) error = "Regional refinement requires exact global base hydrology and a matching metric projection.";
             else if (source.Stamps.Count != 0) error = "Instance craters must remain a separate final layer; never bake them into generated refinement.";
-            else if (Erosion == null || !Erosion.Validate(source.Recipe, out error)) { if (error == null) error = "Missing erosion settings."; }
+            else if (Erosion == null || !Erosion.ValidateErosion(source.Recipe, out error)) { if (error == null) error = "Missing erosion settings."; }
             else if (math.any(Resolution < 2) || math.any(Resolution > 512) || !math.isfinite(ContextMetres) || ContextMetres <= 0 ||
                 !math.isfinite(BlendMetres) || BlendMetres < 0 || !math.isfinite(DetailAmplitudeMetres) || DetailAmplitudeMetres < 0 ||
                 !math.isfinite(DetailWavelengthMetres) || DetailWavelengthMetres <= 0) error = "Invalid regional dimensions, context or detail scale.";
@@ -32,6 +32,8 @@ namespace SpaceRunner.PlanetTerrain
                 double2 pitch = (Projection.MaximumMetres - Projection.MinimumMetres) / (double2)Resolution;
                 if (!math.all(math.isfinite(pitch)) || math.any(pitch <= 0) || math.cmax(math.ceil(ContextMetres / pitch)) > 4096)
                     error = "Regional grid pitch or context-cell count exceeds numeric bounds.";
+                else if (source.StructuralField != null && source.StructuralField.RegionalFeatureScaleMetres < 4 * math.cmax(pitch))
+                    error = "A refined algorithm-three region must resolve its inherited structural feature with at least four cells.";
                 else if (ContextMetres < 4 * math.cmax(pitch) || BlendMetres > ContextMetres || BlendMetres > math.cmin(Projection.MaximumMetres - Projection.MinimumMetres) * .5 ||
                     (DetailAmplitudeMetres > 0 && DetailWavelengthMetres < 2 * math.cmax(pitch)))
                     error = "Context must include at least four cells; feather fits the core/context, and baked detail must resolve at least two cells per wavelength.";
@@ -53,6 +55,11 @@ namespace SpaceRunner.PlanetTerrain
             long bytes = checked(count * 768 + 8L * 1024 * 1024);
             foreach (var tile in source.Tiles) bytes = checked(bytes + tile.SampleCount * 36L);
             foreach (var region in source.Regions) if (region.Kind == SurfaceRegionKind.Authored) bytes = checked(bytes + region.SampleCount * 40L);
+            // RefineRegion retains the immutable managed source, then CreateNative duplicates its
+            // raw reference, province/edge index and captured drainage/coast buffers. The enclosing
+            // generation owns the managed source reservation; charge this simultaneous native copy.
+            if(source.StructuralField!=null)bytes=checked(bytes+source.StructuralField.EstimatedResidentBytes);
+            if(source.OrogenDetail!=null)bytes=checked(bytes+source.OrogenDetail.EstimatedResidentBytes);
             return bytes;
         }
         public SurfaceContentHash ConfigurationDigest(SurfaceContentHash source, SurfaceContentHash hydrology) => SurfaceHashing.Compute(writer =>
@@ -93,18 +100,24 @@ namespace SpaceRunner.PlanetTerrain
     {
         /// <summary>Refines intrinsic authored terrain using global time-averaged boundary flux. Generated neighbours never become recursive input.</summary>
         public static SurfaceRegionRefinementResult RefineRegion(SurfaceSnapshot source, SurfaceHydrologyField hydrology, SurfaceRegionRefinementSettings settings,
-            Action<SurfaceBakeProgress> progress = null, Func<bool> cancelled = null)
+            Action<SurfaceBakeProgress> progress = null, Func<bool> cancelled = null, SurfaceGeomorphology geomorphology = null)
         {
             if (settings == null) throw new ArgumentNullException(nameof(settings)); var captured = settings.Clone();
             if (!captured.Validate(source, hydrology, out var error)) throw new ArgumentException(error, nameof(settings));
+            bool structural = source.Recipe.AlgorithmVersion == SurfaceRecipe.StructuralAlgorithmVersion;
+            if (structural && (geomorphology == null || !geomorphology.HasGlobalGrid || geomorphology.SourceBaseDigest != source.Revision.BaseDigest ||
+                geomorphology.Radius != source.Recipe.Radius || geomorphology.Seed != source.Recipe.Seed))
+                throw new ArgumentException("Algorithm-two refinement requires the completed global geomorphology controls, not a locally regenerated noise field.");
             var clock = Stopwatch.StartNew(); Report(progress, cancelled, "Regional topology", 0, 1);
             var authored = new List<SurfaceRegionData>();
             foreach (var region in source.Regions)
                 if (region.Kind == SurfaceRegionKind.Authored && region.Priority < captured.Priority) authored.Add(region);
             // Later authored layers belong after this replacement. Embedding their deltas here would apply them twice.
             var input = new SurfaceSnapshot(source.Recipe, source.Revision, source.CanonicalTileLevel, source.Resolution, source.Tiles, source.Detail, authored,
-                automaticMaterialProfile:source.AutomaticMaterialProfile);
+                automaticMaterialProfile:source.AutomaticMaterialProfile,structuralField:source.StructuralField,orogenDetail:source.OrogenDetail);
             double2 pitch = (captured.Projection.MaximumMetres - captured.Projection.MinimumMetres) / (double2)captured.Resolution;
+            if (structural && geomorphology.RegionalFeatureScaleMetres < 4 * math.cmax(pitch))
+                throw new ArgumentException("The structural ridge/drainage band requires at least four regional cells per kilometre-scale feature.");
             int2 halo = (int2)math.ceil(captured.ContextMetres / pitch), domain = captured.Resolution + 2 * halo; double2 actualContext = (double2)halo * pitch;
             var p = captured.Projection;
             var contextProjection = new SurfaceRegionProjection(p.AnchorDirection, p.Right, p.Forward, p.Radius, p.MinimumMetres - actualContext, p.MaximumMetres + actualContext);
@@ -119,11 +132,17 @@ namespace SpaceRunner.PlanetTerrain
                         hydrology.TrySample(direction, out coarse[i]) != SurfaceSampleStatus.Ready) throw new InvalidOperationException("Required regional source or hydrology is unavailable.");
                     SurfaceSampler.TrySampleAttributes(native.View, direction, out background[i]);
                     // Detail fades only at the outer context boundary. The complete core gets the same planet-local metric field.
-                    if (captured.DetailAmplitudeMetres > 0)
+                    if (structural || (!SurfaceRecipe.HasStructuralAuthority(source.Recipe.AlgorithmVersion) && captured.DetailAmplitudeMetres > 0))
                     {
                         int x = i % (domain.x + 1), y = i / (domain.x + 1);
                         double border = math.min(math.min(x, domain.x - x) * pitch.x, math.min(y, domain.y - y) * pitch.y);
-                        if (detail.TryHeight(direction, p.Radius, out var displacement) != SurfaceSampleStatus.Ready) throw new ArgumentException("Regional detail exceeds stable metric lattice coordinates.");
+                        double displacement;
+                        if (structural)
+                        {
+                            if (!geomorphology.TryMacroRefinement(direction, out var macro)) throw new InvalidOperationException("The completed structural source grid is missing.");
+                            displacement = (macro + geomorphology.RegionalDisplacement(direction)) * IntrinsicWeight(authored, direction);
+                        }
+                        else if (detail.TryHeight(direction, p.Radius, out displacement) != SurfaceSampleStatus.Ready) throw new ArgumentException("Regional detail exceeds stable metric lattice coordinates.");
                         height += displacement * Smooth(0, captured.ContextMetres, border);
                     }
                     state.Ground[i] = height;
@@ -175,12 +194,32 @@ namespace SpaceRunner.PlanetTerrain
             {
                 SurfaceHashing.WriteHash(writer, captured.ConfigurationDigest(input.ContentDigest, hydrology.ContentDigest));
                 SurfaceHashing.WriteHash(writer, captured.Erosion.ConfigurationDigest(input.Recipe));
+                if (structural) SurfaceHashing.WriteHash(writer, geomorphology.ContentDigest);
             });
             double finalVolume = Volume(graph, state.Ground);
             var diagnostics = new SurfaceRegionRefinementDiagnostics(clock.Elapsed.TotalSeconds, graph.NodeCount, graph.EdgeCount, captured.EstimatedWorkingBytes(input),
                 initial, finalVolume, finalVolume + coreQuantization, importedSediment, exportedSediment, importedWater, exportedWater, eroded, deposited, actualContext);
             Report(progress, cancelled, "Regional complete", 1, 1);
             return new SurfaceRegionRefinementResult(output, diagnostics, config);
+        }
+        // A replacement imported from Gaea is an actual final shape; structural refinement must not double-apply its base.
+        // Delta imports retain the underlying structural band. Later authored layers are applied after this generated layer.
+        static double IntrinsicWeight(List<SurfaceRegionData> authored, double3 direction)
+        {
+            double weight = 1;
+            foreach (var region in authored)
+            {
+                if (region.Mode != SurfaceRegionMode.Replace || !region.Projection.TryProject(direction, out var metres) ||
+                    math.any(metres < region.Projection.MinimumMetres) || math.any(metres > region.Projection.MaximumMetres)) continue;
+                var uv = (metres - region.Projection.MinimumMetres) / (region.Projection.MaximumMetres - region.Projection.MinimumMetres);
+                var grid = uv * (double2)region.Resolution;
+                int x = (int)math.min(region.Resolution.x - 1, math.floor(grid.x)), y = (int)math.min(region.Resolution.y - 1, math.floor(grid.y));
+                double2 f = grid - new double2(x, y); int row = region.Resolution.x + 1, index = y * row + x;
+                double mask = math.lerp(math.lerp(region.MaskAt(index), region.MaskAt(index + 1), f.x), math.lerp(region.MaskAt(index + row), region.MaskAt(index + row + 1), f.x), f.y);
+                if (region.BlendMetres > 0) mask *= Smooth(0, region.BlendMetres, math.cmin(math.min(metres - region.Projection.MinimumMetres, region.Projection.MaximumMetres - metres)));
+                weight *= 1 - math.clamp(mask, 0, 1);
+            }
+            return weight;
         }
         static void ApplyBoundary(SurfaceBakeGraph graph, BakeState state, SurfaceHydrologySample[] source, double dt,
             ref double importedSediment, ref double exportedSediment, ref double importedWater, ref double exportedWater)

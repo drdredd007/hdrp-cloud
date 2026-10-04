@@ -1,0 +1,253 @@
+// Derived from World Orogen js/wind.js, ocean.js, climate-util.js and koppen.js.
+// Commit cc2662b4edd52231c4f65d8765f3ef12cd82d9b7; GPL-3.0-only.
+#pragma kernel Geography
+#pragma kernel Continentality
+#pragma kernel ItczSearch
+#pragma kernel ItczSpline
+#pragma kernel Pressure
+#pragma kernel Gradient
+#pragma kernel Wind
+#pragma kernel NormalizeWind
+#pragma kernel PressureDeviation
+#pragma kernel SmoothField
+#pragma kernel CopyField
+#pragma kernel SmoothScalar
+#pragma kernel CopyScalar
+#pragma kernel OceanCurrent
+#pragma kernel OceanWarmth
+#pragma kernel OceanSpeed
+#pragma kernel Koppen
+#pragma kernel PrecipTerrain
+#pragma kernel PrecipElevationBlend
+#pragma kernel PrecipWind
+#pragma kernel PrecipConvergence
+#pragma kernel MoistureInitialize
+#pragma kernel MoistureAdvect
+#pragma kernel PrecipMechanisms
+#pragma kernel ShadowPropagate
+#pragma kernel ShadowMerge
+#pragma kernel ShadowApply
+#pragma kernel HeuristicWest
+#pragma kernel HeuristicPrecipitation
+#pragma kernel PrecipBlend
+#pragma kernel PrecipNormalize
+#pragma kernel PrecipContrast
+#pragma kernel ScalarFromField
+#pragma kernel TemperatureZones
+#pragma kernel TemperaturePatchCleanup
+#pragma kernel TemperatureZoneBuffer
+#pragma kernel TemperatureZoneOceanZero
+#pragma kernel TemperatureZoneFinalize
+#pragma kernel CoastalWarmthInitialize
+#pragma kernel CoastalWarmthDiffuse
+#pragma kernel TemperatureCurve
+#pragma kernel TemperatureNormalize
+#pragma target 5.0
+#include "../../Core/WorldOrogenNoise.hlsl"
+#include "../../Core/WorldOrogenMath.hlsl"
+#include "WorldOrogenClimateDefaults.hlsl"
+
+StructuredBuffer<float3> _WorldPositions;
+StructuredBuffer<uint> _WorldNeighborOffsets,_WorldNeighbors;
+StructuredBuffer<float> _WorldElevation;
+int _WorldRegionCount,_ClimateSeason,_ClimateMode,_ClimateComponentMask;
+StructuredBuffer<double> _ClimateParameters;
+RWStructuredBuffer<float4> _ClimateGeoWrite;
+StructuredBuffer<float4> _ClimateGeo;
+RWStructuredBuffer<float3> _ClimateEastWrite,_ClimateNorthWrite;
+StructuredBuffer<float3> _ClimateEast,_ClimateNorth;
+RWStructuredBuffer<uint> _ClimateLandWrite;
+StructuredBuffer<uint> _ClimateLand;
+StructuredBuffer<int> _ClimateCoastLand,_ClimateCoastPlate,_ClimateCoastOcean,_ClimateCoastOceanWest,_ClimateCoastOceanEast;
+StructuredBuffer<uint> _ClimatePlateOcean,_ClimateBinOffsets,_ClimateBinIndices;
+RWStructuredBuffer<float> _ClimateContWrite,_ClimatePlateContWrite;
+StructuredBuffer<float> _ClimateCont,_ClimatePlateCont,_ClimateWestness;
+StructuredBuffer<float4> _ClimateRead;
+RWStructuredBuffer<float4> _ClimateWrite;
+StructuredBuffer<float> _ClimateScalarRead;
+RWStructuredBuffer<float> _ClimateScalarWrite;
+RWStructuredBuffer<double> _ClimateItcz;
+RWStructuredBuffer<double4> _ClimateSpline;
+StructuredBuffer<float2> _ClimateGrad;
+RWStructuredBuffer<float2> _ClimateGradWrite;
+StructuredBuffer<float4> _ClimateWindSummer,_ClimateWindWinter,_ClimateOceanSummer,_ClimateOceanWinter;
+StructuredBuffer<float2> _ClimatePrecip,_ClimateTemperature;
+RWStructuredBuffer<uint> _ClimateKoppen;
+static const double ClimatePi=3.14159265358979323846L,ClimateDeg=3.14159265358979323846L/180.0L;
+double ClimateSqrt(double x){if(x<=0)return 0;double v=(double)sqrt((float)x);[unroll]for(uint iteration=0;iteration<3;iteration++)v=.5L*(v+x/v);return v;}
+double ClimateStep(double a,double b,double x){if(a==b)return x>=b?1:0;double t=clamp((x-a)/(b-a),0.0L,1.0L);return t*t*(3.0L-2.0L*t);}
+double ClimateHeight(double e){double t=min(max(e,0.0L),1.0L),t2=t*t;return 6.0L*t2*t2*(5.0L-4.0L*t);}
+double ClimateExp(double x){return WorldExp(x);}
+double ClimateSin(double x){return (double)sin((float)x);}
+double ClimateCos(double x){return (double)cos((float)x);}
+double ClimateGauss(double distance,double width){double t=distance/width;return ClimateExp(-.5L*t*t);}
+int ClimateWrap(int x,int n){return ((x%n)+n)%n;}
+double ClimateSplineAtSeason(double lon,int season);
+double ClimateSplineAt(double lon);
+double ClimateLookupSeason(double lon,int season)
+{
+ double step=2.0L*ClimatePi/360.0L,start=-ClimatePi+.5L*step,fi=(lon-start)/step;
+ fi=fi-(double)((int)(fi/360.0L))*360.0L;if(fi<0)fi+=360.0L;
+ int i=(int)fi,j=(i+1)%360;double f=fi-i;
+ // Lookup samples are Float32 in upstream, while pressure uses the full spline.
+ double a=(double)(float)ClimateSplineAtSeason(-ClimatePi+(i+.5L)*step,season),b=(double)(float)ClimateSplineAtSeason(-ClimatePi+(j+.5L)*step,season);
+ return a*(1.0L-f)+b*f;
+}
+double ClimateLookup(double lon){return ClimateLookupSeason(lon,_ClimateSeason);}
+double ClimateSplineAtSeason(double lon,int season)
+{
+ double step=2.0L*ClimatePi/72.0L,start=-ClimatePi+.5L*step,t=lon-start;
+ t=t-(double)((int)(t/(2.0L*ClimatePi)))*(2.0L*ClimatePi);if(t<0)t+=2.0L*ClimatePi;t+=start;
+ int seg=clamp((int)((t-start)/step),0,71);double dx=t-(-ClimatePi+(seg+.5L)*step);double4 v=_ClimateSpline[season*72+seg];
+ return v.x+v.y*dx+v.z*dx*dx+v.w*dx*dx*dx;
+}
+
+double ClimateSplineAt(double lon){return ClimateSplineAtSeason(lon,_ClimateSeason);}
+
+[numthreads(64,1,1)] void Geography(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;double3 p=(double3)_WorldPositions[r];
+ double lat=WorldAsin(clamp(p.y,-1.0L,1.0L)),lon=WorldAtan2(p.x,p.z),cl=ClimateSqrt(max(0.0L,1.0L-p.y*p.y));if(cl==0)cl=.01L;
+ double3 east=double3(p.z,0,-p.x);double el=ClimateSqrt(east.x*east.x+east.z*east.z);if(el<1e-10L){east=double3(1,0,0);el=1;}east/=el;
+ double3 north=double3(p.y*east.z-p.z*east.y,p.z*east.x-p.x*east.z,p.x*east.y-p.y*east.x);double nl=ClimateSqrt(dot(north,north));north/=nl!=0?nl:1.0L;
+ _ClimateGeoWrite[r]=float4((float)lat,(float)lon,(float)p.y,(float)cl);_ClimateEastWrite[r]=(float3)east;_ClimateNorthWrite[r]=(float3)north;_ClimateLandWrite[r]=_WorldElevation[r]>0?1:0;
+}
+[numthreads(64,1,1)] void Continentality(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;double avg=ClimatePi*6371.0L/ClimateSqrt((double)_WorldRegionCount);
+ _ClimateContWrite[r]=_ClimateLand[r]!=0&&_ClimateCoastLand[r]>=0?(float)ClimateStep(0,WIND_CONT_RANGE_KM,(double)_ClimateCoastLand[r]*avg):0;
+ _ClimatePlateContWrite[r]=_ClimatePlateOcean[r]==0&&_ClimateCoastPlate[r]>=0?(float)ClimateStep(0,WIND_CONT_RANGE_KM,(double)_ClimateCoastPlate[r]*avg):0;
+}
+// Same binned geographic scan and ordering as buildGeoIndex.sampleDual.
+double4 ClimateGeoSample(double lat,double lon,double localRadius,double wideRadius)
+{
+ int bmin=max(0,(int)floor((float)((lat-wideRadius+ClimatePi*.5L)/ClimatePi*36.0L))),bmax=min(35,(int)floor((float)((lat+wideRadius+ClimatePi*.5L)/ClimatePi*36.0L)));
+ double cl=ClimateCos(lat);if(cl==0)cl=.01L;double span=wideRadius/cl;
+ int lmin=(int)floor((float)((lon-span+ClimatePi)/(2.0L*ClimatePi)*72.0L)),lmax=(int)floor((float)((lon+span+ClimatePi)/(2.0L*ClimatePi)*72.0L));
+ double lc=ClimateCos(localRadius),wc=ClimateCos(wideRadius),sl=ClimateSin(lat),cl0=ClimateCos(lat),le=0,we=0;uint ln=0,wn=0,ll=0,wl=0;
+ for(int bi=bmin;bi<=bmax;bi++)for(int li=lmin;li<=lmax;li++)
+ {uint bin=bi*72+ClimateWrap(li,72);for(uint k=_ClimateBinOffsets[bin];k<_ClimateBinOffsets[bin+1];k++){uint r=_ClimateBinIndices[k];float4 g=_ClimateGeo[r];double cd=sl*(double)g.z+cl0*(double)g.w*ClimateCos((double)g.y-lon);if(cd>=wc){wn++;double e=max((double)_WorldElevation[r],0.0L);we+=e;wl+=_ClimateLand[r];if(cd>=lc){ln++;le+=e;ll+=_ClimateLand[r];}}}}
+ return double4(ln>0?(double)ll/ln:0,ln>0?le/ln:0,wn>0?(double)wl/wn:0,wn>0?we/wn:0);
+}
+[numthreads(64,1,1)] void ItczSearch(uint i:SV_DispatchThreadID)
+{
+ if(i>=72)return;double sign=_ClimateSeason==0?1.0L:-1.0L,lon=-ClimatePi+(i+.5L)*(2.0L*ClimatePi/72.0L),best=-1.7976931348623157e308L,chosen=sign*5.0L*ClimateDeg;
+ for(int scan=0;scan<25;scan++)
+ {
+  double degrees=-30.0L+scan*2.5L,lat=degrees*ClimateDeg;double4 g=ClimateGeoSample(lat,lon,5.0L*ClimateDeg,30.0L*ClimateDeg),pole=ClimateGeoSample(lat+sign*15.0L*ClimateDeg,lon,30.0L*ClimateDeg,30.0L*ClimateDeg);
+  double continental=ClimateStep(.20L,.45L,max(g.z,pole.z*.7L)),scaled=continental*continental,boost=ClimateStep(.25L,.55L,g.x)*scaled*WIND_ITCZ_LAND_BOOST_MAX;
+  bool winter=(sign>0&&degrees<0)||(sign<0&&degrees>0);
+  double score=ClimateGauss(degrees-sign*23.5L,25.0L)+boost+min(.30L,ClimateHeight(g.w)*.12L)*scaled+(winter?boost*WIND_ITCZ_ANCHOR_FACTOR:0.0L)+(!winter&&g.x<.1L?.08L*ClimateGauss(abs(degrees)-7.0L,5.0L):0.0L);
+  if(score>best){best=score;chosen=lat;}
+ }
+ _ClimateItcz[_ClimateSeason*72+i]=chosen;
+}
+[numthreads(1,1,1)] void ItczSpline(uint ignored:SV_DispatchThreadID)
+{
+ uint start=_ClimateSeason*72;double tmp[72];double alpha[72];double h[72];
+ [loop] for(uint initControl=0;initControl<72;initControl++)_ClimateSpline[start+initControl]=double4(_ClimateItcz[start+initControl],0,0,0);
+ [loop] for(uint smoothPass=0;smoothPass<7;smoothPass++)
+ {
+  [loop] for(int smoothControl=0;smoothControl<72;smoothControl++)
+  {if(smoothPass<4)tmp[smoothControl]=.1L*_ClimateSpline[start+ClimateWrap(smoothControl-2,72)].x+.2L*_ClimateSpline[start+ClimateWrap(smoothControl-1,72)].x+.4L*_ClimateSpline[start+smoothControl].x+.2L*_ClimateSpline[start+ClimateWrap(smoothControl+1,72)].x+.1L*_ClimateSpline[start+ClimateWrap(smoothControl+2,72)].x;else tmp[smoothControl]=.25L*_ClimateSpline[start+ClimateWrap(smoothControl-1,72)].x+.5L*_ClimateSpline[start+smoothControl].x+.25L*_ClimateSpline[start+ClimateWrap(smoothControl+1,72)].x;}
+  [loop] for(uint copyControl=0;copyControl<72;copyControl++)_ClimateSpline[start+copyControl].x=tmp[copyControl];
+ }
+ [loop] for(uint intervalControl=0;intervalControl<72;intervalControl++)
+ {_ClimateSpline[start+intervalControl].x=clamp(_ClimateSpline[start+intervalControl].x,-WIND_ITCZ_CLAMP_DEG*ClimateDeg,WIND_ITCZ_CLAMP_DEG*ClimateDeg);double x=-ClimatePi+(intervalControl+.5L)*(2.0L*ClimatePi/72.0L),xn=-ClimatePi+((intervalControl+1)%72+.5L)*(2.0L*ClimatePi/72.0L);double d=xn-x+2.0L*ClimatePi;h[intervalControl]=d-(double)((int)(d/(2.0L*ClimatePi)))*(2.0L*ClimatePi);if(h[intervalControl]==0)h[intervalControl]=2.0L*ClimatePi/72.0L;}
+ [loop] for(uint alphaControl=0;alphaControl<72;alphaControl++)
+ {uint previous=(alphaControl+71)%72,next=(alphaControl+1)%72;alpha[alphaControl]=3.0L/h[alphaControl]*(_ClimateSpline[start+next].x-_ClimateSpline[start+alphaControl].x)-3.0L/h[previous]*(_ClimateSpline[start+alphaControl].x-_ClimateSpline[start+previous].x);}
+ // Preserve the upstream in-place Gauss-Seidel traversal.
+ [loop] for(uint relaxationPass=0;relaxationPass<20;relaxationPass++)[loop] for(uint relaxationControl=0;relaxationControl<72;relaxationControl++)
+ {uint previous=(relaxationControl+71)%72,next=(relaxationControl+1)%72;_ClimateSpline[start+relaxationControl].z=(alpha[relaxationControl]-h[previous]*_ClimateSpline[start+previous].z-h[relaxationControl]*_ClimateSpline[start+next].z)/(2.0L*(h[previous]+h[relaxationControl]));}
+ [loop] for(uint coefficientControl=0;coefficientControl<72;coefficientControl++)
+ {uint next=(coefficientControl+1)%72;double4 v=_ClimateSpline[start+coefficientControl],n=_ClimateSpline[start+next];v.y=(n.x-v.x)/h[coefficientControl]-h[coefficientControl]*(n.z+2.0L*v.z)/3.0L;v.w=(n.z-v.z)/(3.0L*h[coefficientControl]);_ClimateSpline[start+coefficientControl]=v;}
+}
+[numthreads(64,1,1)] void Pressure(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;float4 g=_ClimateGeo[r];double lat=g.x,lon=g.y,ld=lat/ClimateDeg,sign=_ClimateSeason==0?1.0L:-1.0L,cont=_ClimateCont[r],p=1013.0L;
+ p-=WIND_ITCZ_LOW_DEPTH_HPA*ClimateGauss((lat-ClimateSplineAt(lon))/ClimateDeg,WIND_ITCZ_LOW_WIDTH_DEG);
+ double shift=sign*WIND_SUBTROP_SEASONAL_SHIFT_DEG,hi=WIND_SUBTROP_HIGH_STRENGTH_HPA*(1.0L-WIND_SUBTROP_LAND_WEAKENING*cont);
+ p+=hi*ClimateGauss(ld-(WIND_SUBTROP_HIGH_LAT_DEG+shift),WIND_SUBTROP_HIGH_WIDTH_DEG)+hi*ClimateGauss(ld+(WIND_SUBTROP_HIGH_LAT_DEG-shift),WIND_SUBTROP_HIGH_WIDTH_DEG);
+ p-=WIND_SUBPOLAR_LOW_DEPTH_HPA*ClimateGauss(ld-WIND_SUBPOLAR_LOW_LAT_DEG,WIND_SUBPOLAR_LOW_WIDTH_DEG)+WIND_SUBPOLAR_LOW_DEPTH_HPA*ClimateGauss(ld+WIND_SUBPOLAR_LOW_LAT_DEG,WIND_SUBPOLAR_LOW_WIDTH_DEG);
+ p+=WIND_POLAR_HIGH_STRENGTH_HPA*ClimateGauss(ld-85.0L,8.0L)+WIND_POLAR_HIGH_STRENGTH_HPA*ClimateGauss(ld+85.0L,8.0L);
+ double cs=ClimateStep(.2L,.5L,cont);if(cs>.001L){double a=abs(ld),lf=a<15?0:a<30?.75L*ClimateStep(15,30,a):a<45?.75L+.25L*ClimateStep(30,45,a):a<60?1:a<90?ClimateStep(90,60,a):0;bool summer=(sign>0&&lat>0)||(sign<0&&lat<0);p+=summer?-WIND_SUMMER_THERMAL_LOW_HPA*lf*cs:WIND_WINTER_THERMAL_HIGH_HPA*lf*cs;}
+ p-=3.0L*ClimateHeight(max((double)_WorldElevation[r],0.0L));p+=WorldOrogenFbm((double3)_WorldPositions[r]*2.0L,3)*2.0L;
+ _ClimateWrite[r]=float4((float)p,0,0,0);
+}
+[numthreads(64,1,1)] void Gradient(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;double3 p=(double3)_WorldPositions[r],e=(double3)_ClimateEast[r],n=(double3)_ClimateNorth[r];double ep=0,ee=0,np=0,nn=0,h=_ClimateRead[r].x;
+ for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];double3 d=(double3)_WorldPositions[nb]-p;double de=dot(d,e),dn=dot(d,n),dp=(double)_ClimateRead[nb].x-h;ep+=de*dp;ee+=de*de;np+=dn*dp;nn+=dn*dn;}
+ _ClimateGradWrite[r]=float2(ee>1e-12L?(float)(ep/ee):0,nn>1e-12L?(float)(np/nn):0);
+}
+[numthreads(64,1,1)] void Wind(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;double sl=_ClimateGeo[r].z,angle=(sl>=0?-1.0L:1.0L)*(WIND_GEOSTROPHIC_MAX_ANGLE_DEG*ClimateDeg*ClimateStep(0,ClimateSin(5.0L*ClimateDeg),abs(sl))-WIND_FRICTION_BACK_ANGLE_DEG*ClimateDeg);
+ double c=ClimateCos(angle),s=ClimateSin(angle),e=-_ClimateGrad[r].x,n=-_ClimateGrad[r].y,we=(e*c-n*s)*.6L,wn=(e*s+n*c)*.6L;
+ _ClimateWrite[r]=float4((float)we,(float)wn,(float)ClimateSqrt(we*we+wn*wn),_ClimateRead[r].x-1013);
+}
+[numthreads(64,1,1)] void NormalizeWind(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount){float4 v=_ClimateRead[r];v.z=(float)min(1.0L,(double)v.z/_ClimateParameters[0]);_ClimateWrite[r]=v;}}
+// Wind.w already holds the exact source Float32 deviation after smoothed absolute-pressure gradients.
+[numthreads(64,1,1)] void PressureDeviation(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount)_ClimateWrite[r]=float4(_ClimateRead[r].w,0,0,0);}
+[numthreads(64,1,1)] void CopyField(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount)_ClimateWrite[r]=_ClimateRead[r];}
+[numthreads(64,1,1)] void SmoothField(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;
+ bool land=_ClimateLand[r]!=0;if((_ClimateMode==1&&land)||(_ClimateMode==2&&!land)){_ClimateWrite[r]=_ClimateRead[r];return;}
+ double4 sum=(double4)_ClimateRead[r];uint count=1;
+ for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];bool nl=_ClimateLand[nb]!=0;if(_ClimateMode==1&&nl||_ClimateMode==2&&!nl)continue;sum+=(double4)_ClimateRead[nb];count++;}
+ float4 original=_ClimateRead[r],mean=(float4)(sum/(double)count);
+ _ClimateWrite[r]=float4((_ClimateComponentMask&1)!=0?mean.x:original.x,(_ClimateComponentMask&2)!=0?mean.y:original.y,(_ClimateComponentMask&4)!=0?mean.z:original.z,(_ClimateComponentMask&8)!=0?mean.w:original.w);
+}
+[numthreads(64,1,1)] void CopyScalar(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount)_ClimateScalarWrite[r]=_ClimateScalarRead[r];}
+[numthreads(64,1,1)] void SmoothScalar(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;bool land=_ClimateLand[r]!=0;
+ if((_ClimateMode==1&&land)||(_ClimateMode==2&&!land)){_ClimateScalarWrite[r]=_ClimateScalarRead[r];return;}
+ double sum=_ClimateScalarRead[r];uint count=1;
+ for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];bool nl=_ClimateLand[nb]!=0;if((_ClimateMode==1&&nl)||(_ClimateMode==2&&!nl))continue;sum+=(double)_ClimateScalarRead[nb];count++;}
+ _ClimateScalarWrite[r]=(float)(sum/count);
+}
+[numthreads(64,1,1)] void OceanCurrent(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;if(_ClimateLand[r]!=0){_ClimateWrite[r]=0;return;}
+ double lat=_ClimateGeo[r].x,ld=lat/ClimateDeg,absLat=abs(ld),hemi=lat>=0?1.0L:-1.0L,shift=_ClimateSeason==0?5.0L:-5.0L,band=abs(ld-shift),dist=abs(lat-ClimateLookup(_ClimateGeo[r].y))/ClimateDeg;
+ double e=dist<3?1.0L-2.0L*ClimateStep(0,3,dist):band<30?-1:band<35?-1.0L+2.0L*ClimateStep(30,35,band):band<58?1:band<65?1.0L-1.5L*ClimateStep(58,65,band):-.5L,n=0;
+ double threshold=_ClimateParameters[1];int wd=_ClimateCoastOceanWest[r],ed=_ClimateCoastOceanEast[r];
+ if(wd>=0&&wd<threshold){double t=1.0L-wd/threshold;n+=hemi*t*t*2.0L;e*=1.0L-t*t*.7L;}
+ if(ed>=0&&ed<threshold){double t=1.0L-ed/threshold;n-=hemi*t*t*.8L;e*=1.0L-t*t*.5L;}
+ bool circ=(lat>0&&_ClimateParameters[2]!=0)||(lat<0&&_ClimateParameters[3]!=0);if(circ&&absLat>=55&&absLat<=75){double c=1.0L-abs(absLat-65.0L)/10.0L;e=e*(1.0L-c)+1.5L*c;n*=1.0L-c*.8L;}
+ _ClimateWrite[r]=float4((float)e,(float)n,0,0);
+}
+[numthreads(64,1,1)] void OceanWarmth(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;float4 v=_ClimateRead[r];if(_ClimateLand[r]!=0){_ClimateWrite[r]=0;return;}
+ double band=abs((double)_ClimateGeo[r].x/ClimateDeg-(_ClimateSeason==0?5.0L:-5.0L));
+ double sign=band<28?1:band<35?1.0L-2.0L*ClimateStep(28,35,band):band<55?-1:band<65?-1.0L+2.0L*ClimateStep(55,65,band):1,range=_ClimateParameters[1]*2.0L,w=0;
+ int wd=_ClimateCoastOceanWest[r],ed=_ClimateCoastOceanEast[r];if(wd>=0&&wd<range){double t=1.0L-wd/range;w+=sign*t*t;}if(ed>=0&&ed<range){double t=1.0L-ed/range;w-=sign*t*t;}
+ v.w=(float)clamp(w,-1.0L,1.0L);_ClimateWrite[r]=v;
+}
+[numthreads(64,1,1)] void OceanSpeed(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount){float4 v=_ClimateRead[r];double q=(double)(float)((double)v.x*v.x+(double)v.y*v.y);v.z=(float)min(1.0L,ClimateSqrt(q/_ClimateParameters[0]));_ClimateWrite[r]=v;}}
+[numthreads(64,1,1)] void Koppen(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;if(_WorldElevation[r]<=0){_ClimateKoppen[r]=0;return;}
+ double ts=-45.0L+clamp((double)_ClimateTemperature[r].x,0.0L,1.0L)*90.0L,tw=-45.0L+clamp((double)_ClimateTemperature[r].y,0.0L,1.0L)*90.0L,hot=max(ts,tw),cold=min(ts,tw),annual=(ts+tw)*.5L,shoulder=hot-(hot-cold)*(KOPPEN_SHOULDER_FRAC/6.0L);
+ double ps=max((double)_ClimatePrecip[r].x,0.0L)*KOPPEN_PRECIP_SCALE_MM,pw=max((double)_ClimatePrecip[r].y,0.0L)*KOPPEN_PRECIP_SCALE_MM,pa=ps+pw,summer=ts>=tw?ps:pw,winter=ts>=tw?pw:ps,sm=summer/6.0L,wm=winter/6.0L,minMonth=min(sm,wm),ratio=max(sm,wm)/(minMonth!=0?minMonth:1.0L),dry=minMonth*(KOPPEN_DRIEST_FRAC_BASE-KOPPEN_DRIEST_FRAC_DROP*ClimateStep(1,4,ratio));
+ if(hot<0){_ClimateKoppen[r]=30;return;}if(hot<10){_ClimateKoppen[r]=29;return;}
+ double fraction=pa>0?summer/pa:.5L,threshold=max(0.0L,20.0L*annual+(fraction>=.7L?280.0L:fraction<=.3L?0.0L:140.0L)),east=max(0.0L,-(double)_ClimateWestness[r]),arid=pa*KOPPEN_ARIDITY_SCALE*(1.0L+east*KOPPEN_EAST_COAST_WET);
+ if(arid<threshold){_ClimateKoppen[r]=arid<threshold*.5L?(annual>=18?4:5):(annual>=18?6:7);return;}
+ uint pattern=summer<winter&&sm<KOPPEN_S_SUMMER_MAX_MM&&sm<wm/KOPPEN_S_RATIO?1:!(summer<winter)&&wm<sm/KOPPEN_W_RATIO?2:0;
+ uint letter=hot>=22?0:shoulder>=10?1:cold>=-38?2:3;
+ if(cold>=18){_ClimateKoppen[r]=dry>=KOPPEN_AF_DRY_MIN_MM?1:pa>=25.0L*(100.0L-dry)?2:3;return;}
+ if(cold>=0){_ClimateKoppen[r]=letter<3?8+pattern*3+letter:9;return;}
+ _ClimateKoppen[r]=17+pattern*4+letter;
+}
+#include "WorldOrogenPrecipitation.hlsl"
+#include "WorldOrogenTemperature.hlsl"
+[numthreads(64,1,1)] void ScalarFromField(uint r:SV_DispatchThreadID){if(r<(uint)_WorldRegionCount)_ClimateScalarWrite[r]=_ClimateRead[r].x;}
+

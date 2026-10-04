@@ -57,9 +57,11 @@ namespace UnityEngine.Rendering.HighDefinition
         static bool SameSettings(in PlanetNativeSurfaceSettings a,in PlanetNativeSurfaceSettings b)=>
             a.PatchSize==b.PatchSize&&a.ReceiverHalfSize==b.ReceiverHalfSize&&a.ShadowHalfSize==b.ShadowHalfSize&&
             a.RecenterDistance==b.RecenterDistance&&a.Resolution==b.Resolution&&a.PatchesPerFrame==b.PatchesPerFrame&&a.MaximumResidentPatches==b.MaximumResidentPatches;
+        bool HasBaseMap(PlanetDefinition definition)=>owner.BaseMapOverride||PlanetSurfaceDataRegistry.TryGetBaseColour(definition.Surface,out _);
+        bool RequiresMaterialWeights(PlanetDefinition definition)=>owner.NativeMaterialSettings&&owner.NativeMaterialSettings.RequireMaterialWeights&&!HasBaseMap(definition);
         public bool Covers(PlanetDefinition definition,double3 planetLocalPosition,double margin=0)
         {
-            if(active==null||!SameSurface(active.Definition,definition)||owner.NativeMaterialSettings&&owner.NativeMaterialSettings.RequireMaterialWeights&&!active.RequiredMasks)return false;
+            if(active==null||!SameSurface(active.Definition,definition)||RequiresMaterialWeights(definition)&&!active.RequiredMasks)return false;
             var p=active.Frame.ToLocal(planetLocalPosition);
             return math.abs(p.x)<=active.Settings.ReceiverHalfSize-margin&&math.abs(p.z)<=active.Settings.ReceiverHalfSize-margin;
         }
@@ -77,9 +79,9 @@ namespace UnityEngine.Rendering.HighDefinition
             var localCamera=PlanetField.Rotate(new double4(-q.xyz,q.w),target-owner.Definition.Center);
             if(!math.all(math.isfinite(localCamera))||math.length(localCamera)-owner.Definition.Radius>20000)return;
             if(stagedRevision.HasValue){var candidate=stagedRevision.Value;candidate.Center=owner.Definition.Center;PrepareRevision(candidate);}
-            else Prepare(owner.Definition,localCamera,settings,owner.NativeMaterialSettings.RequireMaterialWeights);
+            else Prepare(owner.Definition,localCamera,settings,RequiresMaterialWeights(owner.Definition));
             if(active==null)return;
-            if(owner.NativeMaterialSettings.RequireMaterialWeights&&!active.RequiredMasks)return;
+            if(RequiresMaterialWeights(active.Definition)&&!active.RequiredMasks)return;
             var shader=owner.NativeMaterialSettings.NativeShader;
             if(!shader)shader=Resources.Load<Shader>("PlanetTerrainLit");
             if(!shader||!shader.isSupported){Status="Native terrain shader is unavailable";return;}
@@ -95,6 +97,7 @@ namespace UnityEngine.Rendering.HighDefinition
             {
                 bool objectHistory=cell.HasPrevious&&historyValid;
                 cell.Properties.Clear();PlanetTerrainMaterialBinding.Bind(cell.Properties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation);
+                WorldOrogenBaseMapBinding.Bind(cell.Properties,owner.BaseMapColour,owner.PlanetRotation,frame.Position,owner.Definition.Radius);
                 var parameters=new RenderParams(material)
                 {
                     camera=camera,matProps=cell.Properties,worldBounds=WorldBounds(cell.Mesh.bounds,matrix),
@@ -157,7 +160,7 @@ namespace UnityEngine.Rendering.HighDefinition
             stagedEmpty=false;
             if(!owner.NativeMaterialSettings.IsValid||!owner.NativeSurfaceSettings.IsValid){Status="Invalid staged native terrain settings";return false;}
             if(stagedPreparationFrame!=Time.frameCount)
-            {stagedPreparationFrame=Time.frameCount;Prepare(candidate,localTarget,owner.NativeSurfaceSettings,owner.NativeMaterialSettings.RequireMaterialWeights,false);}
+            {stagedPreparationFrame=Time.frameCount;Prepare(candidate,localTarget,owner.NativeSurfaceSettings,RequiresMaterialWeights(candidate),false);}
             return RevisionReady(candidate.Surface);
         }
         bool NeedsRevisionBank(PlanetDefinition candidate,out double3 localTarget)
@@ -172,7 +175,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(active!=null&&retired.Count==retired.Capacity)return false;
             if(stagedEmpty)return !NeedsRevisionBank(stagedRevision.Value,out _);
             return pending!=null&&pending.Ready&&pending.Bank.Definition.Surface.Equals(descriptor)&&owner.NativeMaterialSettings&&owner.NativeMaterialSettings.IsValid&&
-                SameSettings(pending.Bank.Settings,owner.NativeSurfaceSettings)&&pending.Bank.RequiredMasks==owner.NativeMaterialSettings.RequireMaterialWeights;
+                SameSettings(pending.Bank.Settings,owner.NativeSurfaceSettings)&&pending.Bank.RequiredMasks==RequiresMaterialWeights(stagedRevision.Value);
         }
         public bool CommitRevision(PlanetSurfaceDescriptor descriptor)
         {
@@ -192,12 +195,18 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             if(disposed)throw new ObjectDisposedException(nameof(PlanetNativeSurfaceRenderer));
             if(!definition.IsValid||!settings.IsValid||!math.all(math.isfinite(localCamera))||math.lengthsq(localCamera)<=0)return;
+            // Source-colour maps replace the layered palette; their height-only tiles do not carry GRSS masks.
+            requireMasks=requireMasks&&!HasBaseMap(definition);
             PollAbandoned();
             if(pending!=null&&(!SameSurface(pending.Bank.Definition,definition)||!SameSettings(pending.Bank.Settings,settings)||pending.Bank.RequiredMasks!=requireMasks))
             {abandoned.Add(pending);pending=null;}
             bool changed=active==null||!SameSurface(active.Definition,definition)||!SameSettings(active.Settings,settings)||active.RequiredMasks!=requireMasks;
             var delta=active==null?default:active.Frame.ToLocal(localCamera);
-            if(pending==null&&(changed||math.abs(delta.x)>settings.RecenterDistance||math.abs(delta.z)>settings.RecenterDistance))
+            bool needsBank=pending==null&&(changed||math.abs(delta.x)>settings.RecenterDistance||math.abs(delta.z)>settings.RecenterDistance);
+            if(definition.GeneratorVersion==3&&(needsBank||pending!=null&&!pending.Ready)&&
+                !PlanetSurfaceDataRegistry.TryPrepareForRendering(definition.Surface,out var preparation))
+            {Status="Native terrain waits for render filtering: "+preparation;return;}
+            if(needsBank)
             {
                 var radial=math.normalize(localCamera);
                 var address=new PlanetSurfaceAddress {Latitude=math.degrees(math.asin(math.clamp(radial.y,-1,1))),Longitude=math.degrees(math.atan2(radial.z,radial.x))};

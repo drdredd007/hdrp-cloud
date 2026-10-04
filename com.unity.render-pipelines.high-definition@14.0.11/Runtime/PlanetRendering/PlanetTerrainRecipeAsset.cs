@@ -8,6 +8,8 @@ namespace UnityEngine.Rendering.HighDefinition
     public sealed class PlanetTerrainRecipeAsset : ScriptableObject
     {
         public int Seed=7243;
+        [Tooltip("1: original bake. 2: regional tectonic controls. 3: captured legacy whole-planet bands. 4: captured continental coasts and connected stream-power catchments. Changing the version requires an explicit new bake.")]
+        public int BakeAlgorithmVersion = SurfaceRecipe.CurrentAlgorithmVersion;
         public SurfaceStyle Style=SurfaceStyle.EarthLike;
         public double Radius=2000000, SeaLevel=0, MinimumHeight=-6000, MaximumHeight=6000;
         public SurfaceBakeSettings Bake=SurfaceBakeSettings.Preview;
@@ -19,7 +21,7 @@ namespace UnityEngine.Rendering.HighDefinition
         [HideInInspector] public double LastBakeSeconds,LastMassResidual,LastLodError;
         [HideInInspector] public long LastWorkingBytes;
         [HideInInspector] public int LastNodeCount;
-        public SurfaceRecipe Recipe => new SurfaceRecipe(Seed,Style,Radius,MinimumHeight,MaximumHeight,SeaLevel,algorithmVersion:SurfaceRecipe.CurrentAlgorithmVersion);
+        public SurfaceRecipe Recipe => new SurfaceRecipe(Seed,Style,Radius,MinimumHeight,MaximumHeight,SeaLevel,algorithmVersion:BakeAlgorithmVersion);
     }
 
     [Serializable]

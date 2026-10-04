@@ -6,6 +6,9 @@ using Unity.Mathematics;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
+    // Immutable shader programs prune authorities that cannot execute for this snapshot.
+    // Complete is retained only for explicitly supplied/custom programs and direct probes.
+    internal enum PlanetSurfaceGpuFamily { Complete, Plain, LegacyStructure, Drainage, Landform, Orogen }
     /// <summary>Immutable GPU copy of the same leased CPU snapshot. Shared by far/local backends.</summary>
     internal sealed class PlanetSurfaceGpuData : IDisposable
     {
@@ -23,9 +26,36 @@ namespace UnityEngine.Rendering.HighDefinition
         GraphicsBuffer tiles,heights,regions,regionHeights,regionMasks,stamps,materialWeights,erosionData,regionMaterialWeights,regionErosionData;
         GraphicsBuffer neutralFilterRanges,neutralFilterMips,neutralFilterSamples;
         PlanetSurfaceRegionFilterLease filter;
+        PlanetSurfaceLandformGpuFiltering.Lease landformFilter;
+        PlanetSurfaceStructuralGpu structure;
+        PlanetSurfaceOrogenDetailGpu orogenDetail;
+        PlanetSurfaceMaterialGpu dynamicMaterials;
         int references;
         internal PlanetSurfaceDescriptor Key {get;}
         internal bool IsDisposed {get;private set;}
+        internal PlanetSurfaceGpuFamily PatchFamily
+        {
+            get
+            {
+                if(view.OrogenDetail.Enabled)
+                {
+                    if(view.StructuralField.Enabled)throw new InvalidOperationException("Orogen detail cannot coexist with legacy structural authority.");
+                    return PlanetSurfaceGpuFamily.Orogen;
+                }
+                if(!view.StructuralField.Enabled)return PlanetSurfaceGpuFamily.Plain;
+                switch(view.StructuralField.MorphologyVersion)
+                {
+                    case 1:return PlanetSurfaceGpuFamily.LegacyStructure;
+                    case 2:
+                        if(!view.StructuralField.DrainageField.Enabled)throw new InvalidOperationException("Drainage authority is not ready.");
+                        return PlanetSurfaceGpuFamily.Drainage;
+                    case 3:
+                        if(!view.StructuralField.LandformField.Enabled)throw new InvalidOperationException("Landform authority is not ready.");
+                        return PlanetSurfaceGpuFamily.Landform;
+                    default:throw new NotSupportedException("The captured structural morphology has no supported patch shader family.");
+                }
+            }
+        }
         internal long EstimatedBytes=>Bytes(view)+PlanetSurfaceRegionFiltering.EstimateGpuBytes(view)+32;
         internal static long EstimateBytes(PlanetSurfaceDescriptor descriptor)
         {
@@ -39,7 +69,7 @@ namespace UnityEngine.Rendering.HighDefinition
             (long)math.max(1,source.Regions.Length)*Marshal.SizeOf<Region>()+(long)math.max(1,source.RegionHeights.Length)*4+
             (long)math.max(1,source.RegionMasks.Length)*4+(long)math.max(1,source.Stamps.Length)*Marshal.SizeOf<Stamp>()+
             (long)math.max(1,source.MaterialWeights.Length)*16+(long)math.max(1,source.ErosionData.Length)*16+
-            (long)math.max(1,source.RegionMaterialWeights.Length)*16+(long)math.max(1,source.RegionErosionData.Length)*16);
+            (long)math.max(1,source.RegionMaterialWeights.Length)*16+(long)math.max(1,source.RegionErosionData.Length)*16 + PlanetSurfaceStructuralGpu.EstimateBytes(source.StructuralField) + PlanetSurfaceMaterialGpu.EstimateBytes(source) + PlanetSurfaceOrogenDetailGpu.EstimateBytes(source.OrogenDetail));
         internal static PlanetSurfaceGpuData Acquire(in PlanetDefinition definition)
         {
             PlanetSurfaceDataRegistry.CheckMainThread();
@@ -51,6 +81,11 @@ namespace UnityEngine.Rendering.HighDefinition
                 var result=new PlanetSurfaceGpuData(definition.Surface,held);result.references=1;cache.Add(definition.Surface,result);return result;
             }
             catch {held.Dispose();throw;}
+        }
+        internal static PlanetSurfaceGpuData AcquireForFiltering(in PlanetDefinition definition)
+        {
+            var data=Acquire(definition);
+            try{data.PrepareLandformFiltering(out _);return data;}catch{Release(data);throw;}
         }
         internal static void Release(PlanetSurfaceGpuData data)
         {
@@ -69,6 +104,9 @@ namespace UnityEngine.Rendering.HighDefinition
             Key=key;this.lease=lease;view=lease.View;
             try
             {
+                structure = new PlanetSurfaceStructuralGpu(view.StructuralField);
+                orogenDetail = new PlanetSurfaceOrogenDetailGpu(view.OrogenDetail);
+                dynamicMaterials = new PlanetSurfaceMaterialGpu(view);
                 var tileData=new Tile[view.Tiles.Length];
                 for(int i=0;i<tileData.Length;i++){var t=view.Tiles[i];tileData[i]=new Tile {Address=new int4(t.Key.Face,t.Key.Level,t.Key.X,t.Key.Y),Layout=new int4(t.Resolution,t.HeightOffset,t.AttributeOffset,(int)t.Channels)};}
                 tiles=Buffer(tileData);heights=Buffer(Copy(view.Heights));
@@ -109,9 +147,17 @@ namespace UnityEngine.Rendering.HighDefinition
         static uint4 Z(double3 value){var z=Bits(value.z);return new uint4(z.x,z.y,0,0);}
         static void Set(CommandBuffer cmd,ComputeShader shader,string name,uint4 value)
             => cmd.SetComputeIntParams(shader,name,unchecked((int)value.x),unchecked((int)value.y),unchecked((int)value.z),unchecked((int)value.w));
-        internal void Bind(CommandBuffer cmd,ComputeShader shader,int kernel)
+        internal void Bind(CommandBuffer cmd,ComputeShader shader,int kernel,PlanetSurfaceGpuFamily family=PlanetSurfaceGpuFamily.Complete)
         {
             if(IsDisposed)throw new ObjectDisposedException(nameof(PlanetSurfaceGpuData));
+            if(family!=PlanetSurfaceGpuFamily.Complete&&family!=PatchFamily)
+                throw new InvalidOperationException("The patch program does not match its captured sampler authority.");
+            if(family==PlanetSurfaceGpuFamily.Complete||family==PlanetSurfaceGpuFamily.LegacyStructure||family==PlanetSurfaceGpuFamily.Drainage||family==PlanetSurfaceGpuFamily.Landform)
+                structure.Bind(cmd,shader,kernel,family);
+            dynamicMaterials.Bind(cmd,shader,kernel);
+            if(family==PlanetSurfaceGpuFamily.Complete||family==PlanetSurfaceGpuFamily.Orogen)orogenDetail.Bind(cmd,shader,kernel);
+            if((family==PlanetSurfaceGpuFamily.Complete||family==PlanetSurfaceGpuFamily.Landform)&&landformFilter!=null&&landformFilter.IsReady)
+                landformFilter.Bind(cmd,shader,kernel,view.StructuralField.LandformField);
             cmd.SetComputeBufferParam(shader,kernel,"_SurfaceTiles",tiles);cmd.SetComputeBufferParam(shader,kernel,"_SurfaceHeights",heights);
             cmd.SetComputeBufferParam(shader,kernel,"_SurfaceRegions",regions);cmd.SetComputeBufferParam(shader,kernel,"_SurfaceRegionHeights",regionHeights);
             cmd.SetComputeBufferParam(shader,kernel,"_SurfaceRegionMasks",regionMasks);cmd.SetComputeBufferParam(shader,kernel,"_SurfaceStamps",stamps);
@@ -131,11 +177,26 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         internal bool PrepareFiltering(out SurfaceRegionFilterStatus status)
         {
+            bool landformReady=PrepareLandformFiltering(out var landformStatus);
             if(filter!=null&&filter.IsDisposed){filter.Dispose();filter=null;}
             if(filter==null&&!PlanetSurfaceRegionFiltering.TryAcquire(Key,out filter,out status))return false;
-            bool ready=filter.IsReady;status=filter.Status;return ready;
+            bool ready=filter.IsReady;status=filter.Status;if(!ready)return false;
+            status=landformStatus;return landformReady;
         }
-        internal int FilterGeneration=>filter?.Generation??0;
+        bool PrepareLandformFiltering(out SurfaceRegionFilterStatus status)
+        {
+            status=SurfaceRegionFilterStatus.Ready;
+            if(!view.StructuralField.LandformField.Enabled)return true;
+            if(landformFilter!=null&&landformFilter.IsDisposed){landformFilter.Dispose();landformFilter=null;}
+            if(landformFilter==null&&!PlanetSurfaceLandformGpuFiltering.TryAcquire(Key,out landformFilter,out var admission))
+            {status=MapLandformStatus(admission);return false;}
+            bool ready=landformFilter.Poll();status=MapLandformStatus(landformFilter.Status);return ready;
+        }
+        static SurfaceRegionFilterStatus MapLandformStatus(PlanetSurfaceLandformFilterStatus status)
+            =>status==PlanetSurfaceLandformFilterStatus.Ready?SurfaceRegionFilterStatus.Ready:
+                status==PlanetSurfaceLandformFilterStatus.Pending?SurfaceRegionFilterStatus.Pending:
+                status==PlanetSurfaceLandformFilterStatus.BudgetExceeded?SurfaceRegionFilterStatus.BudgetExceeded:SurfaceRegionFilterStatus.InvalidData;
+        internal int FilterGeneration=>unchecked((filter?.Generation??0)*397^(landformFilter?.Generation??0));
         internal static void BindFrame(CommandBuffer cmd,ComputeShader shader,in PlanetDefinition definition,in PlanetSurfaceFrame frame,double size)
         {
             Set(cmd,shader,"_SurfaceFrameRightXY",XY(frame.Right));Set(cmd,shader,"_SurfaceFrameRightZ",Z(frame.Right));
@@ -147,9 +208,10 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public void Dispose()
         {
-            if(IsDisposed)return;IsDisposed=true;tiles?.Dispose();heights?.Dispose();regions?.Dispose();regionHeights?.Dispose();regionMasks?.Dispose();stamps?.Dispose();
+            if(IsDisposed)return;IsDisposed=true;structure?.Dispose();orogenDetail?.Dispose();dynamicMaterials?.Dispose();tiles?.Dispose();heights?.Dispose();regions?.Dispose();regionHeights?.Dispose();regionMasks?.Dispose();stamps?.Dispose();
             materialWeights?.Dispose();erosionData?.Dispose();regionMaterialWeights?.Dispose();regionErosionData?.Dispose();lease.Dispose();
             neutralFilterRanges?.Dispose();neutralFilterMips?.Dispose();neutralFilterSamples?.Dispose();filter?.Dispose();filter=null;
+            landformFilter?.Dispose();landformFilter=null;
         }
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         static void Reset(){foreach(var value in cache.Values)value.Dispose();cache.Clear();}

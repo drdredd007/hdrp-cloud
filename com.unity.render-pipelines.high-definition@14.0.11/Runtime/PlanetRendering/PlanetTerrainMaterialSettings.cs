@@ -90,7 +90,9 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetTexture("_PlanetLayerAlbedo"+i,layer.Albedo?layer.Albedo:Texture2D.whiteTexture);
                 properties.SetTexture("_PlanetLayerNormal"+i,layer.Normal?layer.Normal:flatNormal);
                 properties.SetTexture("_PlanetLayerMask"+i,layer.Mask?layer.Mask:neutralMask);
-                properties.SetColor("_PlanetLayerTint"+i,layer.Tint.linear);
+                // The shader consumes linear RGB; SetColor would convert this value a second time.
+                var tint=layer.Tint.linear;
+                properties.SetVector("_PlanetLayerTint"+i,new Vector4(tint.r,tint.g,tint.b,tint.a));
                 properties.SetVector("_PlanetTexturePhase"+i,new Vector4((float)phase.x,(float)phase.y,(float)phase.z,(float)(1/layer.MetresPerRepeat)));
                 properties.SetVector("_PlanetLayerControl"+i,new Vector4(layer.NormalScale,layer.HeightAmplitudeMetres,layer.HeightOffsetMetres,layer.Mask?1:0));
                 properties.SetVector("_PlanetLayerPbr"+i,new Vector4(layer.Metallic,layer.AmbientOcclusion,layer.Smoothness,layer.Normal?1:0));

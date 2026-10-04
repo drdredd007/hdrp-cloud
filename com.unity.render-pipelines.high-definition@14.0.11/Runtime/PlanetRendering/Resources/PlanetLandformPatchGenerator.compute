@@ -1,0 +1,10 @@
+#pragma kernel FarPatch
+#pragma kernel LocalPatch
+#pragma kernel NativeFarPatch
+#pragma kernel NativeFilteredFarPatch
+#pragma kernel NativeLocalPatch
+
+// Immutable shader family; the geometry kernel body is shared verbatim.
+#define PLANET_SURFACE_NO_OROGEN 1
+#define PLANET_SURFACE_STRUCTURE_LANDFORM_ONLY 1
+#include "PlanetPatchGeneratorKernels.hlsl"

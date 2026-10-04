@@ -28,6 +28,12 @@ namespace SpaceRunner.PlanetTerrain
     {
         public const int CurrentSchemaVersion = 1;
         public const int CurrentAlgorithmVersion = 1;
+        // Opt-in authoring algorithm; retained version-one snapshots are never regenerated implicitly.
+        public const int StructuralAlgorithmVersion = 2;
+        public const int StructuralAuthorityAlgorithmVersion = 3;
+        public const int DrainageAuthorityAlgorithmVersion = 4;
+        public const int LandformAuthorityAlgorithmVersion = 5;
+        public static bool HasStructuralAuthority(int algorithm) => algorithm == StructuralAuthorityAlgorithmVersion || algorithm == DrainageAuthorityAlgorithmVersion || algorithm == LandformAuthorityAlgorithmVersion;
         public readonly int SchemaVersion, AlgorithmVersion, Seed;
         public readonly SurfaceStyle Style;
         public readonly double Radius, SeaLevel, MinimumHeight, MaximumHeight;

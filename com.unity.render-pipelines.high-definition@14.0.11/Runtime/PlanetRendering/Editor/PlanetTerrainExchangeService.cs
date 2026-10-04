@@ -121,7 +121,7 @@ namespace UnityEngine.Rendering.HighDefinition
             regions.Add(layer);
             var candidate = new SurfaceSnapshot(current.Recipe, new SurfaceRevision(current.Revision.RecipeDigest,
                 current.Revision.BaseDigest, checked(current.Revision.Epoch + 1)), current.CanonicalTileLevel,
-                current.Resolution, current.Tiles, current.Detail, regions, current.Stamps,current.AutomaticMaterialProfile);
+                current.Resolution, current.Tiles, current.Detail, regions, current.Stamps,current.AutomaticMaterialProfile,structuralField:current.StructuralField,orogenDetail:current.OrogenDetail);
             return current.HasAutomaticMaterials && repairAutomaticMaterials ? SurfaceMaterialRepair.Rebuild(candidate,progress:progress,cancelled:cancelled) : candidate;
         }
 
@@ -146,7 +146,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if (previous.Stamps.Count != 0) throw new InvalidOperationException("Runtime impact snapshots cannot be replaced by an authoring rebake.");
             return new SurfaceSnapshot(newBake.Recipe, new SurfaceRevision(newBake.Revision.RecipeDigest,
                 newBake.Revision.BaseDigest, checked(previous.Revision.Epoch + 1)), newBake.CanonicalTileLevel,
-                newBake.Resolution, newBake.Tiles, newBake.Detail, authored,automaticMaterialProfile:newBake.AutomaticMaterialProfile);
+                newBake.Resolution, newBake.Tiles, newBake.Detail, authored,automaticMaterialProfile:newBake.AutomaticMaterialProfile,structuralField:newBake.StructuralField,orogenDetail:newBake.OrogenDetail);
         }
     }
 }

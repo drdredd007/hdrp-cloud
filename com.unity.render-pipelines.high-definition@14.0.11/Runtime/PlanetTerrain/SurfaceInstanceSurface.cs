@@ -69,7 +69,7 @@ namespace SpaceRunner.PlanetTerrain
             var stamps=new List<SurfaceCraterStamp>(source.Stamps){request.Stamp};
             var revision=new SurfaceRevision(source.Revision.RecipeDigest,source.Revision.BaseDigest,checked(source.Revision.Epoch+1));
             // Discard only the stale derived cache. Source masks, authored order, erosion and base arrays remain immutable.
-            var pending=new SurfaceSnapshot(source.Recipe,revision,source.CanonicalTileLevel,source.Resolution,source.Tiles,source.Detail,source.Regions,stamps,source.AutomaticMaterialProfile);
+            var pending=new SurfaceSnapshot(source.Recipe,revision,source.CanonicalTileLevel,source.Resolution,source.Tiles,source.Detail,source.Regions,stamps,source.AutomaticMaterialProfile,structuralField:source.StructuralField,orogenDetail:source.OrogenDetail);
             var cost=SurfaceMaterialRepair.EstimateInstanceCost(pending,source,captured.MaterialCellMetres);
             var result=SurfaceMaterialRepair.RebuildInstance(pending,source,request.Stamp,captured.MaterialCellMetres,captured.Materials,progress,cancelled,out var evaluated);
             if(!result.MaterialsReady)throw new InvalidOperationException("A complete instance cache was not prepared; no candidate can be published.");

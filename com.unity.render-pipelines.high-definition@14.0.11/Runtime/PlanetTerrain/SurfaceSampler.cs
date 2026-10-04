@@ -9,6 +9,27 @@ namespace SpaceRunner.PlanetTerrain
         public static SurfaceSampleStatus TrySampleAttributes(in NativeSurfaceView view, double3 direction, out SurfaceAttributes attributes,
             SurfaceChannels required = SurfaceChannels.None)
         {
+            return SampleAttributes(view, direction, SurfaceSamplingFootprint.Full, false, 0, default, 0, out attributes, required);
+        }
+
+        /// <summary>Derived render classification from the same filtered geometry. Full authority queries are unchanged.</summary>
+        /// <remarks>The supplied normal is reused only when its effective metric sample step matches each captured profile.</remarks>
+        public static SurfaceSampleStatus TrySampleRenderAttributes(in NativeSurfaceView view, double3 direction,
+            SurfaceSamplingFootprint footprint, double geometryHeight, double3 geometryNormal, double geometryNormalSampleMetres,
+            out SurfaceAttributes attributes, SurfaceChannels required = SurfaceChannels.None)
+        {
+            attributes = default;
+            if (!footprint.IsValid || !math.isfinite(geometryHeight) || !math.all(math.isfinite(geometryNormal)) ||
+                math.abs(math.lengthsq(geometryNormal) - 1) > 1e-8 || !math.isfinite(geometryNormalSampleMetres) || geometryNormalSampleMetres <= 0)
+                return SurfaceSampleStatus.InvalidInput;
+            if (footprint.Metres == 0) return TrySampleAttributes(view, direction, out attributes, required);
+            return SampleAttributes(view, direction, footprint, true, geometryHeight, geometryNormal, geometryNormalSampleMetres, out attributes, required);
+        }
+
+        static SurfaceSampleStatus SampleAttributes(in NativeSurfaceView view, double3 direction, SurfaceSamplingFootprint footprint,
+            bool geometryReady, double geometryHeight, double3 geometryNormal, double geometryNormalSampleMetres,
+            out SurfaceAttributes attributes, SurfaceChannels required)
+        {
             attributes = default;
             if (!view.Recipe.IsValid || !view.Revision.IsValid || !CubeSurface.TryLocate(direction, view.CanonicalTileLevel, out var key, out var uv))
                 return SurfaceSampleStatus.InvalidInput;
@@ -21,11 +42,12 @@ namespace SpaceRunner.PlanetTerrain
             if ((channels & SurfaceChannels.ErosionData) != 0 && !TryBilinear(view.ErosionData, tile.AttributeOffset, new int2(tile.Resolution), uv, out erosion))
                 return SurfaceSampleStatus.IncompatibleData;
             CubeSurface.TryNormalize(direction, out var unit);
+            bool structuralMaterials = view.StructuralField.Enabled && view.AutomaticMaterialProfile.IsValid && required != SurfaceChannels.ErosionData;
             for (int i = 0; i < view.Regions.Length; i++)
             {
                 var region = view.Regions[i];
                 if (region.Channels == SurfaceChannels.None || !RegionWeight(view, region, unit, out var regionUv, out var weight)) continue;
-                if ((region.Channels & SurfaceChannels.MaterialWeights) != 0)
+                if (!structuralMaterials && (region.Channels & SurfaceChannels.MaterialWeights) != 0)
                 {
                     if (!TryBilinear(view.RegionMaterialWeights, region.AttributeOffset, region.Resolution, regionUv, out var imported)) return SurfaceSampleStatus.IncompatibleData;
                     if ((channels & SurfaceChannels.MaterialWeights) != 0) weights = math.lerp(weights, imported, (float)weight);
@@ -38,6 +60,46 @@ namespace SpaceRunner.PlanetTerrain
                     else if (weight >= 1) { erosion = imported; channels |= SurfaceChannels.ErosionData; }
                 }
                 // A partial imported mask cannot invent the missing base material.
+            }
+            if (structuralMaterials)
+            {
+                if (!view.TileMaterialProvenance.IsCreated || view.TileMaterialProvenance.Length != view.Tiles.Length ||
+                    !view.RegionalMaterialProfiles.IsCreated || view.RegionalMaterialProfiles.Length != view.Regions.Length) return SurfaceSampleStatus.IncompatibleData;
+                var profile = view.AutomaticMaterialProfile;
+                double height = geometryHeight; double3 normal = geometryNormal;
+                var status = SurfaceSampleStatus.Ready;
+                if (!geometryReady) status = TrySampleHeight(view, unit, footprint, out height);
+                if (status != SurfaceSampleStatus.Ready) return status;
+                if (!geometryReady || math.max(profile.NormalSampleMetres, footprint.Metres * .5) !=
+                    math.max(geometryNormalSampleMetres, footprint.Metres * .5))
+                    status = TrySampleNormal(view, unit, profile.NormalSampleMetres, footprint, out normal);
+                if (status != SurfaceSampleStatus.Ready) return status;
+                double cosine = math.clamp(math.dot(normal, unit), 1e-12, 1), slope = math.sqrt(math.max(0, 1 - cosine * cosine)) / cosine;
+                double wetness = (channels & SurfaceChannels.ErosionData) != 0 ? erosion.y : 0;
+                float4 final = profile.Evaluate(view.Recipe, unit, height, slope, wetness);
+                for (int i = 0; i < view.Regions.Length; i++)
+                {
+                    var regionalProfile = view.RegionalMaterialProfiles[i];
+                    if (!regionalProfile.IsValid || !RegionWeight(view, view.Regions[i], unit, out _, out double weight) || weight <= 0) continue;
+                    double localSlope = slope;
+                    if (regionalProfile.NormalSampleMetres != profile.NormalSampleMetres)
+                    {
+                        status = TrySampleNormal(view, unit, regionalProfile.NormalSampleMetres, footprint, out normal);
+                        if (status != SurfaceSampleStatus.Ready) return status;
+                        cosine = math.clamp(math.dot(normal, unit), 1e-12, 1); localSlope = math.sqrt(math.max(0, 1 - cosine * cosine)) / cosine;
+                    }
+                    final = math.lerp(final, regionalProfile.Evaluate(view.Recipe, unit, height, localSlope, wetness), (float)weight);
+                }
+                if ((channels & SurfaceChannels.MaterialWeights) != 0 && view.TileMaterialProvenance[found] == (int)SurfaceMaterialProvenance.Authored)
+                    final = weights;
+                for (int i = 0; i < view.Regions.Length; i++)
+                {
+                    var region = view.Regions[i];
+                    if ((region.Channels & SurfaceChannels.MaterialWeights) == 0 || !RegionWeight(view, region, unit, out var localUv, out double weight) || weight <= 0) continue;
+                    if (!TryBilinear(view.RegionMaterialWeights, region.AttributeOffset, region.Resolution, localUv, out var authored)) return SurfaceSampleStatus.IncompatibleData;
+                    final = math.lerp(final, authored, (float)weight);
+                }
+                weights = final; channels |= SurfaceChannels.MaterialWeights;
             }
             if (channels == SurfaceChannels.None || (channels & required) != required) return SurfaceSampleStatus.NotReady;
             if ((channels & SurfaceChannels.MaterialWeights) != 0) weights /= math.csum(weights);
@@ -93,7 +155,7 @@ namespace SpaceRunner.PlanetTerrain
             if (!footprint.IsValid) return SurfaceSampleStatus.InvalidInput;
             if (footprint.Metres == 0) return TrySampleHeight(view, direction, out height);
             if (!view.Detail.IsValid) return SurfaceSampleStatus.InvalidInput;
-            var status = SampleHeight(view, direction, out var candidate, footprint.DetailWeight(view.Detail.WavelengthMetres));
+            var status = SampleHeight(view, direction, out var candidate, footprint.DetailWeight(view.Detail.WavelengthMetres), footprint: footprint);
             if (status == SurfaceSampleStatus.Ready) height = candidate;
             return status;
         }
@@ -131,19 +193,39 @@ namespace SpaceRunner.PlanetTerrain
             if (tile.Resolution != view.Resolution || !TryBilinear(view.Heights, tile.HeightOffset, new int2(tile.Resolution), uv, out height))
                 return SurfaceSampleStatus.IncompatibleData;
             CubeSurface.TryNormalize(direction, out var unit);
+            if (SurfaceRecipe.HasStructuralAuthority(view.Recipe.AlgorithmVersion))
+            {
+                if (view.StructuralField.SourceBaseDigest != view.Revision.BaseDigest || view.StructuralField.RawMacroResolution != view.Resolution)
+                    return SurfaceSampleStatus.IncompatibleData;
+                var structuralStatus = SurfaceStructuralMath.TrySampleBand(view.StructuralField, unit, footprint, out var band, out _);
+                if (structuralStatus != SurfaceSampleStatus.Ready) return structuralStatus;
+                height += band;
+                if(view.StructuralField.MorphologyVersion==2)
+                {
+                    structuralStatus=SurfaceDrainageMath.TrySampleIncision(view.StructuralField.DrainageField,unit,height,footprint,out double incision,out _);
+                    if(structuralStatus!=SurfaceSampleStatus.Ready)return structuralStatus;
+                    height+=incision;
+                }
+            }
+            var orogenStatus = SurfaceOrogenDetailMath.TrySample(view.OrogenDetail, unit, height, footprint, out double intrinsicDetail);
+            if (orogenStatus != SurfaceSampleStatus.Ready) return orogenStatus;
+            height += intrinsicDetail;
             double detailWeight = 1;
             for (int i = 0; i < view.Regions.Length; i++)
             {
                 var region = view.Regions[i];
-                if (footprint.Metres > 0)
+                if (footprint.Metres > 0 && filter.Matches(view))
                 {
                     if (!region.Projection.TryProject(unit, out var projected)) continue;
                     if (!filter.TrySample(view, i, projected, footprint, out var pair)) return SurfaceSampleStatus.IncompatibleData;
-                    if (region.Mode == SurfaceRegionMode.Replace) height = height * (1 - pair.y) + pair.x;
+                    if (region.Mode == SurfaceRegionMode.Replace)
+                    { height = height * (1 - pair.y) + pair.x; intrinsicDetail *= 1 - pair.y; }
                     else
                     {
                         if (region.BaseDigest != view.Revision.BaseDigest) return SurfaceSampleStatus.IncompatibleData;
                         height += pair.x;
+                        if (region.DetailPolicy == SurfaceDetailPolicy.Suppress)
+                        { height -= intrinsicDetail * pair.y; intrinsicDetail *= 1 - pair.y; }
                     }
                     if (region.DetailPolicy == SurfaceDetailPolicy.Suppress) detailWeight *= 1 - pair.y;
                     continue;
@@ -159,11 +241,14 @@ namespace SpaceRunner.PlanetTerrain
                     double t = math.clamp(math.cmin(border) / region.BlendMetres, 0, 1);
                     weight *= t * t * (3 - 2 * t);
                 }
-                if (region.Mode == SurfaceRegionMode.Replace) height = math.lerp(height, value, weight);
+                if (region.Mode == SurfaceRegionMode.Replace)
+                { height = math.lerp(height, value, weight); intrinsicDetail *= 1 - weight; }
                 else
                 {
                     if (region.BaseDigest != view.Revision.BaseDigest) return SurfaceSampleStatus.IncompatibleData;
                     height += value * weight;
+                    if (region.DetailPolicy == SurfaceDetailPolicy.Suppress)
+                    { height -= intrinsicDetail * weight; intrinsicDetail *= 1 - weight; }
                 }
                 if (region.DetailPolicy == SurfaceDetailPolicy.Suppress) detailWeight *= 1 - weight;
             }

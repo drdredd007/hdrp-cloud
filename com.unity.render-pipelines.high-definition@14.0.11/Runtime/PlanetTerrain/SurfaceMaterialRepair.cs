@@ -50,7 +50,7 @@ namespace SpaceRunner.PlanetTerrain
             foreach(var region in source.Regions) regions.Add(CopyRegion(region,region.MaterialProvenance == SurfaceMaterialProvenance.LegacyBaked ?
                 (region.Kind == SurfaceRegionKind.Authored && region.HasMaterialWeights ? SurfaceMaterialProvenance.Authored : SurfaceMaterialProvenance.Automatic) : region.MaterialProvenance));
             return new SurfaceSnapshot(source.Recipe,new SurfaceRevision(source.Revision.RecipeDigest,source.Revision.BaseDigest,checked(source.Revision.Epoch+1)),source.CanonicalTileLevel,source.Resolution,
-                tiles,source.Detail,regions,source.Stamps,profile);
+                tiles,source.Detail,regions,source.Stamps,profile,structuralField:source.StructuralField,orogenDetail:source.OrogenDetail);
         }
         static SurfaceRegionData CopyRegion(SurfaceRegionData region,SurfaceMaterialProvenance provenance) => new SurfaceRegionData(region.Projection,region.Resolution,
             region.CopyHeights(),region.CopyBlendMask(),region.BlendMetres,region.Mode,region.BaseDigest,region.DetailPolicy,region.Priority,region.CopyMaterialWeights(),region.Kind,
@@ -75,7 +75,7 @@ namespace SpaceRunner.PlanetTerrain
                 projections.Add(projection);resolutions.Add(resolution); guards.Add(guard);
             }
             // Native source, cloned resolved output/hash encoding and temporary sample buffers; bounded before any NativeArray allocation.
-            long bytes=cost.EstimatedWorkingBytes;
+            long bytes=checked(cost.EstimatedWorkingBytes+(source.OrogenDetail?.EstimatedResidentBytes??0));
             // Each active custom rule can sample its own four-point normal through all height layers.
             long checks=cost.CompositionChecks;
             if(count>captured.MaximumSamples || bytes>captured.MaximumWorkingBytes || checks>captured.MaximumCompositionChecks)throw new InvalidOperationException($"Automatic material repair requires {count} samples, {checks} composition checks and about {bytes} bytes; split the region or explicitly raise its offline budgets.");
@@ -107,11 +107,12 @@ namespace SpaceRunner.PlanetTerrain
                 }
             }
             CheckCancelled(cancelled); var resolved=new SurfaceResolvedMaterials(source.GeometryDigest,source.MaterialRulesDigest,tiles,layers);
-            var result=new SurfaceSnapshot(source.Recipe,source.Revision,source.CanonicalTileLevel,source.Resolution,source.Tiles,source.Detail,source.Regions,source.Stamps,source.AutomaticMaterialProfile,resolved);
+            var result=new SurfaceSnapshot(source.Recipe,source.Revision,source.CanonicalTileLevel,source.Resolution,source.Tiles,source.Detail,source.Regions,source.Stamps,source.AutomaticMaterialProfile,resolved,source.StructuralField,source.OrogenDetail);
             progress?.Invoke(new SurfaceBakeProgress("Automatic material repair",completed,(int)count)); CheckCancelled(cancelled);return result;
         }
         internal static SurfaceMaterialRepairCost EstimateInstanceCost(SurfaceSnapshot source,SurfaceSnapshot previous,double cellMetres)
         {
+            if (source.StructuralField != null) return new SurfaceMaterialRepairCost(0,0,0,0);
             var baseline=EstimateCost(source.Tiles,source.Regions,source.AutomaticMaterialProfile);long stampSamples=0,retained=0;
             foreach(var stamp in source.Stamps)
             {
@@ -125,13 +126,14 @@ namespace SpaceRunner.PlanetTerrain
                 foreach(var layer in previous.ResolvedMaterials.StampLayers)retained=checked(retained+layer.SampleCount*16L);
             }
             long count=checked(baseline.Samples+stampSamples);
-            return new SurfaceMaterialRepairCost(count,checked(baseline.EstimatedWorkingBytes+stampSamples*96+retained+source.Stamps.Count*256L),
+            return new SurfaceMaterialRepairCost(count,checked(baseline.EstimatedWorkingBytes+stampSamples*96+retained+source.Stamps.Count*256L+(source.OrogenDetail?.EstimatedResidentBytes??0)),
                 checked(baseline.ResolvedBytes+stampSamples*16+source.Stamps.Count*256L),checked(count*(8L*(source.Regions.Count+1)*(source.Regions.Count+source.Stamps.Count+1)+1)));
         }
         internal static SurfaceSnapshot RebuildInstance(SurfaceSnapshot source,SurfaceSnapshot previous,SurfaceCraterStamp changed,
             double cellMetres,SurfaceMaterialRepairSettings settings,Action<SurfaceBakeProgress> progress,Func<bool> cancelled,out long evaluated)
         {
             CheckCancelled(cancelled);evaluated=0;
+            if (source.StructuralField != null) return source;
             var cost=EstimateInstanceCost(source,previous,cellMetres);
             if(cost.Samples>settings.MaximumSamples||cost.EstimatedWorkingBytes>settings.MaximumWorkingBytes||cost.CompositionChecks>settings.MaximumCompositionChecks||cost.Samples>int.MaxValue)
                 throw new InvalidOperationException($"Instance material preparation requires {cost.Samples} samples, {cost.CompositionChecks} composition checks and about {cost.EstimatedWorkingBytes} bytes; the published instance remains unchanged.");
@@ -188,7 +190,7 @@ namespace SpaceRunner.PlanetTerrain
                 }
             }
             CheckCancelled(cancelled);var resolved=new SurfaceResolvedMaterials(source.GeometryDigest,source.MaterialRulesDigest,tiles,layers,stamps);
-            var result=new SurfaceSnapshot(source.Recipe,source.Revision,source.CanonicalTileLevel,source.Resolution,source.Tiles,source.Detail,source.Regions,source.Stamps,source.AutomaticMaterialProfile,resolved);
+            var result=new SurfaceSnapshot(source.Recipe,source.Revision,source.CanonicalTileLevel,source.Resolution,source.Tiles,source.Detail,source.Regions,source.Stamps,source.AutomaticMaterialProfile,resolved,source.StructuralField,source.OrogenDetail);
             progress?.Invoke(new SurfaceBakeProgress("Instance material preparation",completed,(int)cost.Samples));CheckCancelled(cancelled);return result;
         }
         static bool Affected(double3 direction,SurfaceCraterStamp stamp,double radius,double normalSupport)

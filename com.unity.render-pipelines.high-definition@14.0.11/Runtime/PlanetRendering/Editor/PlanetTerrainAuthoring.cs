@@ -8,13 +8,15 @@ namespace UnityEngine.Rendering.HighDefinition
 {
     public static class PlanetTerrainAuthoring
     {
+        const long MaximumPublishedFileBytes=100L*1024*1024;
+        const long SerializationHeadroomBytes=1024L*1024;
         public static SurfaceSnapshot ComposeBake(PlanetTerrainRecipeAsset recipe,SurfaceSnapshot baked)
         {
             if(!recipe || baked==null)throw new ArgumentNullException();
             if(!new SurfaceDetailRecipe(recipe.DetailWavelengthMetres,recipe.DetailAmplitudeMetres,recipe.Seed^137).IsValid)
                 throw new ArgumentException("Metric detail requires a positive wavelength and a non-negative amplitude.");
             var withDetail=new SurfaceSnapshot(baked.Recipe,baked.Revision,baked.CanonicalTileLevel,baked.Resolution,
-                baked.Tiles,new SurfaceDetailRecipe(recipe.DetailWavelengthMetres,recipe.DetailAmplitudeMetres,recipe.Seed^137),baked.Regions,baked.Stamps,baked.AutomaticMaterialProfile);
+                baked.Tiles,new SurfaceDetailRecipe(recipe.DetailWavelengthMetres,recipe.DetailAmplitudeMetres,recipe.Seed^137),baked.Regions,baked.Stamps,baked.AutomaticMaterialProfile,structuralField:baked.StructuralField);
             SurfaceSnapshot previous=null;
             if(recipe.Published && !recipe.Published.TryCreateSnapshot(out previous,out var reason))
                 throw new InvalidOperationException("Existing authored surface is unreadable: "+reason);
@@ -33,7 +35,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 if(level.Resolution==snapshot.Resolution)continue;
                 var allowance=snapshot.HasAutomaticMaterials?PlanetTerrainGeneration.RepairAllowance(recipe.Bake.MaximumWorkingBytes,retained,level.Tiles,snapshot.Regions,snapshot.AutomaticMaterialProfile):null;
                 var coarse=new SurfaceSnapshot(snapshot.Recipe,snapshot.Revision,snapshot.CanonicalTileLevel,level.Resolution,
-                    level.Tiles,snapshot.Detail,snapshot.Regions,snapshot.Stamps,snapshot.AutomaticMaterialProfile);
+                    level.Tiles,snapshot.Detail,snapshot.Regions,snapshot.Stamps,snapshot.AutomaticMaterialProfile,structuralField:snapshot.StructuralField?.ForBakedResolution(level.Resolution));
                 var ready=coarse.HasAutomaticMaterials?SurfaceMaterialRepair.Rebuild(coarse,allowance):coarse;
                 levels.Add(ready);retained=checked(retained+PlanetTerrainBakeCache.EstimateSnapshotBytes(ready));
             }
@@ -72,19 +74,19 @@ namespace UnityEngine.Rendering.HighDefinition
                     retained=checked(retained+PlanetTerrainBakeCache.EstimateSnapshotBytes(level));
                     var allowance=snapshot.HasAutomaticMaterials?PlanetTerrainGeneration.RepairAllowance(recipe.Bake.MaximumWorkingBytes,retained,level.Tiles,snapshot.Regions,snapshot.AutomaticMaterialProfile):null;
                     var coarse=new SurfaceSnapshot(snapshot.Recipe,snapshot.Revision,level.CanonicalTileLevel,level.Resolution,
-                        level.Tiles,snapshot.Detail,snapshot.Regions,snapshot.Stamps,snapshot.AutomaticMaterialProfile);
+                        level.Tiles,snapshot.Detail,snapshot.Regions,snapshot.Stamps,snapshot.AutomaticMaterialProfile,structuralField:snapshot.StructuralField?.ForBakedResolution(level.Resolution));
                     var ready=coarse.HasAutomaticMaterials?SurfaceMaterialRepair.Rebuild(coarse,allowance):coarse;
                     retainedLevels.Add(ready);retained=checked(retained+PlanetTerrainBakeCache.EstimateSnapshotBytes(ready));
                 }
                 coarseLevels=retainedLevels;
             }
-            long preparedBytes=PlanetTerrainBakeCache.EstimateSnapshotBytes(snapshot);
+            var preparedResident=new PlanetTerrainBakeCache.ResidentEstimate();preparedResident.AddSnapshot(snapshot);
             if(coarseLevels!=null)foreach(var level in coarseLevels)
             {
                 if(level==null || !level.MaterialsReady)throw new InvalidOperationException("Every material LOD must be complete before publication.");
-                preparedBytes=checked(preparedBytes+PlanetTerrainBakeCache.EstimateSnapshotBytes(level));
+                preparedResident.AddSnapshot(level);
             }
-            if(preparedBytes>recipe.Bake.MaximumWorkingBytes)throw new InvalidOperationException("Prepared terrain and all material LOD data exceed MaximumWorkingBytes; the old generation is retained.");
+            if(preparedResident.Bytes>recipe.Bake.MaximumWorkingBytes)throw new InvalidOperationException("Prepared terrain and all material LOD data exceed MaximumWorkingBytes; the old generation is retained.");
             if(string.IsNullOrWhiteSpace(newAssetPath) && recipe.Published)
             {
                 string previousPath=AssetDatabase.GetAssetPath(recipe.Published);
@@ -99,7 +101,7 @@ namespace UnityEngine.Rendering.HighDefinition
             PlanetHydrologyDataAsset preparedHydrology=null;
             var previousData=recipe.Published;var previousLevels=recipe.LodPyramid;var previousHydrology=recipe.Hydrology;
             var previousGeneratorData=generator?generator.SurfaceData:null;
-            string createdPath=null;bool bound=false,assignmentStarted=false;
+            string createdPath=null,createdFolder=null;var createdPaths=new List<string>();bool bound=false,assignmentStarted=false;
             try
             {
                 // Build a new generation completely; the old published asset and its readers retain their data.
@@ -114,10 +116,35 @@ namespace UnityEngine.Rendering.HighDefinition
                     preparedHydrology=ScriptableObject.CreateInstance<PlanetHydrologyDataAsset>();
                     preparedHydrology.name="Coarse hydrology";preparedHydrology.SetField(hydrology);
                 }
-                createdPath=AssetDatabase.GenerateUniqueAssetPath(newAssetPath);AssetDatabase.CreateAsset(data,createdPath);
-                for(int i=1;i<prepared.Count;i++)AssetDatabase.AddObjectToAsset(prepared[i],data);
+                long mainPayload=checked(data.EncodedPayloadBytes+(preparedHydrology?preparedHydrology.EncodedPayloadBytes:0));
+                long combinedPayload=mainPayload;
+                foreach(var item in prepared)
+                {
+                    if(item!=data)combinedPayload=checked(combinedPayload+item.EncodedPayloadBytes);
+                    if(item.EncodedPayloadBytes>MaximumPublishedFileBytes-SerializationHeadroomBytes)
+                        throw new InvalidOperationException("One terrain LOD exceeds the supported per-file payload size; splitting levels cannot reduce that LOD. The old generation is retained.");
+                }
+                if(mainPayload>MaximumPublishedFileBytes-SerializationHeadroomBytes)
+                    throw new InvalidOperationException("The finest terrain and coarse hydrology exceed the supported per-file payload size. The old generation is retained.");
+                bool separateLevels=combinedPayload>MaximumPublishedFileBytes-SerializationHeadroomBytes;
+                createdPath=AssetDatabase.GenerateUniqueAssetPath(newAssetPath);createdPaths.Add(createdPath);AssetDatabase.CreateAsset(data,createdPath);
+                if(separateLevels)
+                {
+                    string parent=Path.GetDirectoryName(createdPath).Replace('\\','/');
+                    createdFolder=AssetDatabase.GenerateUniqueAssetPath(parent+"/"+Path.GetFileNameWithoutExtension(createdPath)+"_LOD");
+                    if(string.IsNullOrEmpty(AssetDatabase.CreateFolder(parent,Path.GetFileName(createdFolder))))throw new IOException("Could not create the new terrain LOD folder.");
+                }
+                for(int i=1;i<prepared.Count;i++)
+                {
+                    if(!separateLevels){AssetDatabase.AddObjectToAsset(prepared[i],data);continue;}
+                    string path=createdFolder+"/"+prepared[i].name.Replace(' ','_')+".asset";
+                    createdPaths.Add(path);AssetDatabase.CreateAsset(prepared[i],path);
+                }
                 if(preparedHydrology)AssetDatabase.AddObjectToAsset(preparedHydrology,data);
-                EditorUtility.SetDirty(data);SaveVerified(data);
+                foreach(var item in prepared){EditorUtility.SetDirty(item);SaveVerified(item);}
+                foreach(string path in createdPaths)
+                    if(!File.Exists(path)||new FileInfo(path).Length>MaximumPublishedFileBytes)
+                        throw new IOException("Saved terrain file is missing or exceeds its per-file limit: "+path);
                 assignmentStarted=true;
                 Undo.RecordObject(recipe,"Publish planet terrain");recipe.Published=data;
                 recipe.LodPyramid=prepared.ToArray();
@@ -149,7 +176,11 @@ namespace UnityEngine.Rendering.HighDefinition
                     catch(Exception exception){restorationFailure=exception;}
                 }
                 // Keep a complete candidate if disk failure prevented verification of reference rollback.
-                if(!bound&&safeToDelete&&createdPath!=null&&AssetDatabase.Contains(data))AssetDatabase.DeleteAsset(createdPath);
+                if(!bound&&safeToDelete)
+                {
+                    foreach(string path in createdPaths)AssetDatabase.DeleteAsset(path);
+                    if(createdFolder!=null&&AssetDatabase.IsValidFolder(createdFolder))AssetDatabase.DeleteAsset(createdFolder);
+                }
                 foreach(var item in prepared)if(item&&!AssetDatabase.Contains(item))UnityEngine.Object.DestroyImmediate(item);
                 if(preparedHydrology && !AssetDatabase.Contains(preparedHydrology))UnityEngine.Object.DestroyImmediate(preparedHydrology);
                 if(restorationFailure!=null)throw new AggregateException("Publication failed and reference rollback could not be saved; the complete candidate was retained at "+createdPath,publicationFailure,restorationFailure);

@@ -1,0 +1,235 @@
+// Derived from World Orogen js/terrain-post.js, commit
+// cc2662b4edd52231c4f65d8765f3ef12cd82d9b7. GPL-3.0-only.
+// Copyright upstream contributors. See ../LICENSE attribution in the enclosing WorldOrogen folder.
+#pragma kernel Warp
+#pragma kernel FreezeOcean
+#pragma kernel CopyElevation
+#pragma kernel CaptureSmoothLocks
+#pragma kernel Smooth
+#pragma kernel DetailNoise
+#pragma kernel GlacialIndex
+#pragma kernel BuildDrainage
+#pragma kernel InitializeFlow
+#pragma kernel OrderedErosion
+#pragma kernel ApplyDelta
+#pragma kernel Fjords
+#pragma kernel ClampLand
+#pragma kernel GlacialSmooth
+#pragma kernel Sharpen
+#pragma kernel SoilCreep
+#pragma kernel HeightMetres
+#pragma kernel ErosionDelta
+#pragma target 5.0
+#include "../../Core/WorldOrogenNoise.hlsl"
+
+StructuredBuffer<float3> _WorldPositions;
+StructuredBuffer<uint> _WorldNeighborOffsets, _WorldNeighbors;
+StructuredBuffer<float> _WorldNeighborDistances, _WorldHotspot, _WorldDampen, _WorldOrogenic;
+RWStructuredBuffer<float> _WorldElevation, _WorldScratchElevation;
+StructuredBuffer<uint> _WorldOceanFlags;
+RWStructuredBuffer<uint> _PostOceanWrite,_PostSmoothLockedWrite;
+StructuredBuffer<uint> _PostSmoothLocked;
+RWStructuredBuffer<float> _PostOriginal, _PostIceFlow, _PostFlow, _PostDelta;
+StructuredBuffer<float> _PostGlacialIndex, _PostCellDistance;
+StructuredBuffer<int> _PostDrain, _PostIceTarget;
+RWStructuredBuffer<float> _PostGlacialIndexWrite, _PostCellDistanceWrite;
+RWStructuredBuffer<int> _PostDrainWrite, _PostIceTargetWrite;
+RWStructuredBuffer<uint> _PostIceUpstream;
+StructuredBuffer<uint> _PostOrder;
+StructuredBuffer<float> _PostFloodSurface;
+StructuredBuffer<int> _PostFloodDrain;
+RWStructuredBuffer<float> _WorldHeightMetres;
+StructuredBuffer<float> _WorldPreErosionElevation;
+RWStructuredBuffer<float> _WorldErosionDelta;
+int _WorldRegionCount, _PostMode, _PostOffset, _PostCount;
+StructuredBuffer<double> _PostParameters;
+#define _PostStrength _PostParameters[0]
+#define _PostAmplitude _PostParameters[1]
+#define _PostFrequency _PostParameters[2]
+#define _PostWarpMultiplier _PostParameters[3]
+#define _PostExponent _PostParameters[4]
+#define _PostHydraulicK _PostParameters[5]
+#define _PostHydraulicM _PostParameters[6]
+#define _PostHydraulicDt _PostParameters[7]
+#define _PostTalus _PostParameters[8]
+#define _PostThermalK _PostParameters[9]
+#define _PostGlacialStrength _PostParameters[10]
+#define _PostGlacialScale _PostParameters[11]
+
+double PostSmoothstep(double a, double b, double x)
+{ double t=clamp((x-a)/(b-a),0.0L,1.0L);return t*t*(3.0L-2.0L*t); }
+// SM5 exposes sqrt only at float precision. Refine its positive seed in FP64
+// instead of accepting an implicit downcast in the source's tangent normalization.
+double PostSqrt(double x)
+{if(x<=0)return 0;double v=(double)sqrt((float)x);for(uint iteration=0;iteration<3;iteration++)v=.5L*(v+x/v);return v;}
+bool PostCoast(uint r)
+{ for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++)if(_WorldOceanFlags[_WorldNeighbors[j]]!=0)return true;return false; }
+double PostDistance(uint j){double d=_WorldNeighborDistances[j];return d!=0?d:1e-6L;}
+
+[numthreads(64,1,1)] void CopyElevation(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount)_PostOriginal[r]=_WorldElevation[r];}
+[numthreads(64,1,1)] void FreezeOcean(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount)_PostOceanWrite[r]=_WorldElevation[r]<=0?1:0;}
+
+[numthreads(64,1,1)] void Warp(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;
+ double3 p=(double3)_WorldPositions[r],east=double3(-p.z,0,p.x);
+ double el=PostSqrt(east.x*east.x+east.z*east.z);east=el>1e-10L?east/el:double3(1,0,0);
+ double3 north=double3(p.y*east.z,p.z*east.x-p.x*east.z,-p.y*east.x);
+ double nl=PostSqrt(dot(north,north));north/=nl!=0?nl:1.0L;
+ double amp=.13L*(double)_PostStrength;
+ double d1=WorldOrogenFbm(p*4.0L,5)*amp;
+ double d2=WorldOrogenFbm(p*4.0L+double3(31.7L,47.3L,19.1L),5)*amp;
+ double3 desired=p+east*d1+north*d2;desired/=PostSqrt(dot(desired,desired));
+ uint current=r;double best=dot(desired,p);
+ // Strictly improving graph walk. No arbitrary step truncation.
+ [loop] for(uint stepPass=0;stepPass<(uint)_WorldRegionCount;stepPass++)
+ {
+  bool moved=false;uint begin=_WorldNeighborOffsets[current],end=_WorldNeighborOffsets[current+1];
+  for(uint j=begin;j<end;j++){uint nb=_WorldNeighbors[j];double d=dot(desired,(double3)_WorldPositions[nb]);if(d>best){best=d;current=nb;moved=true;}}
+  if(!moved)break;
+ }
+ double original=_WorldElevation[r],warped=_WorldElevation[current],bias=.25L+.5L*(double)_PostStrength;
+ double denom=abs(original);if(denom==0)denom=1;
+ bias*=1.0L-.8L*min(1.0L,abs((double)_WorldHotspot[r])/denom);
+ _WorldScratchElevation[r]=(float)(warped>original?original+(warped-original)*bias:warped+(original-warped)*(1.0L-bias));
+}
+
+// Upstream locks are captured once. An ocean cell becoming positive during
+// smoothing must keep participating in subsequent passes.
+[numthreads(64,1,1)] void CaptureSmoothLocks(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount)_PostSmoothLockedWrite[r]=(_WorldOceanFlags[r]!=0?_WorldElevation[r]>0:PostCoast(r))?1:0;}
+[numthreads(64,1,1)] void Smooth(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;
+ double h=_WorldElevation[r];
+ if(_PostSmoothLocked[r]!=0){_WorldScratchElevation[r]=(float)h;return;}
+ double ws=0,hs=0;
+ for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++)
+ {double nh=_WorldElevation[_WorldNeighbors[j]],w=1.0L/(1.0L+abs(nh-h)*12.0L);ws+=w;hs+=nh*w;}
+ _WorldScratchElevation[r]=(float)(ws>0?h+(hs/ws-h)*(double)_PostStrength:h);
+}
+
+[numthreads(64,1,1)] void DetailNoise(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;
+ double e=_WorldElevation[r];if(_WorldOceanFlags[r]!=0||e<=0||e>=.99L)return;
+ double3 p=(double3)_WorldPositions[r];double wf=3.0L*(double)_PostFrequency,wa=.08L*(double)_PostWarpMultiplier;
+ double3 d=double3(WorldOrogenFbm(p*wf+double3(1.7L,9.2L,4.5L),3),WorldOrogenFbm(p*wf+double3(-5.1L,2.8L,-7.3L),3),WorldOrogenFbm(p*wf+double3(6.6L,-8.4L,3.1L),3))*wa;
+ double n=clamp(WorldOrogenFbm((p+d)*(5.0L*(double)_PostFrequency),6),-1.0L,1.0L);
+ double mapped=_PostMode!=0?(n<0?-1.0L:1.0L)*(double)pow((float)abs(n),(float)_PostExponent):max(0.0L,n*.5L+.5L);
+ double delta=mapped*(double)_PostAmplitude*(1.0L-.5L*(double)_WorldDampen[r])*(double)_WorldOrogenic[r];
+ if(abs(delta)<1e-9L)return;
+ double e2=e*e,km=6.0L*e2*e2*(5.0L-4.0L*e),target=max(1e-4L,km+delta);
+ double t=min(.999L,max(e,(double)pow((float)(target/30.0L),.25)));
+ for(uint iteration=0;iteration<5;iteration++)
+ {double t2=t*t,t3=t2*t,t4=t2*t2,f=6.0L*t4*(5.0L-4.0L*t)-target,fp=120.0L*t3*(1.0L-t);if(fp<1e-6L)break;double dt=f/fp;t=clamp(t-dt,1e-4L,.9999L);if(abs(dt)<1e-6L)break;}
+ _WorldElevation[r]=(float)t;
+}
+
+[numthreads(64,1,1)] void GlacialIndex(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;
+ double gi=0;
+ if(_WorldOceanFlags[r]==0)
+ {double pi=3.14159265358979323846L,polar=abs((double)asin(clamp(_WorldPositions[r].y,-1.0,1.0)));
+  double lf=PostSmoothstep(pi*.5L-(double)_PostGlacialStrength*pi/4.5L,pi*.5L,polar);
+  double ef=PostSmoothstep(.5L,.9L,(double)_WorldElevation[r]),ls=PostSmoothstep(pi/8.0L,pi/3.0L,polar);
+  gi=max(lf,ef*.3L*(.3L+.7L*ls))*(double)_PostGlacialStrength;}
+ _PostGlacialIndexWrite[r]=(float)gi;
+}
+[numthreads(64,1,1)] void BuildDrainage(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;
+ int best=-1,bestJ=-1;double bestDrop=_PostMode==0?0.0L:-1.7976931348623157e308L,h=_WorldElevation[r];
+ if(_WorldOceanFlags[r]==0&&(_PostMode!=0||_PostGlacialIndex[r]>0))
+ {
+  for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];double drop=h-(double)_WorldElevation[nb];if(drop>bestDrop){bestDrop=drop;best=(int)nb;bestJ=(int)j;}}
+  if(_PostMode!=0&&bestDrop<=0){double ascent=1.7976931348623157e308L;for(uint ascentEdge=_WorldNeighborOffsets[r];ascentEdge<_WorldNeighborOffsets[r+1];ascentEdge++){uint nb=_WorldNeighbors[ascentEdge];double a=(double)_WorldElevation[nb]-h;if(a<ascent){ascent=a;best=(int)nb;bestJ=(int)ascentEdge;}}}
+ }
+ if(_PostMode==0)_PostIceTargetWrite[r]=best;
+ else{_PostDrainWrite[r]=best;_PostCellDistanceWrite[r]=bestJ>=0?(float)PostDistance((uint)bestJ):0;}
+}
+[numthreads(64,1,1)] void InitializeFlow(uint r:SV_DispatchThreadID)
+{if(r>=(uint)_WorldRegionCount)return;_PostDelta[r]=0;_PostIceUpstream[r]=0;_PostIceFlow[r]=_PostGlacialIndex[r];_PostFlow[r]=_WorldOceanFlags[r]==0?1:0;}
+
+// The source has in-place, ordered mutations. A single lane retains that order;
+// CPU supplies only stable order/priority-flood metadata, never final elevations.
+// Dispatch chunks are cancellable between commands and do not reorder float stores.
+[numthreads(1,1,1)] void OrderedErosion(uint ignored:SV_DispatchThreadID)
+{
+ for(uint oi=(uint)_PostOffset;oi<(uint)(_PostOffset+_PostCount);oi++)
+ {
+  uint r=_PostOrder[oi];int target;
+  if(_PostMode==0) // ice flow
+  {target=_PostIceTarget[r];if(target>=0&&_PostIceFlow[r]>0){_PostIceFlow[target]=(float)((double)_PostIceFlow[target]+(double)_PostIceFlow[r]);_PostIceUpstream[target]=(_PostIceUpstream[target]+1)&255;} }
+  else if(_PostMode==1) // glacier carve and widening, descending order
+  {
+   double flow=_PostIceFlow[r];if(flow<=.1L)continue;
+   double deep=.025L*(double)_PostGlacialScale*(double)pow((float)flow,.6)*(double)_PostGlacialStrength;
+   _WorldElevation[r]=(float)((double)_WorldElevation[r]-deep);
+   for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];if(_WorldOceanFlags[nb]!=0)continue;double slope=abs((double)_WorldElevation[r]-(double)_WorldElevation[nb])/PostDistance(j);_WorldElevation[nb]=(float)((double)_WorldElevation[nb]-deep*.4L*max(0.0L,1.0L-slope));}
+   if(_PostIceUpstream[r]>=2)_WorldElevation[r]=(float)((double)_WorldElevation[r]-.015L*(double)_PostGlacialScale*(double)pow((float)flow,.4));
+  }
+  else if(_PostMode==2)
+  {target=_PostIceTarget[r];double flow=_PostIceFlow[r];if(flow>.1L&&target>=0&&_WorldOceanFlags[target]==0&&_PostGlacialIndex[target]<_PostGlacialIndex[r]*.3)_WorldElevation[target]=(float)((double)_WorldElevation[target]+.007L*(double)_PostGlacialScale*(double)pow((float)flow,.3));}
+  else if(_PostMode==3)
+  {target=_PostDrain[r];if(target>=0)_PostFlow[target]=(float)((double)_PostFlow[target]+(double)_PostFlow[r]);}
+  else if(_PostMode==4) // implicit stream power, ascending source order
+  {
+   target=_PostDrain[r];double dist=_PostCellDistance[r];if(target<0||dist<=0)continue;
+   double factor=(double)_PostHydraulicK*(double)pow(_PostFlow[r],(float)_PostHydraulicM)*(double)_PostHydraulicDt/dist;
+   double receiver=max((double)_WorldElevation[target],0.0L),hn=((double)_WorldElevation[r]+factor*receiver)/(1.0L+factor);hn=max(max(hn,receiver),0.0L);
+   double eroded=(double)_WorldElevation[r]-hn;
+   if(eroded>0&&_WorldOceanFlags[target]==0){int tt=_PostDrain[target];double slope=0;if(tt>=0&&_PostCellDistance[target]>0)slope=abs((double)_WorldElevation[target]-(double)_WorldElevation[tt])/(double)_PostCellDistance[target];double deposit=eroded*(.5L/(1.0L+slope*50.0L));_WorldElevation[target]=(float)((double)_WorldElevation[target]+deposit);if((double)_WorldElevation[target]>hn)_WorldElevation[target]=(float)hn;}
+   _WorldElevation[r]=(float)hn;
+  }
+  else if(_PostMode==5) // thermal, Float32 excVal/excSlope source arrays retained
+  {
+   double h=_WorldElevation[r],total=0,weighted=0;
+   for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];if(_WorldOceanFlags[nb]!=0||(double)_WorldElevation[nb]>=h)continue;double slope=(h-(double)_WorldElevation[nb])/PostDistance(j);if(slope>(double)_PostTalus){double ex=(slope-(double)_PostTalus)*PostDistance(j);total+=ex;weighted+=(double)(float)ex*(double)(float)slope;}}
+   if(total<=0)continue;double transfer=(double)_PostThermalK*total*.5L;
+   for(uint distributionEdge=_WorldNeighborOffsets[r];distributionEdge<_WorldNeighborOffsets[r+1];distributionEdge++){uint nb=_WorldNeighbors[distributionEdge];if(_WorldOceanFlags[nb]!=0||(double)_WorldElevation[nb]>=h)continue;double slope=(h-(double)_WorldElevation[nb])/PostDistance(distributionEdge);if(slope<=(double)_PostTalus)continue;float ex=(float)((slope-(double)_PostTalus)*PostDistance(distributionEdge)),sf=(float)slope;double share=(weighted>0?(double)ex*(double)sf/weighted:(double)ex/total)*transfer;_PostDelta[r]=(float)((double)_PostDelta[r]-share);_PostDelta[nb]=(float)((double)_PostDelta[nb]+share);}
+  }
+  else if(_PostMode==6) // priority-flood canyon carving, region-index order
+  {
+   double deficit=(double)_PostFloodSurface[r]-(double)_WorldElevation[r];if(_WorldOceanFlags[r]!=0||deficit<=1e-7L)continue;
+   int cur=(int)r,peak=-1,length=0;double peakHeight=-1.7976931348623157e308L;
+   [loop] while(cur>=0&&_WorldOceanFlags[cur]==0&&length<_WorldRegionCount){double h=_WorldElevation[cur];if(h>peakHeight){peakHeight=h;peak=length;}length++;cur=_PostFloodDrain[cur];}
+   if(peak<0||length==0)continue;
+   double scaledRadius=(double)length*.3L;int radius=(int)scaledRadius;if(scaledRadius>radius)radius++;radius=max(3,radius);
+   int start=max(0,peak-radius),end=min(length-1,peak+radius);double sum=0;
+   for(int k=start;k<=end;k++)sum+=1.0L-(double)abs(k-peak)/(double)(radius+1);
+   if(sum>0){cur=(int)r;for(int k=0;k<=end;k++){if(k>=start){double w=(1.0L-(double)abs(k-peak)/(double)(radius+1))/sum;_WorldElevation[cur]=(float)max(0.0L,(double)_WorldElevation[cur]-deficit*(double)_PostStrength*w);}cur=_PostFloodDrain[cur];}}
+   _WorldElevation[r]=(float)((double)_WorldElevation[r]+deficit*(1.0L-(double)_PostStrength));
+  }
+  else if(_PostMode==7)
+  {target=_PostFloodDrain[r];if(target>=0){double te=_WorldOceanFlags[target]!=0?0.0L:(double)_WorldElevation[target];if((double)_WorldElevation[r]<=te)_WorldElevation[r]=(float)(te+1e-7L);}}
+ }
+}
+[numthreads(64,1,1)] void ApplyDelta(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount&&_WorldOceanFlags[r]==0)_WorldElevation[r]=(float)((double)_WorldElevation[r]+(double)_PostDelta[r]);}
+[numthreads(64,1,1)] void Fjords(uint r:SV_DispatchThreadID)
+{if(r>=(uint)_WorldRegionCount||_WorldOceanFlags[r]!=0)return;double flow=_PostIceFlow[r];if(_PostGlacialIndex[r]>.2&&flow>.5L&&PostCoast(r))_WorldElevation[r]=(float)max(0.0L,(double)_WorldElevation[r]-.020L*(double)_PostGlacialScale*(double)pow((float)flow,.5));}
+[numthreads(64,1,1)] void ClampLand(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount&&_WorldOceanFlags[r]==0&&_WorldElevation[r]<0)_WorldElevation[r]=0;}
+[numthreads(64,1,1)] void GlacialSmooth(uint r:SV_DispatchThreadID)
+{if(r>=(uint)_WorldRegionCount)return;double h=_WorldElevation[r],sum=0;uint count=0;if(_WorldOceanFlags[r]==0&&_PostGlacialIndex[r]>0){for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];if(_WorldOceanFlags[nb]==0){sum+=(double)_WorldElevation[nb];count++;}}} _WorldScratchElevation[r]=(float)(count>0?h+(sum/count-h)*.3L:h);}
+[numthreads(64,1,1)] void Sharpen(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;double h=_WorldElevation[r];if(_WorldOceanFlags[r]!=0){_WorldScratchElevation[r]=(float)h;return;}
+ uint begin=_WorldNeighborOffsets[r],end=_WorldNeighborOffsets[r+1];double sum=0;for(uint j=begin;j<end;j++)sum+=(double)_WorldElevation[_WorldNeighbors[j]];
+ if(end>begin){double avg=sum/(end-begin),original=_PostOriginal[r];if(h>avg)h=min(h+(h-avg)*(double)_PostStrength,original*2.0L);else if(h<avg){h-=(avg-h)*(double)_PostStrength*.5L;if(original>0)h=max(h,original*.5L);if(h<.001L&&original>0)h=.001L;}}
+ _WorldScratchElevation[r]=(float)h;
+}
+[numthreads(64,1,1)] void SoilCreep(uint r:SV_DispatchThreadID)
+{
+ if(r>=(uint)_WorldRegionCount)return;double h=_WorldElevation[r],sum=0;uint count=0;
+ if(_WorldOceanFlags[r]==0&&!PostCoast(r)){for(uint j=_WorldNeighborOffsets[r];j<_WorldNeighborOffsets[r+1];j++){uint nb=_WorldNeighbors[j];if(_WorldOceanFlags[nb]==0){sum+=(double)_WorldElevation[nb];count++;}}}
+ _WorldScratchElevation[r]=(float)(count>0?h+(sum/count-h)*.1125L:h);
+}
+[numthreads(64,1,1)] void HeightMetres(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount){double e=_WorldElevation[r],t=min(e,1.0L),t2=t*t;_WorldHeightMetres[r]=(float)(e<=0?e*10000.0L:6000.0L*t2*t2*(5.0L-4.0L*t));}}
+[numthreads(64,1,1)] void ErosionDelta(uint r:SV_DispatchThreadID)
+{if(r<(uint)_WorldRegionCount)_WorldErosionDelta[r]=(float)((double)_WorldElevation[r]-(double)_WorldPreErosionElevation[r]);}

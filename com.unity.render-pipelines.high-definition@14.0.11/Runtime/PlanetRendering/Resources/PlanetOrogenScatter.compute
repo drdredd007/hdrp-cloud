@@ -1,0 +1,7 @@
+#pragma kernel GenerateCandidates
+#pragma kernel CullAndPose
+#pragma kernel CopyHistory
+
+// Immutable authority family; placement/cull/history kernels are shared verbatim.
+#define PLANET_SURFACE_NO_STRUCTURE 1
+#include "PlanetScatterKernels.hlsl"

@@ -1,0 +1,72 @@
+#pragma kernel CaptureFinalHeights
+#pragma kernel ConditionFinalMap
+#pragma target 5.0
+#pragma only_renderers d3d11 vulkan
+
+// Final retained cube-map capture. No upstream erosion scratch or climate fields enter this policy.
+StructuredBuffer<float> _OrogenSourceHeights;
+RWStructuredBuffer<float> _OrogenCapturedHeights;
+RWStructuredBuffer<float4> _OrogenGeometry,_OrogenEnvironment;
+int _OrogenResolution,_OrogenSourceResolution,_OrogenSampleCount,_WorldDispatchOffset;
+uint2 _OrogenRadiusBits,_OrogenSeaBits,_OrogenMaximumAmplitudeBits,_OrogenReliefFractionBits,_OrogenCoastFadeBits;
+double OrogenD(uint2 v){return asdouble(v.x,v.y);}
+int OrogenIndex(int r,int face,int x,int y){return face*(r+1)*(r+1)+y*(r+1)+x;}
+int3 OrogenCube(int r,int face,int x,int y)
+{
+    int a=2*x-r,b=2*y-r;
+    if(face==0)return int3(r,b,-a);if(face==1)return int3(-r,b,a);if(face==2)return int3(a,r,-b);
+    if(face==3)return int3(a,-r,b);if(face==4)return int3(a,b,r);return int3(-a,b,-r);
+}
+int3 OrogenLocate(int3 p,int r)
+{
+    int3 q=abs(p);int face,u,v,denominator;
+    if(q.x>=q.y&&q.x>=q.z){denominator=q.x;if(p.x>0){face=0;u=-p.z;v=p.y;}else{face=1;u=p.z;v=p.y;}}
+    else if(q.y>=q.z){denominator=q.y;if(p.y>0){face=2;u=p.x;v=-p.z;}else{face=3;u=p.x;v=p.z;}}
+    else{denominator=q.z;if(p.z>0){face=4;u=p.x;v=p.y;}else{face=5;u=-p.x;v=p.y;}}
+    // Both rounded grid coordinates are nonnegative; int truncation is exact floor without SM5 float narrowing.
+    int x=(int)(((double)u/denominator+1)*(.5*r)+.5),y=(int)(((double)v/denominator+1)*(.5*r)+.5);
+    return int3(face,clamp(x,0,r),clamp(y,0,r));
+}
+int3 OrogenNode(int id,int r){uint side=(uint)(r+1),uid=(uint)id,face=uid/(side*side),local=uid-face*side*side;return int3((int)face,(int)(local%side),(int)(local/side));}
+int OrogenOwner(int3 n,int r){int3 own=OrogenLocate(OrogenCube(r,n.x,n.y,n.z),r);return OrogenIndex(r,own.x,own.y,own.z);}
+float OrogenSampleSource(int3 node)
+{
+    int r=_OrogenSourceResolution;double gx=(double)node.y*r/_OrogenResolution,gy=(double)node.z*r/_OrogenResolution;
+    int x=min(r-1,(int)gx),y=min(r-1,(int)gy);double tx=gx-x,ty=gy-y;
+    double a=_OrogenSourceHeights[OrogenIndex(r,node.x,x,y)],b=_OrogenSourceHeights[OrogenIndex(r,node.x,x+1,y)];
+    double c=_OrogenSourceHeights[OrogenIndex(r,node.x,x,y+1)],d=_OrogenSourceHeights[OrogenIndex(r,node.x,x+1,y+1)];
+    return (float)((a+(b-a)*tx)+((c+(d-c)*tx)-(a+(b-a)*tx))*ty);
+}
+[numthreads(64,1,1)]
+void CaptureFinalHeights(uint3 id:SV_DispatchThreadID)
+{
+    uint i=id.x+(uint)_WorldDispatchOffset;if(i>=(uint)_OrogenSampleCount)return;
+    int3 n=OrogenNode((int)i,_OrogenResolution);int owner=OrogenOwner(n,_OrogenResolution);
+    _OrogenCapturedHeights[i]=OrogenSampleSource(OrogenNode(owner,_OrogenResolution));
+}
+[numthreads(64,1,1)]
+void ConditionFinalMap(uint3 id:SV_DispatchThreadID)
+{
+    uint i=id.x+(uint)_WorldDispatchOffset;if(i>=(uint)_OrogenSampleCount)return;
+    int r=_OrogenResolution,owner=OrogenOwner(OrogenNode((int)i,r),r);int3 node=OrogenNode(owner,r);
+    float h=_OrogenCapturedHeights[owner],lo=h,hi=h;
+    double sea=OrogenD(_OrogenSeaBits);
+    float dryLo=0,dryHi=0;bool hasDry=false;
+    [loop]for(int oy=-2;oy<=2;oy++)[loop]for(int ox=-2;ox<=2;ox++)
+    {
+        int3 nearby=OrogenLocate(OrogenCube(r,node.x,node.y+ox,node.z+oy),r);int canonical=OrogenOwner(nearby,r);
+        float value=_OrogenCapturedHeights[canonical];lo=min(lo,value);hi=max(hi,value);
+        // Bathymetry remains part of the conservative source range but must not
+        // turn an unchanged dry coastal slope into stronger terrestrial detail.
+        if((double)value>sea)
+        {if(!hasDry){dryLo=dryHi=value;hasDry=true;}else{dryLo=min(dryLo,value);dryHi=max(dryHi,value);}}
+    }
+    double dryRelief=hasDry?(double)dryHi-dryLo:0,maximum=OrogenD(_OrogenMaximumAmplitudeBits),fraction=OrogenD(_OrogenReliefFractionBits);
+    double margin=max(0.0L,(double)h-sea),fade=min(1.0L,margin/OrogenD(_OrogenCoastFadeBits));fade=fade*fade*(3-2*fade);
+    float amplitude=(float)min(maximum,dryRelief*fraction);
+    double cellMetres=2*OrogenD(_OrogenRadiusBits)/r;
+    // Ruggedness is a final-map geometric proxy. .5 precipitation and zero cold are neutral, not captured source climate.
+    float ruggedness=(float)min(1.0L,dryRelief/max(1.0L,4*cellMetres*.1L));
+    _OrogenGeometry[i]=float4(h,lo,hi,amplitude);
+    _OrogenEnvironment[i]=float4((float)fade,ruggedness,.5,0);
+}

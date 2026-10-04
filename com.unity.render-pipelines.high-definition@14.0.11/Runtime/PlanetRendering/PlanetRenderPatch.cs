@@ -34,9 +34,17 @@ namespace UnityEngine.Rendering.HighDefinition
                 resolution<2||resolution>128||(resolution&(resolution-1))!=0||math.any(math.abs((double2)key*size)+size>8192))
                 throw new ArgumentException("Use a bounded metric render patch and power-of-two resolution 2–128.");
             var patch=new PlanetRenderPatch {Frame=frame,Key=key,Size=size,Resolution=resolution,RequiredAttributes=requiredAttributes};
-            PlanetSurfaceDataLease lease=null;
+            PlanetSurfaceRenderLease lease=null;
             try
             {
+                // Readiness is established before any output allocation. A finite algorithm-five
+                // render sample must never borrow the intentionally unfiltered physical view.
+                if(definition.GeneratorVersion==3)
+                {
+                    if(!PlanetSurfaceDataRegistry.TryAcquireForRendering(definition.Surface,out lease,out var status))
+                        throw new InvalidOperationException("Signed render preparation is not ready: "+status);
+                    if(!PlanetSurfaceData.Compatible(definition,lease.View))throw new InvalidOperationException("Signed render snapshot does not match the definition.");
+                }
                 int count=(resolution+1)*(resolution+1);
                 patch.Positions=new NativeArray<float3>(count,Allocator.Persistent);patch.Normals=new NativeArray<float3>(count,Allocator.Persistent);
                 patch.PlanetOffsets=new NativeArray<float3>(count,Allocator.Persistent);patch.Attributes=new NativeArray<SurfaceAttributes>(count,Allocator.Persistent);
@@ -44,8 +52,6 @@ namespace UnityEngine.Rendering.HighDefinition
                 JobHandle job;
                 if(definition.GeneratorVersion==3)
                 {
-                    if(!PlanetSurfaceDataRegistry.TryAcquire(definition.Surface,out lease))throw new InvalidOperationException("Signed render snapshot is not registered.");
-                    if(!PlanetSurfaceData.Compatible(definition,lease.View))throw new InvalidOperationException("Signed render snapshot does not match the definition.");
                     job=new PlanetSignedRenderPatchJob {Definition=definition,Surface=lease.View,Frame=frame,Key=key,Size=size,Resolution=resolution,
                         RequiredAttributes=requiredAttributes,Positions=patch.Positions,Normals=patch.Normals,PlanetOffsets=patch.PlanetOffsets,
                         Attributes=patch.Attributes,GeometryStatuses=patch.GeometryStatuses,AttributeStatuses=patch.AttributeStatuses}.Schedule(count,64);
@@ -61,8 +67,8 @@ namespace UnityEngine.Rendering.HighDefinition
     }
     public sealed class PlanetRenderPatchRequest : IDisposable
     {
-        PlanetRenderPatch patch;JobHandle job;PlanetSurfaceDataLease lease;
-        internal PlanetRenderPatchRequest(PlanetRenderPatch patch,JobHandle job,PlanetSurfaceDataLease lease){this.patch=patch;this.job=job;this.lease=lease;}
+        PlanetRenderPatch patch;JobHandle job;PlanetSurfaceRenderLease lease;
+        internal PlanetRenderPatchRequest(PlanetRenderPatch patch,JobHandle job,PlanetSurfaceRenderLease lease){this.patch=patch;this.job=job;this.lease=lease;}
         public bool IsCompleted=>patch!=null&&job.IsCompleted;
         public bool TryComplete(out PlanetRenderPatch result)
         {result=null;if(patch==null)throw new ObjectDisposedException(nameof(PlanetRenderPatchRequest));if(!job.IsCompleted)return false;result=Complete();return true;}
@@ -82,10 +88,14 @@ namespace UnityEngine.Rendering.HighDefinition
             int x=index%(Resolution+1),z=index/(Resolution+1);
             var local=new double3(((double)Key.x*Resolution+x)*(Size/Resolution),0,((double)Key.y*Resolution+z)*(Size/Resolution));
             var direction=math.normalize(Frame.ToPlanet(local));var footprint=new SurfaceSamplingFootprint(Size/Resolution);
-            var status=SurfaceSampler.TrySamplePosition(Surface,direction,footprint,out var point);double3 normal=default;
-            if(status==SurfaceSampleStatus.Ready)status=SurfaceSampler.TrySampleNormal(Surface,direction,PlanetSurfaceData.NormalSampleMetresFor(Definition.Radius),footprint,out normal);
-            GeometryStatuses[index]=status;AttributeStatuses[index]=SurfaceSampler.TrySampleAttributes(Surface,direction,out var attributes,RequiredAttributes);
+            var status=SurfaceSampler.TrySampleHeight(Surface,direction,footprint,out double height);double3 normal=default;
+            double normalStep=PlanetSurfaceData.NormalSampleMetresFor(Definition.Radius);
+            if(status==SurfaceSampleStatus.Ready)status=SurfaceSampler.TrySampleNormal(Surface,direction,normalStep,footprint,out normal);
+            GeometryStatuses[index]=status;SurfaceAttributes attributes=default;
+            AttributeStatuses[index]=status==SurfaceSampleStatus.Ready?
+                SurfaceSampler.TrySampleRenderAttributes(Surface,direction,footprint,height,normal,normalStep,out attributes,RequiredAttributes):status;
             Attributes[index]=attributes;
+            CubeSurface.TryNormalize(direction,out var unit);var point=unit*(Definition.Radius+height);
             if(status!=SurfaceSampleStatus.Ready)return;
             var offset=point-Frame.Position;PlanetOffsets[index]=(float3)offset;
             Positions[index]=(float3)new double3(math.dot(offset,Frame.Right),math.dot(offset,Frame.Up),math.dot(offset,Frame.Forward));

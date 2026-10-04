@@ -30,6 +30,8 @@ namespace UnityEngine.Rendering.HighDefinition
         double3 pickOrigin;
         double4 pickRotation,pickCameraRotation;
         string placementError;
+        WorldOrogenGenerationController generation;
+        OrogenDetailGenerationController detailGeneration;
 
         [MenuItem("Window/Rendering/HDRP Planet Generator")]
         public static void Open()=>GetWindow<PlanetGeneratorWindow>("Planet Generator");
@@ -53,15 +55,19 @@ namespace UnityEngine.Rendering.HighDefinition
         {if(EditorUtility.InstanceIDToObject(instanceId) is PlanetGeneratorAsset asset){Open(asset);return true;}return false;}
         void OnEnable()
         {
+            generation=new WorldOrogenGenerationController();generation.Changed+=OnGenerationChanged;
+            detailGeneration=new OrogenDetailGenerationController();detailGeneration.Changed+=OnGenerationChanged;
             PlanetGeneratorAssetInspector.SettingsChanged+=OnAssetChanged;minSize=new Vector2(760,440);EditorApplication.update+=Tick;Undo.undoRedoPerformed+=Invalidate;
-            EditorApplication.playModeStateChanged+=OnPlayMode;AssemblyReloadEvents.beforeAssemblyReload+=ReleasePreview;
+            EditorApplication.playModeStateChanged+=OnPlayMode;AssemblyReloadEvents.beforeAssemblyReload+=BeforeReload;
         }
         void OnDisable()
         {
             PlanetGeneratorAssetInspector.SettingsChanged-=OnAssetChanged;EditorApplication.update-=Tick;Undo.undoRedoPerformed-=Invalidate;EditorApplication.playModeStateChanged-=OnPlayMode;
-            AssemblyReloadEvents.beforeAssemblyReload-=ReleasePreview;ReleasePreview();if(inspector)DestroyImmediate(inspector);
+            AssemblyReloadEvents.beforeAssemblyReload-=BeforeReload;BeforeReload();if(inspector)DestroyImmediate(inspector);
         }
-        void OnPlayMode(PlayModeStateChange state){ReleasePreview();Invalidate();}
+        void BeforeReload(){generation?.Dispose();detailGeneration?.Dispose();ReleasePreview();}
+        void OnGenerationChanged(){if(generation!=null&&!generation.IsRunning&&detailGeneration!=null&&!detailGeneration.IsRunning)Invalidate();else Repaint();}
+        void OnPlayMode(PlayModeStateChange state){generation?.Dispose();detailGeneration?.Dispose();ReleasePreview();Invalidate();}
         void OnAssetChanged(PlanetGeneratorAsset asset){if(asset==settings)Invalidate();}
         void OnSelectionChange(){if(Selection.activeObject is PlanetGeneratorAsset asset){settings=asset;Invalidate();}}
         void Invalidate(){dirty=true;pickReady=false;failure=null;changedAt=EditorApplication.timeSinceStartup;Repaint();}
@@ -97,7 +103,8 @@ namespace UnityEngine.Rendering.HighDefinition
                     UnityEditor.Editor.CreateCachedEditor(settings,typeof(PlanetGeneratorAssetInspector),ref inspector);
                     EditorGUI.BeginChangeCheck();((PlanetGeneratorAssetInspector)inspector).DrawSettings();
                     if(EditorGUI.EndChangeCheck())Invalidate();
-                    if(GUILayout.Button("New seed")){Undo.RecordObject(settings,"Change planet seed");settings.Seed=Guid.NewGuid().GetHashCode();EditorUtility.SetDirty(settings);Invalidate();}
+                    if(GUILayout.Button("New seed")){Undo.RecordObject(settings,"Change planet seed");settings.Seed=Guid.NewGuid().GetHashCode()&0xffffff;EditorUtility.SetDirty(settings);Invalidate();}
+                    DrawGeneration();
                     EditorGUILayout.Space();EditorGUILayout.LabelField("Observer",EditorStyles.boldLabel);
                     EditorGUI.BeginChangeCheck();altitude=math.max(50000,EditorGUILayout.DoubleField("Altitude (km)",altitude/1000)*1000);
                     if(EditorGUI.EndChangeCheck())Invalidate();
@@ -178,8 +185,54 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         void Tick()
         {
+            generation?.Tick();
+            detailGeneration?.Tick();
             if((livePreview || manualRefresh) && dirty && EditorApplication.timeSinceStartup-changedAt>.25)RenderPreview();
         }
+        void DrawGeneration()
+        {
+            if(generation==null)return;
+            using(new EditorGUI.DisabledScope(generation.IsRunning||(detailGeneration?.IsRunning??false)||EditorApplication.isPlayingOrWillChangePlaymode))
+            {
+                if(GUILayout.Button("Build World Orogen (GPU)"))StartGeneration(WorldOrogenGenerationController.Operation.Build);
+                using(new EditorGUI.DisabledScope(!generation.CanReapply(settings)))
+                    if(GUILayout.Button("Reapply terrain sculpting"))StartGeneration(WorldOrogenGenerationController.Operation.Reapply);
+                using(new EditorGUI.DisabledScope(!generation.CanClimate(settings)))
+                    if(GUILayout.Button("Compute climate"))StartGeneration(WorldOrogenGenerationController.Operation.Climate);
+                using(new EditorGUI.DisabledScope(!generation.CanRecolour(settings)))
+                    if(GUILayout.Button("Apply map view"))StartGeneration(WorldOrogenGenerationController.Operation.Recolour);
+                using(new EditorGUI.DisabledScope(!settings.SurfaceData||settings.SurfaceData.WorldOrogenSource==null))
+                {
+                    if(GUILayout.Button("Bake terrain detail (GPU)"))
+                        try{detailGeneration.Start(settings);}catch(Exception e){failure=e.Message;}
+                    bool detailed=settings.SurfaceData&&settings.SurfaceData.TryCreateSnapshot(out var current,out _)&&current.OrogenDetail!=null;
+                    using(new EditorGUI.DisabledScope(!detailed))
+                        if(GUILayout.Button("Remove terrain detail"))
+                            try{OrogenDetailPublication.Publish(settings,settings.SurfaceData,settings.TerrainDetail.Capture(settings.Seed),null);Invalidate();}catch(Exception e){failure=e.Message;}
+                }
+            }
+            if(generation.IsRunning)
+            {
+                var rect=EditorGUILayout.GetControlRect(false,20);EditorGUI.ProgressBar(rect,(float)generation.Progress01,generation.Stage);
+                if(GUILayout.Button("Cancel generation"))generation.Cancel();
+            }
+            else EditorGUILayout.LabelField(generation.Stage,EditorStyles.miniLabel);
+            if(!string.IsNullOrEmpty(generation.Error))EditorGUILayout.HelpBox(generation.Error,MessageType.Error);
+            if(detailGeneration!=null)
+            {
+                if(detailGeneration.IsRunning)
+                {
+                    var rect=EditorGUILayout.GetControlRect(false,20);EditorGUI.ProgressBar(rect,(float)detailGeneration.Progress01,detailGeneration.Stage);
+                    if(GUILayout.Button("Cancel detail capture"))detailGeneration.Cancel();
+                }
+                else EditorGUILayout.LabelField(detailGeneration.Stage,EditorStyles.miniLabel);
+                if(!string.IsNullOrEmpty(detailGeneration.Error))EditorGUILayout.HelpBox(detailGeneration.Error,MessageType.Error);
+            }
+            if(!settings.SurfaceData||!settings.SurfaceData.BaseColour)
+                EditorGUILayout.HelpBox("Build to replace the previous terrain with the generated World Orogen base map.",MessageType.Info);
+        }
+        void StartGeneration(WorldOrogenGenerationController.Operation operation)
+        {try{generation.Start(settings,operation);}catch(Exception e){failure=e.Message;}}
         void EnsurePreview()
         {
             if(previewCamera)return;
@@ -238,7 +291,8 @@ namespace UnityEngine.Rendering.HighDefinition
     public sealed class PlanetGeneratorAssetInspector : UnityEditor.Editor
     {
         internal static event Action<PlanetGeneratorAsset> SettingsChanged;
-        public void DrawSettings(){serializedObject.Update();DrawPropertiesExcluding(serializedObject,"m_Script");if(serializedObject.ApplyModifiedProperties())SettingsChanged?.Invoke((PlanetGeneratorAsset)target);}
+        readonly WorldOrogenInspectorControls controls=new WorldOrogenInspectorControls();
+        public void DrawSettings(){serializedObject.Update();controls.Draw(serializedObject,(PlanetGeneratorAsset)target);if(serializedObject.ApplyModifiedProperties())SettingsChanged?.Invoke((PlanetGeneratorAsset)target);}
         public override void OnInspectorGUI()
         {
             DrawSettings();if(GUILayout.Button("Open Planet Generator"))PlanetGeneratorWindow.Open((PlanetGeneratorAsset)target);

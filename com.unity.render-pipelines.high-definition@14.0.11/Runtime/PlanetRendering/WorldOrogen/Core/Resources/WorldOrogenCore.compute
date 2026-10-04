@@ -1,0 +1,203 @@
+// Port of js/coarse-plates.js and js/elevation.js, fixed upstream cc2662b4.
+// GPL-3.0-only. Arithmetic uses double intermediates and original Float32 stores.
+#pragma kernel ProjectCoarsePlates
+#pragma kernel FindCollisions
+#pragma kernel InitializeStressFrontier
+#pragma kernel PropagateStressChunk
+#pragma kernel SmoothStressDirectionChunk
+#pragma kernel MantleFlow
+#pragma kernel CopyTectonic
+#pragma kernel BlendTectonicInitial
+#pragma kernel BlendTectonicPropagated
+#pragma kernel NormalizeMantleAndStress
+#pragma kernel ExpandMantle
+#pragma target 5.0
+#pragma enable_d3d11_debug_symbols
+#include "../WorldOrogenMath.hlsl"
+#include "../WorldOrogenNoise.hlsl"
+#include "../WorldOrogenConstants.hlsl"
+
+StructuredBuffer<float3> _WorldPositions;
+StructuredBuffer<uint> _WorldNeighborOffsets,_WorldNeighbors;
+StructuredBuffer<float> _WorldNeighborDistances;
+StructuredBuffer<uint> _WorldTriangles;
+StructuredBuffer<int> _WorldHalfedges;
+int _WorldRegionCount,_WorldTriangleCount;
+RWStructuredBuffer<float> _WorldElevation,_WorldScratchElevation,_WorldHotspot,_WorldDampen,_WorldOrogenic;
+RWStructuredBuffer<uint> _WorldOceanFlags;
+StructuredBuffer<float3> _CoarsePositions;
+StructuredBuffer<uint> _CoarseOffsets,_CoarseNeighbors,_CoarsePlate;
+RWStructuredBuffer<uint> _WorldPlate,_WorldProjectionCursor;
+StructuredBuffer<double4> _PlateMotion;
+StructuredBuffer<double> _PlateDensity;
+StructuredBuffer<uint> _PlateOcean;
+int _CoarseRegionCount,_ProjectionStart,_ProjectionCount,_ChunkStart,_ChunkCount;
+uint2 _PerturbAmplitudeBits,_CollisionDtBits,_StressDecayBits,_SubductDecayBits;
+#define _PerturbAmplitude asdouble(_PerturbAmplitudeBits.x,_PerturbAmplitudeBits.y)
+#define _CollisionDt asdouble(_CollisionDtBits.x,_CollisionDtBits.y)
+#define _StressDecay asdouble(_StressDecayBits.x,_StressDecayBits.y)
+#define _SubductDecay asdouble(_SubductDecayBits.x,_SubductDecayBits.y)
+RWStructuredBuffer<float> _WorldStress,_WorldSubduct;
+RWStructuredBuffer<float3> _WorldStressDirection;
+RWStructuredBuffer<uint4> _WorldCollisionFlags;
+RWStructuredBuffer<uint> _StressFrontier,_StressNextFrontier,_StressCounters;
+int _StressFrontierCapacity;
+struct WorldMantleCell { double3 position; double radialSign,rotationSign,strength; };
+StructuredBuffer<WorldMantleCell> _WorldMantleCells;
+RWStructuredBuffer<double3> _WorldMantleFlow;
+RWStructuredBuffer<float> _WorldMantleField;
+int _WorldMantleCellCount;
+StructuredBuffer<float> _SmallStress,_SuperStress,_SmallSubduct,_SuperSubduct;
+StructuredBuffer<float3> _SmallDirection,_SuperDirection;
+StructuredBuffer<uint4> _SourceCollisionFlags;
+RWStructuredBuffer<float> _WorldMantleNormalized;
+uint2 _WorldMantleMaximumBits;
+StructuredBuffer<double> _PlateMantleMean;
+[numthreads(64,1,1)]void ExpandMantle(uint3 tid:SV_DispatchThreadID)
+{uint r=tid.x;if(r>=(uint)_WorldRegionCount)return;_WorldMantleField[r]=(float)_PlateMantleMean[_WorldPlate[r]];}
+[numthreads(64,1,1)]void CopyTectonic(uint3 tid:SV_DispatchThreadID)
+{uint r=tid.x;if(r>=(uint)_WorldRegionCount)return;_WorldStress[r]=_SmallStress[r];_WorldSubduct[r]=_SmallSubduct[r];_WorldStressDirection[r]=_SmallDirection[r];_WorldCollisionFlags[r]=_SourceCollisionFlags[r];}
+[numthreads(64,1,1)]void BlendTectonicInitial(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x;if(r>=(uint)_WorldRegionCount)return;double s=SMALL_W*(double)_SmallStress[r],p=SUPER_W*(double)_SuperStress[r],total=s+p;
+    _WorldStress[r]=(float)total;_WorldSubduct[r]=(float)(total>1e-6L?(s*(double)_SmallSubduct[r]+p*(double)_SuperSubduct[r])/total:SMALL_W*(double)_SmallSubduct[r]+SUPER_W*(double)_SuperSubduct[r]);
+    double3 direction=0;if(total>1e-6L){direction=s*(double3)_SmallDirection[r]+p*(double3)_SuperDirection[r];double n=WorldSqrt(WorldDot(direction,direction));direction/=n==0?1e-10L:n;}_WorldStressDirection[r]=(float3)direction;_WorldCollisionFlags[r]=_SourceCollisionFlags[r];
+}
+[numthreads(64,1,1)]void BlendTectonicPropagated(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x;if(r>=(uint)_WorldRegionCount)return;double s=SMALL_W*(double)_SmallStress[r],p=SUPER_W*(double)_SuperStress[r],total=s+p;
+    _WorldStress[r]=(float)total;if(total>1e-6L)_WorldSubduct[r]=(float)((s*(double)_SmallSubduct[r]+p*(double)_SuperSubduct[r])/total);
+}
+[numthreads(64,1,1)]void NormalizeMantleAndStress(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x;if(r>=(uint)_WorldRegionCount)return;double maximum=asdouble(_WorldMantleMaximumBits.x,_WorldMantleMaximumBits.y);
+    float normalized=maximum>1e-6L?(float)((double)_WorldMantleField[r]*(1/maximum)):0;_WorldMantleNormalized[r]=normalized;
+    if(maximum>1e-6L&&_WorldStress[r]>=1e-6L)_WorldStress[r]=(float)((double)_WorldStress[r]*(1+.40L*WorldMax(-.5L,(double)normalized)));
+}
+
+[numthreads(64,1,1)]
+void MantleFlow(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x;if(r>=(uint)_WorldRegionCount)return;double3 pos=(double3)_WorldPositions[r],flow=0;
+    [loop]for(int cellIndex=0;cellIndex<_WorldMantleCellCount;cellIndex++)
+    {
+        WorldMantleCell cell=_WorldMantleCells[cellIndex];double3 cp=WorldCross(WorldCross(pos,cell.position),pos);double n=WorldSqrt(WorldDot(cp,cp));if(n<1e-10L)continue;
+        double angle=WorldAcos(WorldClamp(WorldDot(pos,cell.position),-1,1));if(angle<1e-6L)continue;
+        double3 radial=cp/n,tangent=WorldCross(pos,radial);double tn=WorldSqrt(WorldDot(tangent,tangent));if(tn<1e-10L)continue;
+        double strength=cell.strength/(.5L+angle*angle);flow+=radial*(cell.radialSign*strength)+(tangent/tn)*(cell.rotationSign*.6L*strength);
+    }
+    double radialSum=0;[loop]for(int radialIndex=0;radialIndex<_WorldMantleCellCount;radialIndex++)
+    {WorldMantleCell cell=_WorldMantleCells[radialIndex];double angle=WorldAcos(WorldClamp(WorldDot(pos,cell.position),-1,1));if(angle<1e-6L)continue;radialSum+=cell.radialSign*cell.strength/(.5L+angle*angle);}
+    _WorldMantleFlow[r]=flow;_WorldMantleField[r]=(float)(WorldSqrt(WorldDot(flow,flow))*(radialSum<0?-1:(radialSum>0?1:0)));
+}
+
+double3 WorldVelocity(uint plate,double3 positionValue){double4 pv=_PlateMotion[plate];return pv.w*WorldCross(pv.xyz,positionValue);}
+double WorldPairIntensity(uint a,uint b)
+{
+    uint lo=a<b?a:b,hi=a>b?a:b,h=(lo*16807u)^(hi*48271u);
+    // JS bitwise converts h to signed int32; the subsequent multiplication is Number,
+    // NOT uint multiplication (its rounded low bits matter above 2^53).
+    int mixed=((int)h>>16)^(int)h;double product=(double)mixed*73244475.0L;
+    double q=WorldFloor(product/4294967296.0L);h=(uint)(product-q*4294967296.0L);
+    return .5L+(double)(h%10001u)/10000.0L;
+}
+
+// Warm-start carries across ordered chunks exactly as the upstream r loop.
+[numthreads(1,1,1)]
+void ProjectCoarsePlates(uint3 tid:SV_DispatchThreadID)
+{
+    uint cur=_WorldProjectionCursor[0];int maximumWalk=(int)WorldSqrt((double)_CoarseRegionCount);
+    if((double)maximumWalk*maximumWalk<_CoarseRegionCount)maximumWalk++;
+    [loop]for(int projectionR=_ProjectionStart;projectionR<_ProjectionStart+_ProjectionCount&&projectionR<_WorldRegionCount;projectionR++)
+    {
+        double3 p=(double3)_WorldPositions[projectionR],f=p*8,delta=0;double amplitude=_PerturbAmplitude;
+        [loop]for(int octave=0;octave<4;octave++){delta.x+=WorldOrogenNoise3D(f)*amplitude;delta.y+=WorldOrogenNoise3D(f+100)*amplitude;delta.z+=WorldOrogenNoise3D(f+200)*amplitude;amplitude*=.5L;f*=2;}
+        p=WorldUnit(p+delta);double bestDot=WorldDot(p,(double3)_CoarsePositions[cur]);bool improved=true;int steps=0;
+        [loop]while(improved&&steps<maximumWalk)
+        {
+            improved=false;steps++;uint end=_CoarseOffsets[cur+1];
+            [loop]for(uint i=_CoarseOffsets[cur];i<end;i++)
+            {uint nb=_CoarseNeighbors[i];double d=WorldDot(p,(double3)_CoarsePositions[nb]);if(d>bestDot){bestDot=d;cur=nb;improved=true;}}
+        }
+        if(steps>=maximumWalk){[loop]for(int c=0;c<_CoarseRegionCount;c++){double d=WorldDot(p,(double3)_CoarsePositions[c]);if(d>bestDot){bestDot=d;cur=c;}}}
+        _WorldPlate[projectionR]=_CoarsePlate[cur];
+    }
+    _WorldProjectionCursor[0]=cur;
+}
+
+[numthreads(64,1,1)]
+void FindCollisions(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x;if(r>=(uint)_WorldRegionCount)return;uint myPlate=_WorldPlate[r];double3 p=(double3)_WorldPositions[r];
+    double bestCompression=-1.0e100L,normalCompression=0;int best=-1;
+    [loop]for(uint i=_WorldNeighborOffsets[r];i<_WorldNeighborOffsets[r+1];i++)
+    {
+        uint nb=_WorldNeighbors[i],otherPlate=_WorldPlate[nb];if(myPlate==otherPlate)continue;
+        double3 q=(double3)_WorldPositions[nb],delta=p-q;double before=WorldSqrt(WorldDot(delta,delta));
+        double3 v1=WorldVelocity(myPlate,p),v2=WorldVelocity(otherPlate,q);
+        double3 afterDelta=(p+v1*_CollisionDt)-(q+v2*_CollisionDt);double compression=before-WorldSqrt(WorldDot(afterDelta,afterDelta));
+        if(compression>bestCompression){bestCompression=compression;best=(int)nb;normalCompression=-WorldDot(v1-v2,delta)/(before==0?1:before);}
+    }
+    _WorldStress[r]=0;_WorldStressDirection[r]=float3(0,0,0);_WorldSubduct[r]=.5f;
+    _WorldCollisionFlags[r]=uint4(0,0,0,0);
+    if(best<0)return;
+    bool collided=bestCompression>.75L*_CollisionDt;uint neighborPlate=_WorldPlate[best],ro=_PlateOcean[myPlate],no=_PlateOcean[neighborPlate];
+    uint both=(ro!=0&&no!=0)?1:0,has=(ro!=0||no!=0)?1:0,seeds=0;
+    double threshold=.3L*_CollisionDt;uint boundary=normalCompression>threshold?1:(normalCompression<-threshold?2:3);
+    if(collided){_WorldStress[r]=(float)((bestCompression/_CollisionDt)*WorldPairIntensity(myPlate,neighborPlate));double3 delta=p-(double3)_WorldPositions[best];double n=WorldSqrt(WorldDot(delta,delta));_WorldStressDirection[r]=(float3)(delta/(n==0?1e-10L:n));}
+    double densityDifference=_PlateDensity[myPlate]-_PlateDensity[neighborPlate];
+    double factor=.5L+.5L*WorldTanh(densityDifference*8);
+    double undulation=WorldOrogenFbm(p*6,_WorldRegionCount>200000?2:3)*.4L*WorldExp(-WorldAbs(densityDifference)*12);
+    float storedFactor=(float)WorldClamp(factor+undulation,0,1);_WorldSubduct[r]=storedFactor;
+    if(ro!=0&&no!=0)seeds=collided?2:4;
+    else if(ro==0&&no==0){if(collided)seeds=storedFactor<.55L?1:2;}
+    else seeds=collided?1:2;
+    _WorldCollisionFlags[r]=uint4(boundary,both,has,seeds);
+}
+
+[numthreads(1,1,1)]
+void InitializeStressFrontier(uint3 tid:SV_DispatchThreadID)
+{
+    // Called for one ordered range; counters are zeroed by the owner beforehand.
+    uint n=_StressCounters[0];[loop]for(int r=_ChunkStart;r<_ChunkStart+_ChunkCount&&r<_WorldRegionCount;r++)
+    if(_WorldStress[r]>.01L){if(n<(uint)_StressFrontierCapacity)_StressFrontier[n]=(uint)r;else _StressCounters[2]=1;n++;}
+    _StressCounters[0]=n;
+}
+
+[numthreads(1,1,1)]
+void PropagateStressChunk(uint3 tid:SV_DispatchThreadID)
+{
+    uint nextCount=_StressCounters[1],frontierCount=_StressCounters[0];
+    [loop]for(uint fi=(uint)_ChunkStart;fi<(uint)(_ChunkStart+_ChunkCount)&&fi<frontierCount;fi++)
+    {
+        uint r=_StressFrontier[fi],plate=_WorldPlate[r];if(_PlateOcean[plate]!=0)continue;
+        double sf=(double)_WorldSubduct[r],baseValue=(double)_WorldStress[r]*(sf>.5L?_SubductDecay:_StressDecay);if(baseValue<.005L)continue;
+        double3 sd=(double3)_WorldStressDirection[r];bool hasDirection=sd.x!=0||sd.y!=0||sd.z!=0;
+        [loop]for(uint i=_WorldNeighborOffsets[r];i<_WorldNeighborOffsets[r+1];i++)
+        {
+            uint nb=_WorldNeighbors[i];if(_WorldPlate[nb]!=plate)continue;double propagated=baseValue;double3 travel=(double3)_WorldPositions[nb]-(double3)_WorldPositions[r];
+            double length=WorldSqrt(WorldDot(travel,travel));if(length==0)length=1e-10L;
+            if(hasDirection)propagated*=WorldMax(.1L,.3L+.7L*WorldDot(sd,travel)/length);
+            if(propagated>(double)_WorldStress[nb])
+            {
+                _WorldStress[nb]=(float)propagated;_WorldSubduct[nb]=(float)sf;
+                if(nextCount<(uint)_StressFrontierCapacity)_StressNextFrontier[nextCount]=nb;else _StressCounters[2]=1;nextCount++;
+                if(hasDirection){double3 blended=sd*.8L+(travel/length)*.2L;double n=WorldSqrt(WorldDot(blended,blended));_WorldStressDirection[nb]=(float3)(blended/(n==0?1e-10L:n));}
+            }
+        }
+    }
+    _StressCounters[1]=nextCount;
+}
+
+[numthreads(1,1,1)]
+void SmoothStressDirectionChunk(uint3 tid:SV_DispatchThreadID)
+{
+    [loop]for(int r=_ChunkStart;r<_ChunkStart+_ChunkCount&&r<_WorldRegionCount;r++)
+    {
+        if(_WorldStress[r]<.01L)continue;uint plate=_WorldPlate[r];if(_PlateOcean[plate]!=0)continue;
+        double selfWeight=(double)_WorldStress[r]*2,total=selfWeight;double3 accumulator=(double3)_WorldStressDirection[r]*selfWeight;
+        [loop]for(uint i=_WorldNeighborOffsets[r];i<_WorldNeighborOffsets[r+1];i++)
+        {uint nb=_WorldNeighbors[i];if(_WorldPlate[nb]!=plate||_WorldStress[nb]<.01L)continue;double w=(double)_WorldStress[nb];accumulator+=(double3)_WorldStressDirection[nb]*w;total+=w;}
+        if(total>0){double n=WorldSqrt(WorldDot(accumulator,accumulator));_WorldStressDirection[r]=(float3)(accumulator/(n==0?1e-10L:n));}
+    }
+}

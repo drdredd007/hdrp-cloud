@@ -9,7 +9,10 @@ namespace SpaceRunner.PlanetTerrain
     public static class SurfaceSnapshotCodec
     {
         const uint Magic = 0x31534653;
-        public const int FormatVersion = 5;
+        public const int FormatVersion = 10;
+        public const int OrogenBandsFormatVersion = 9;
+        public const int LandformFormatVersion = 8;
+        public const int RetainedFormatVersion = 7;
         public const int MaximumTiles = 65536, MaximumRegions = 4096, MaximumStamps = 65536;
         public const int MaximumSamples = 64 * 1024 * 1024;
 
@@ -17,7 +20,8 @@ namespace SpaceRunner.PlanetTerrain
         {
             if (writer == null || snapshot == null) throw new ArgumentNullException(writer == null ? nameof(writer) : nameof(snapshot));
             ValidateCounts(snapshot);
-            writer.Write(Magic); writer.Write(FormatVersion); SurfaceHashing.WriteRecipe(writer, snapshot.Recipe);
+            int format = snapshot.OrogenDetail != null ? (snapshot.OrogenDetail.Recipe.Morphology == 1 ? OrogenBandsFormatVersion : FormatVersion) : snapshot.Recipe.AlgorithmVersion == SurfaceRecipe.LandformAuthorityAlgorithmVersion ? LandformFormatVersion : RetainedFormatVersion;
+            writer.Write(Magic); writer.Write(format); SurfaceHashing.WriteRecipe(writer, snapshot.Recipe);
             SurfaceHashing.WriteHash(writer, snapshot.Revision.RecipeDigest); SurfaceHashing.WriteHash(writer, snapshot.Revision.BaseDigest);
             writer.Write(snapshot.Revision.Epoch); SurfaceHashing.WriteHash(writer, snapshot.ContentDigest);
             writer.Write(snapshot.CanonicalTileLevel); writer.Write(snapshot.Resolution);
@@ -65,6 +69,9 @@ namespace SpaceRunner.PlanetTerrain
                 foreach(var layer in resolved.Layers){SurfaceHashing.WriteProjection(writer,layer.Projection);writer.Write(layer.Resolution.x);writer.Write(layer.Resolution.y);writer.Write(layer.BlendMetres);writer.Write(layer.SourcePriority);SurfaceHashing.WriteAttributes(writer,layer.CopyWeights());}
                 writer.Write(resolved.StampLayers.Count);foreach(var layer in resolved.StampLayers)layer.Write(writer);
             }
+            writer.Write(snapshot.StructuralField != null);
+            if (snapshot.StructuralField != null) WriteStructure(writer, snapshot.StructuralField);
+            if (format >= 9) { writer.Write(snapshot.OrogenDetail != null); if (snapshot.OrogenDetail != null) WriteOrogenDetail(writer, snapshot.OrogenDetail, format); }
         }
 
         public static SurfaceSnapshot Read(BinaryReader reader)
@@ -162,7 +169,9 @@ namespace SpaceRunner.PlanetTerrain
                 resolved=new SurfaceResolvedMaterials(geometry,rules,materialTiles,materialLayers,stampLayers);
                 if(resolved.ContentDigest!=resolvedDigest)throw new InvalidDataException("Resolved material cache digest differs from its payload.");
             }
-            var snapshot = new SurfaceSnapshot(recipe, revision, level, resolution, tiles, detail, regions, stamps,materialProfile,resolved);
+            var structure = format >= 6 && reader.ReadBoolean() ? ReadStructure(reader, ref samples,format) : null;
+            var orogenDetail = format >= 9 && reader.ReadBoolean() ? ReadOrogenDetail(reader, ref samples, format) : null;
+            var snapshot = new SurfaceSnapshot(recipe, revision, level, resolution, tiles, detail, regions, stamps,materialProfile,resolved,structure,orogenDetail);
             if (snapshot.ContentDigest != digest) throw new InvalidDataException("Surface snapshot content digest differs from its payload.");
             return snapshot;
         }
@@ -182,6 +191,8 @@ namespace SpaceRunner.PlanetTerrain
                 if (region.HasMaterialWeights) AddSamples(ref count, checked(region.SampleCount * 4));
                 if (region.HasErosionData) AddSamples(ref count, checked(region.SampleCount * 4));
             }
+            if (snapshot.StructuralField != null) AddSamples(ref count, checked(6 * (snapshot.StructuralField.RawMacroResolution + 1) * (snapshot.StructuralField.RawMacroResolution + 1)));
+            if (snapshot.OrogenDetail != null) AddSamples(ref count, checked(snapshot.OrogenDetail.SampleCount * 12));
             if(snapshot.ResolvedMaterials!=null)
             {
                 if(snapshot.ResolvedMaterials.Tiles.Count>MaximumTiles||snapshot.ResolvedMaterials.Layers.Count>MaximumRegions)throw new InvalidDataException("Resolved material cache exceeds record limits.");
@@ -190,6 +201,151 @@ namespace SpaceRunner.PlanetTerrain
                 foreach(var layer in snapshot.ResolvedMaterials.Layers)AddSamples(ref count,checked(layer.SampleCount*4));
                 foreach(var layer in snapshot.ResolvedMaterials.StampLayers)AddSamples(ref count,checked(layer.SampleCount*4));
             }
+        }
+        static void WriteOrogenDetail(BinaryWriter writer, WorldOrogenDetailField field, int format)
+        {
+            var r = field.Recipe;
+            writer.Write(field.Version); writer.Write(r.Version); writer.Write(r.Enabled); writer.Write(r.Seed);
+            writer.Write(r.Strength); writer.Write(r.MinimumWavelengthMetres); writer.Write(r.ConditioningResolution);
+            writer.Write(r.MaximumAmplitudeMetres); writer.Write(r.ReliefFraction); writer.Write(r.CoastFadeMetres);
+            if (format >= 10) writer.Write(r.Morphology);
+            writer.Write(field.SourceRadius); writer.Write(field.SeaLevel); SurfaceHashing.WriteHash(writer, field.SourceBaseDigest);
+            writer.Write(field.Resolution); SurfaceHashing.WriteHash(writer, field.ContentDigest);
+            SurfaceHashing.WriteAttributes(writer, field.CopyGeometry()); SurfaceHashing.WriteAttributes(writer, field.CopyFlow()); SurfaceHashing.WriteAttributes(writer, field.CopyEnvironment());
+        }
+        static WorldOrogenDetailField ReadOrogenDetail(BinaryReader reader, ref int samples, int format)
+        {
+            if (reader.ReadInt32() != WorldOrogenDetailField.CurrentVersion || reader.ReadInt32() != WorldOrogenDetailRecipe.CurrentVersion)
+                throw new InvalidDataException("Unsupported World Orogen detail version.");
+            bool enabled = reader.ReadBoolean(); int seed = reader.ReadInt32();
+            double strength = reader.ReadDouble(), wavelength = reader.ReadDouble(); int conditioningResolution = reader.ReadInt32();
+            double amplitude = reader.ReadDouble(), reliefFraction = reader.ReadDouble(), coastFade = reader.ReadDouble();
+            int morphology = format >= 10 ? reader.ReadInt32() : 1;
+            var recipe = new WorldOrogenDetailRecipe(enabled, seed, strength, wavelength,
+                conditioningResolution, amplitude, reliefFraction, coastFade, morphology);
+            double radius = reader.ReadDouble(), sea = reader.ReadDouble(); var source = ReadHash(reader);
+            int resolution = reader.ReadInt32(); var digest = ReadHash(reader);
+            if (!recipe.IsValid || resolution != recipe.ConditioningResolution || !math.isfinite(radius) || radius <= 0 ||
+                !math.isfinite(sea) || sea <= -radius || !source.IsValid) throw new InvalidDataException("Invalid World Orogen conditioning header.");
+            int count = checked(6 * (resolution + 1) * (resolution + 1));
+            if (checked(count * 12) > MaximumSamples - samples) throw new InvalidDataException("World Orogen conditioning exceeds the sample budget.");
+            RequireRemaining(reader, checked((long)count * 48));
+            var geometry = ReadAttributes(reader, count, ref samples); var flow = ReadAttributes(reader, count, ref samples);
+            var environment = ReadAttributes(reader, count, ref samples);
+            var field = new WorldOrogenDetailField(recipe, radius, sea, source, resolution, geometry, flow, environment);
+            if (field.ContentDigest != digest) throw new InvalidDataException("World Orogen detail digest differs from its payload.");
+            return field;
+        }
+        static void WriteStructure(BinaryWriter writer, SurfaceStructuralField field)
+        {
+            writer.Write(field.MorphologyVersion); SurfaceHashing.WriteRecipe(writer, field.SourceRecipe);
+            SurfaceHashing.WriteHash(writer, field.SourceBaseDigest); SurfaceHashing.WriteHash(writer, field.ContentDigest);
+            writer.Write(field.RawMacroResolution); writer.Write(field.ShelfWidthMetres); writer.Write(field.BeltWidthMetres);
+            writer.Write(field.RegionalFeatureScaleMetres); writer.Write(field.CoastThresholdMetres); writer.Write(field.MountainFraction);
+            writer.Write(field.MinimumErosionResidual); writer.Write(field.MaximumErosionResidual);
+            writer.Write(field.Provinces.Count);
+            foreach (var province in field.Provinces)
+            {
+                SurfaceHashing.WriteVector(writer, province.Center); SurfaceHashing.WriteVector(writer, province.AngularMotion);
+                writer.Write(province.Continental); writer.Write(province.Buoyancy);
+            }
+            writer.Write(field.Boundaries.Count);
+            foreach (var edge in field.Boundaries)
+            {
+                writer.Write(edge.ProvinceA); writer.Write(edge.ProvinceB); writer.Write(edge.StartVertex); writer.Write(edge.EndVertex);
+                SurfaceHashing.WriteVector(writer, edge.Start); SurfaceHashing.WriteVector(writer, edge.End); writer.Write(edge.Convergence);
+            }
+            int count = checked(6 * (field.RawMacroResolution + 1) * (field.RawMacroResolution + 1)); writer.Write(count);
+            for (int i = 0; i < count; i++) writer.Write(field.RawMacroAt(i));
+            if(field.DrainageField!=null)WriteDrainage(writer,field.DrainageField);
+            if(field.LandformField!=null)WriteLandform(writer,field.LandformField);
+        }
+        static SurfaceStructuralField ReadStructure(BinaryReader reader, ref int samples,int format)
+        {
+            int morphology=reader.ReadInt32();
+            if(morphology<1||morphology>3||(morphology==2&&format<7)||(morphology==3&&format<8))throw new InvalidDataException("Unsupported captured structural authority.");
+            int schema = reader.ReadInt32(), algorithm = reader.ReadInt32(); var style = (SurfaceStyle)reader.ReadInt32(); int seed = reader.ReadInt32();
+            double radius = reader.ReadDouble();
+            double sea = reader.ReadDouble(), minimum = reader.ReadDouble(), maximum = reader.ReadDouble();
+            var source = new SurfaceRecipe(seed, style, radius, minimum, maximum, sea, algorithm, schema);
+            var baseDigest = ReadHash(reader); var digest = ReadHash(reader); int resolution = reader.ReadInt32();
+            if (!source.IsValid || algorithm != (morphology==1?SurfaceRecipe.StructuralAuthorityAlgorithmVersion:morphology==2?SurfaceRecipe.DrainageAuthorityAlgorithmVersion:SurfaceRecipe.LandformAuthorityAlgorithmVersion) || !CubeSurface.ValidResolution(resolution) || resolution > 512)
+                throw new InvalidDataException("Invalid captured structural grid before allocation.");
+            double shelf = reader.ReadDouble(), belt = reader.ReadDouble(), feature = reader.ReadDouble(), coast = reader.ReadDouble(), mountain = reader.ReadDouble();
+            double minResidual = reader.ReadDouble(), maxResidual = reader.ReadDouble();
+            int count = ReadCount(reader, 64); if (count < 8) throw new InvalidDataException("Invalid structural province count.");
+            RequireRemaining(reader, (long)count * 57); var provinces = new SurfaceGeologicalProvince[count];
+            for (int i = 0; i < count; i++) provinces[i] = new SurfaceGeologicalProvince(ReadVector(reader), ReadVector(reader), reader.ReadBoolean(), reader.ReadDouble());
+            count = ReadCount(reader, 186); if (count != 3 * provinces.Length - 6) throw new InvalidDataException("Incomplete structural edge graph.");
+            RequireRemaining(reader, (long)count * 72); var edges = new SurfaceGeologicalBoundary[count];
+            for (int i = 0; i < count; i++)
+            {
+                int a = reader.ReadInt32(), b = reader.ReadInt32(), first = reader.ReadInt32(), last = reader.ReadInt32();
+                var start = ReadVector(reader); var end = ReadVector(reader); double convergence = reader.ReadDouble();
+                if (a < 0 || b <= a || b >= provinces.Length) throw new InvalidDataException("Invalid structural adjacency.");
+                edges[i] = new SurfaceGeologicalBoundary(a, b, first, last, start, end, convergence, provinces[a].Continental, provinces[b].Continental);
+            }
+            var raw = ReadSamples(reader, checked(6 * (resolution + 1) * (resolution + 1)), ref samples);
+            var drainage=morphology==2?ReadDrainage(reader,source):null;
+            var landform=morphology==3?ReadLandform(reader,source):null;
+            var field = new SurfaceStructuralField(source, baseDigest, resolution, raw, provinces, edges, shelf, belt, feature, coast, mountain, minResidual, maxResidual,drainageField:drainage,landformField:landform);
+            if (field.ContentDigest != digest) throw new InvalidDataException("Captured structural payload digest differs from its manifest.");
+            return field;
+        }
+        static void WriteDrainage(BinaryWriter writer,SurfaceDrainageField field)
+        {
+            writer.Write(SurfaceDrainageField.CurrentVersion);SurfaceHashing.WriteHash(writer,field.ContentDigest);
+            writer.Write(field.CoastInfluenceMetres);writer.Write(field.Landmasses.Count);
+            foreach(var mass in field.Landmasses)
+            {SurfaceHashing.WriteVector(writer,mass.Center);SurfaceHashing.WriteVector(writer,mass.Right);SurfaceHashing.WriteVector(writer,mass.Forward);writer.Write(mass.FirstVertex);writer.Write(mass.VertexCount);}
+            writer.Write(field.CoastVertices.Count);foreach(var p in field.CoastVertices){writer.Write(p.x);writer.Write(p.y);}
+            writer.Write(field.Nodes.Count);foreach(var node in field.Nodes)
+            {SurfaceHashing.WriteVector(writer,node.Direction);writer.Write(node.BedHeight);writer.Write(node.DrainageArea);writer.Write(node.HillslopeWidth);writer.Write(node.DivideHeight);writer.Write(node.Parent);writer.Write(node.Outlet);writer.Write(node.StrahlerOrder);}
+        }
+        static SurfaceDrainageField ReadDrainage(BinaryReader reader,SurfaceRecipe recipe)
+        {
+            if(reader.ReadInt32()!=SurfaceDrainageField.CurrentVersion)throw new InvalidDataException("Unsupported captured catchment authority.");
+            var digest=ReadHash(reader);double influence=reader.ReadDouble();int count=ReadCount(reader,SurfaceDrainageField.MaximumLandmasses);
+            if(count<1)throw new InvalidDataException("Captured coast needs a landmass.");RequireRemaining(reader,count*80L);
+            var masses=new SurfaceCoastLandmass[count];
+            for(int i=0;i<count;i++)masses[i]=new SurfaceCoastLandmass(ReadVector(reader),ReadVector(reader),ReadVector(reader),reader.ReadInt32(),reader.ReadInt32());
+            count=ReadCount(reader,SurfaceDrainageField.MaximumCoastVertices);RequireRemaining(reader,count*16L);var vertices=new double2[count];
+            for(int i=0;i<count;i++)vertices[i]=new double2(reader.ReadDouble(),reader.ReadDouble());
+            count=ReadCount(reader,SurfaceDrainageField.MaximumNodes);RequireRemaining(reader,count*68L);var nodes=new SurfaceDrainageNode[count];
+            for(int i=0;i<count;i++)nodes[i]=new SurfaceDrainageNode(ReadVector(reader),reader.ReadDouble(),reader.ReadDouble(),reader.ReadDouble(),reader.ReadDouble(),reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32());
+            var field=new SurfaceDrainageField(recipe,masses,vertices,nodes,coastInfluenceMetres:influence);
+            if(field.ContentDigest!=digest)throw new InvalidDataException("Captured drainage payload digest differs from its manifest.");
+            return field;
+        }
+        static void WriteLandform(BinaryWriter writer,SurfaceLandformField field)
+        {
+            writer.Write(SurfaceLandformField.CurrentVersion);SurfaceHashing.WriteHash(writer,field.ContentDigest);
+            writer.Write(field.Controls.Count);writer.Write(field.Channels.Count);writer.Write(field.Divides.Count);writer.Write(field.Cells.Count);writer.Write(field.CellDivideReferenceCount);
+            foreach(var c in field.Controls){SurfaceHashing.WriteVector(writer,c.Direction);SurfaceHashing.WriteVector(writer,c.Gradient);writer.Write(c.Height);writer.Write(c.SupportMetres);writer.Write(c.VariationLimit);}
+            foreach(var c in field.Channels){writer.Write(c.Control);writer.Write(c.Parent);writer.Write(c.Outlet);writer.Write(c.Strahler);writer.Write(c.Area);writer.Write(c.RiseScale);}
+            foreach(var d in field.Divides){writer.Write(d.Control);writer.Write(d.FirstChannel);writer.Write(d.SecondChannel);writer.Write(d.Flags);}
+            foreach(var c in field.Cells){SurfaceHashing.WriteKey(writer,c.Key);writer.Write(c.Channel);writer.Write(c.FirstDivide);writer.Write(c.DivideCount);}
+            for(int i=0;i<field.CellDivideReferenceCount;i++)writer.Write(field.CellDivideAt(i));
+        }
+        static SurfaceLandformField ReadLandform(BinaryReader reader,SurfaceRecipe recipe)
+        {
+            if(reader.ReadInt32()!=SurfaceLandformField.CurrentVersion)throw new InvalidDataException("Unsupported captured landform authority.");
+            var digest=ReadHash(reader);int controlCount=ReadCount(reader,SurfaceLandformField.MaximumControls),channelCount=ReadCount(reader,SurfaceLandformField.MaximumCells);
+            int divideCount=ReadCount(reader,SurfaceLandformField.MaximumControls),cellCount=ReadCount(reader,SurfaceLandformField.MaximumCells),refCount=ReadCount(reader,8*SurfaceLandformField.MaximumCells);
+            long authority=SurfaceLandformField.EstimateAuthorityBytes(controlCount,channelCount,divideCount,cellCount,refCount);
+            if(controlCount<6||channelCount!=cellCount||cellCount<6||authority+SurfaceLandformField.MaximumIndexNodes*32L+SurfaceLandformField.MaximumReferences*4L>SurfaceLandformField.MaximumResidentBytes)
+                throw new InvalidDataException("Captured landform counts exceed authority/index admission before allocation.");
+            RequireRemaining(reader,authority-512);
+            var controls=new SurfaceLandformControl[controlCount];var channels=new SurfaceLandformChannel[channelCount];var divides=new SurfaceLandformDivide[divideCount];
+            var cells=new SurfaceLandformCell[cellCount];var refs=new int[refCount];
+            for(int i=0;i<controls.Length;i++){var d=ReadVector(reader);var g=ReadVector(reader);controls[i]=new SurfaceLandformControl(d,reader.ReadDouble(),g,reader.ReadDouble(),reader.ReadDouble());}
+            for(int i=0;i<channels.Length;i++)channels[i]=new SurfaceLandformChannel(reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32(),reader.ReadDouble(),reader.ReadDouble());
+            for(int i=0;i<divides.Length;i++)divides[i]=new SurfaceLandformDivide(reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32());
+            for(int i=0;i<cells.Length;i++){var key=new SurfaceTileKey(reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32());cells[i]=new SurfaceLandformCell(key,reader.ReadInt32(),reader.ReadInt32(),reader.ReadInt32());}
+            for(int i=0;i<refs.Length;i++)refs[i]=reader.ReadInt32();
+            var field=new SurfaceLandformField(recipe,controls,channels,divides,cells,refs);
+            if(field.ContentDigest!=digest)throw new InvalidDataException("Captured landform authority differs from its content digest.");
+            return field;
         }
         static float[] ReadSamples(BinaryReader reader, int expected, ref int samples)
         {

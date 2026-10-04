@@ -1,0 +1,776 @@
+// Port of the exact per-region loops in elevation.js cc2662b4, GPL-3.0-only.
+#pragma target 5.0
+#include "../WorldOrogenMath.hlsl"
+#include "../WorldOrogenAuxNoise.hlsl"
+#include "../WorldOrogenConstants.hlsl"
+StructuredBuffer<float3> _WorldPositions;
+StructuredBuffer<uint> _WorldNeighborOffsets,_WorldNeighbors,_WorldPlate;
+int _WorldRegionCount;
+int _WorldDispatchOffset;
+StructuredBuffer<double> _WorldScalars,_PlateBaseHeight;
+RWStructuredBuffer<float> _WorldElevation;
+StructuredBuffer<float> r_subductFactor,r_stress,r_basinFactor,r_tectonicActivity,r_t_foldBelt,r_t_craton,r_t_basin,r_noiseAmp,r_mantleNorm;
+StructuredBuffer<uint> r_boundaryType,r_isOcean,r_hasOcean,r_bothOcean,r_t_plateau,coastConvergent;
+StructuredBuffer<float> dist_mountain,dist_ocean,dist_coastline,dist_coast,dist_coast_land,dBdry,coastStressMax,coastSubductMax,riftDist,ridgeDist,fractureDist,backArcDist,backArcStress;
+RWStructuredBuffer<float> dl_base,dl_tectonic,dl_interior,dl_ocean,dl_coastal,dl_margins,dl_backArc,dl_orogenicPower,dl_noise,dl_uniformNoise,dl_dynamicTopo;
+#define maxStress (_WorldScalars[0])
+#define scaleFactor (_WorldScalars[1])
+#define noiseMag (_WorldScalars[2])
+#define interiorBand (_WorldScalars[3])
+#define tectonicReach (_WorldScalars[4])
+#define plateauStart (_WorldScalars[5])
+#define ridgeSigmaBase (_WorldScalars[6])
+#define ridgePeakShift (_WorldScalars[7])
+#define ridgeExtent (_WorldScalars[8])
+#define maxCD (_WorldScalars[9])
+#define riftHalfWidth (_WorldScalars[10])
+#define ridgeHalfWidth (_WorldScalars[11])
+#define fractureHalfWidth (_WorldScalars[12])
+#define baStart (_WorldScalars[13])
+#define baPeak (_WorldScalars[14])
+#define baEnd (_WorldScalars[15])
+#define numRegions _WorldRegionCount
+#define r_elevation _WorldElevation
+#define r_plate _WorldPlate
+#define adjOffset _WorldNeighborOffsets
+#define adjList _WorldNeighbors
+#define Infinity asdouble(0u,0x7ff00000u)
+double WorldRound(double x){return WorldFloor(x+.5L);}
+double WorldMod(double x,double y){return x-(double)(int)(x/y)*y;}
+StructuredBuffer<uint> _FoldPermutation,_RiftPermutation,_CoastPermutation,_IslandPermutation,_CoastWarpPermutation,_AddPermutation,_SubtractPermutation;
+StructuredBuffer<uint> _BasinPermutation;
+double BaseFbm(double x,double y,double z,double octaves=5,double persistence=2.0L/3.0L){return WorldAuxFbm(_WorldNoisePermutation,x,y,z,(int)octaves,persistence);}
+double BaseRidged(double x,double y,double z,double octaves=6,double lacunarity=2,double gain=.5L,double offset=1){return WorldAuxRidged(_WorldNoisePermutation,x,y,z,(int)octaves,lacunarity,gain,offset);}
+double BaseNoise(double x,double y,double z){return WorldOrogenNoise3D(double3(x,y,z));}
+double FoldFbm(double x,double y,double z,double o=5,double p=2.0L/3.0L){return WorldAuxFbm(_FoldPermutation,x,y,z,(int)o,p);}
+double FoldRidged(double x,double y,double z,double o=6,double l=2,double g=.5L,double f=1){return WorldAuxRidged(_FoldPermutation,x,y,z,(int)o,l,g,f);}
+double RiftFbm(double x,double y,double z,double o=5,double p=2.0L/3.0L){return WorldAuxFbm(_RiftPermutation,x,y,z,(int)o,p);}
+double RiftRidged(double x,double y,double z,double o=6,double l=2,double g=.5L,double f=1){return WorldAuxRidged(_RiftPermutation,x,y,z,(int)o,l,g,f);}
+double CoastFbm(double x,double y,double z,double o=5,double p=2.0L/3.0L){return WorldAuxFbm(_CoastPermutation,x,y,z,(int)o,p);}
+double CoastRidged(double x,double y,double z,double o=6,double l=2,double g=.5L,double f=1){return WorldAuxRidged(_CoastPermutation,x,y,z,(int)o,l,g,f);}
+double IslandFbm(double x,double y,double z,double o=5,double p=2.0L/3.0L){return WorldAuxFbm(_IslandPermutation,x,y,z,(int)o,p);}
+double IslandRidged(double x,double y,double z,double o=6,double l=2,double g=.5L,double f=1){return WorldAuxRidged(_IslandPermutation,x,y,z,(int)o,l,g,f);}
+double CoastWarpFbm(double x,double y,double z,double o=5,double p=2.0L/3.0L){return WorldAuxFbm(_CoastWarpPermutation,x,y,z,(int)o,p);}
+double CoastWarpRidged(double x,double y,double z,double o=6,double l=2,double g=.5L,double f=1){return WorldAuxRidged(_CoastWarpPermutation,x,y,z,(int)o,l,g,f);}
+double AddFbm(double x,double y,double z,double o=5,double p=2.0L/3.0L){return WorldAuxFbm(_AddPermutation,x,y,z,(int)o,p);}
+double AddRidged(double x,double y,double z,double o=6,double l=2,double g=.5L,double f=1){return WorldAuxRidged(_AddPermutation,x,y,z,(int)o,l,g,f);}
+double SubtractFbm(double x,double y,double z,double o=5,double p=2.0L/3.0L){return WorldAuxFbm(_SubtractPermutation,x,y,z,(int)o,p);}
+double SubtractRidged(double x,double y,double z,double o=6,double l=2,double g=.5L,double f=1){return WorldAuxRidged(_SubtractPermutation,x,y,z,(int)o,l,g,f);}
+
+#pragma kernel BasinPersonality
+RWStructuredBuffer<float> _BasinOutput,_ActivityOutput,_FoldOutput,_CratonOutput,_BasinWeightOutput,_NoiseAmpOutput;
+RWStructuredBuffer<uint> _PlateauOutput;
+[numthreads(64,1,1)]void BasinPersonality(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;
+    // Bound as a writable view in this kernel; classification subsequently sees the Float32 store.
+    if(r_isOcean[r]!=0){_BasinOutput[r]=0;return;}
+    double3 p=(double3)_WorldPositions[r];double raw=WorldAuxFbm(_BasinPermutation,p.x*1.8L+7.3L,p.y*1.8L+3.1L,p.z*1.8L+9.7L,2,.5L);
+    _BasinOutput[r]=(float)WorldClamp(.5L+raw*.6L,0,1);
+}
+#pragma kernel ClassifyTerrain
+[numthreads(64,1,1)]void ClassifyTerrain(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;
+    double sf_r=r_subductFactor[r],stressNorm=WorldMin(1,(double)r_stress[r]/maxStress),dm=dist_mountain[r];
+    double reach=sf_r>.5L?tectonicReach*(.35L+.3L*(1-sf_r)):tectonicReach;
+    double proximity=(dm==Infinity||dm>=reach)?0:1-dm/reach,activity=WorldMax(stressNorm,proximity*proximity*proximity);
+    _ActivityOutput[r]=(float)activity;_FoldOutput[r]=0;_CratonOutput[r]=0;_BasinWeightOutput[r]=0;_PlateauOutput[r]=0;_NoiseAmpOutput[r]=0;
+    if(r_isOcean[r]!=0)return;
+    double basin=r_basinFactor[r];_FoldOutput[r]=(float)WorldMin(1,stressNorm*3);
+    _CratonOutput[r]=(float)(WorldMax(0,1-activity*2.5L)*(1-basin));_BasinWeightOutput[r]=(float)(basin*WorldMax(0,1-activity*2));
+    bool plateau=sf_r<.45L&&dm!=Infinity&&dm>plateauStart;_PlateauOutput[r]=plateau?1:0;
+    double noiseActivity=WorldMin(1,stressNorm*4),suppression=plateau?WorldMax(.30L,1-activity*.30L):1;
+    _NoiseAmpOutput[r]=(float)((.15L+.45L*noiseActivity)*suppression*(1-(double)_BasinWeightOutput[r]*.25L)*(1-(double)_CratonOutput[r]*.12L));
+}
+
+#pragma kernel FinalizePostMetadata
+RWStructuredBuffer<float> _WorldDampen,_WorldOrogenic;
+[numthreads(64,1,1)]void FinalizePostMetadata(uint3 tid:SV_DispatchThreadID)
+{uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;_WorldDampen[r]=max(r_t_craton[r],r_t_basin[r]);_WorldOrogenic[r]=(float)WorldClamp((double)dl_orogenicPower[r]+.5L,0,1);}
+
+StructuredBuffer<float3> _WorldStressDirection;
+RWStructuredBuffer<float3> _WorldSmoothedDirection;
+#pragma kernel SmoothPhasorDirection
+[numthreads(64,1,1)]void SmoothPhasorDirection(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;_WorldSmoothedDirection[r]=_WorldStressDirection[r];double floorStress=.02L*maxStress;if((double)r_stress[r]<floorStress)return;
+    double w0=r_stress[r];double3 a=(double3)_WorldStressDirection[r]*w0;
+    [loop]for(uint i=adjOffset[r];i<adjOffset[r+1];i++){uint nb=adjList[i];if((double)r_stress[nb]<floorStress)continue;double w=r_stress[nb];a+=(double3)_WorldStressDirection[nb]*w;}
+    double n=WorldSqrt(WorldDot(a,a));if(n>1e-6L)_WorldSmoothedDirection[r]=(float3)(a/n);
+}
+struct WorldPhasorKernel {double3 position,direction;double phase,stress;};
+StructuredBuffer<WorldPhasorKernel> _WorldPhasorKernels;
+StructuredBuffer<int2> _WorldPhasorRanges;
+StructuredBuffer<int> _WorldPhasorReferences;
+StructuredBuffer<uint> _PhasorWarpPermutation;
+RWStructuredBuffer<float> dl_phasor;
+#pragma kernel PhasorRidges
+[numthreads(32,1,1)]void PhasorRidges(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;dl_phasor[r]=0;if(r_isOcean[r]!=0)return;double elev=r_elevation[r];if(elev<.005L)return;
+    double3 p=(double3)_WorldPositions[r];const double wavelength=55.0L/6371.0L,bandwidth=180.0L/6371.0L;double frequency=1/wavelength,invBw2=-.5L/(bandwidth*bandwidth),cutoff=9*bandwidth*bandwidth;
+    double3 warp;
+    warp.x=WorldAuxFbm(_PhasorWarpPermutation,p.x*110+17.3L,p.y*110+28.4L,p.z*110+9.1L,5,.5L)*.006L;
+    warp.y=WorldAuxFbm(_PhasorWarpPermutation,p.x*110+5.2L,p.y*110+33.6L,p.z*110+22.8L,5,.5L)*.006L;
+    warp.z=WorldAuxFbm(_PhasorWarpPermutation,p.x*110+11.7L,p.y*110+6.9L,p.z*110+41.5L,5,.5L)*.006L;
+    double3 phasePosition=p+warp;double lat=WorldAsin(WorldClamp(p.y,-1,1)),lon=WorldAtan2(p.x,p.z);
+    int row=(int)WorldClamp(WorldFloor((lat+WorldPi*.5L)/WorldPi*36),0,35),col=(int)WorldClamp(WorldFloor((lon+WorldPi)/(2*WorldPi)*72),0,71);
+    int search=(int)WorldMax(1,-WorldFloor(-3*bandwidth/(WorldPi/36)));double re=0,im=0,envelopeSum=0;
+    [loop]for(int di=-search;di<=search;di++)
+    {int bi=row+di;if(bi<0||bi>=36)continue;[loop]for(int dj=-search;dj<=search;dj++)
+    {int bj=(int)((uint)(col+dj+72)%72u);int2 range=_WorldPhasorRanges[bi*72+bj];[loop]for(int ci=0;ci<range.y;ci++)
+    {WorldPhasorKernel k=_WorldPhasorKernels[_WorldPhasorReferences[range.x+ci]];double3 delta=p-k.position;double chordSq=WorldDot(delta,delta);if(chordSq>cutoff)continue;double envelope=WorldExp(chordSq*invBw2);if(envelope<.01L)continue;double phase=2*WorldPi*frequency*WorldDot(phasePosition,k.direction)+k.phase;re+=envelope*WorldCos(phase);im+=envelope*WorldSin(phase);envelopeSum+=envelope;}}}
+    if(envelopeSum<.02L)return;
+    double centered=WorldAtan2(im,re)/(2*WorldPi)+.3L,elevGate=WorldMin(1,(elev-.005L)/.08L),fold=.05L+.95L*(double)r_t_foldBelt[r];
+    double oro=(double)dl_orogenicPower[r]+.5L,subduct=r_subductFactor[r],gate=subduct<=.55L?1:(subduct>=.92L?0:1-WorldSmooth((subduct-.55L)/(.92L-.55L)));
+    double contribution=centered*.5L*elevGate*fold*gate*oro*oro;r_elevation[r] = (float)((double)r_elevation[r] + (contribution));dl_phasor[r]=(float)contribution;
+}
+
+#pragma kernel DynamicTopography
+[numthreads(64,1,1)]void DynamicTopography(uint3 tid:SV_DispatchThreadID)
+{uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double m=r_mantleNorm[r];r_elevation[r] = (float)((double)r_elevation[r] + (m>0?m*.035L:m*.025L));}
+#pragma kernel PeakCompression
+[numthreads(64,1,1)]void PeakCompression(uint3 tid:SV_DispatchThreadID)
+{uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double e=r_elevation[r];if(e>0)r_elevation[r] = (float)((float)WorldPow(e,.9L));}
+#pragma kernel IsostaticAdjustment
+[numthreads(64,1,1)]void IsostaticAdjustment(uint3 tid:SV_DispatchThreadID)
+{uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double e=r_elevation[r];r_elevation[r] = (float)((float)(e-WorldAbs(e)*e*.07L));}
+StructuredBuffer<uint> _WorldLandRank,_WorldSeaReachable;
+StructuredBuffer<double> _WorldHypsometry;
+#pragma kernel HypsometricRemap
+[numthreads(64,1,1)]void HypsometricRemap(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;uint i=_WorldLandRank[r];double count=_WorldHypsometry[0],minimum=_WorldHypsometry[1],range=_WorldHypsometry[2];if(i==0xffffffffu||count<=1||range<=.01L)return;
+    double rank=(double)i/(count-1),target;
+    if(rank<.60L)target=.25L*(rank/.60L);
+    else if(rank<.85L)target=.25L+.35L*((rank-.60L)/(.85L-.60L));
+    else {double t=(rank-.85L)/(1-.85L);target=(.25L+.35L)+(1-.25L-.35L)*WorldPow(t,.7L);}
+    double targetHeight=minimum+target*range;r_elevation[r] = (float)((float)((double)r_elevation[r]*(1-.40L)+targetHeight*.40L));
+}
+#pragma kernel FillInteriorSeas
+[numthreads(64,1,1)]void FillInteriorSeas(uint3 tid:SV_DispatchThreadID)
+{uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;if(r_isOcean[r]==0&&_WorldSeaReachable[r]==0&&r_elevation[r]<=0)r_elevation[r] = (float)(.005f);}
+
+StructuredBuffer<uint> _ArcMacroPermutation,_ArcPermutation,_VolcanoPermutation,_HotspotPermutation,_HotspotWarpPermutation,_LipWarpPermutation;
+RWStructuredBuffer<double> _WorldArcScores;
+RWStructuredBuffer<double3> _WorldVolcanoScores;
+#pragma kernel EdificeCandidateMetadata
+[numthreads(32,1,1)]void EdificeCandidateMetadata(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double3 p=(double3)_WorldPositions[r];double stress=WorldMin(1,(double)r_stress[r]/maxStress);
+    _WorldArcScores[r]=WorldAuxFbm(_ArcMacroPermutation,p.x*4,p.y*4,p.z*4,3,.5L)+stress*.25L;
+    double score=stress+.3L*WorldAuxNoise(_VolcanoPermutation,p*8);
+    double height=.15L*(.5L+stress)*(.7L+.6L*WorldAuxNoise(_VolcanoPermutation,p*10));
+    double sigma=.003L*(.6L+.8L*WorldAuxNoise(_VolcanoPermutation,p*5+double3(17.3L,9.1L,4.7L)));
+    _WorldVolcanoScores[r]=double3(score,height,sigma);
+}
+StructuredBuffer<float> _WorldArcDistance,_WorldArcStress;
+#pragma kernel IslandArcs
+[numthreads(32,1,1)]void IslandArcs(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double d=_WorldArcDistance[r],maximum=WorldMax(5,WorldRound(7*scaleFactor));if(d<1||d>maximum)return;
+    double3 p=(double3)_WorldPositions[r];double peak=WorldMax(2,2*scaleFactor),sigma=WorldMax(2,2*scaleFactor),q=(d-peak)/sigma;
+    double weight=WorldExp(-.5L*q*q),n=WorldAuxRidged(_ArcPermutation,p.x*5,p.y*5,p.z*5,2,2,.5L,1);if(n<=.8L)return;
+    double excess=(n-.8L)/(1-.8L),peakNoise=WorldAuxRidged(_ArcPermutation,p.x*36+13.7L,p.y*36+27.1L,p.z*36+5.3L,3,2,.5L,1),factor=.5L+(double)_WorldArcStress[r];
+    double uplift=excess*2.3L*weight*factor+peakNoise*peakNoise*1.65L*weight*factor;
+    if(r_isOcean[r]!=0)uplift=WorldMin(uplift,WorldMax(0,-(double)r_elevation[r]+.6L));r_elevation[r] = (float)((double)r_elevation[r] + (uplift));
+}
+struct WorldVolcano {double3 position;double height,sigma,inverseSigmaSquared;};
+StructuredBuffer<WorldVolcano> _WorldVolcanos;
+StructuredBuffer<int2> _WorldVolcanoRanges;
+StructuredBuffer<int> _WorldVolcanoReferences;
+RWStructuredBuffer<float> _WorldHotspot;
+#pragma kernel VolcanicArcs
+[numthreads(32,1,1)]void VolcanicArcs(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double3 p=(double3)_WorldPositions[r];double lat=WorldAsin(WorldClamp(p.y,-1,1)),lon=WorldAtan2(p.x,p.z);
+    int row=(int)WorldClamp(WorldFloor((lat+WorldPi*.5L)/WorldPi*36),0,35),col=(int)WorldClamp(WorldFloor((lon+WorldPi)/(2*WorldPi)*72),0,71);double uplift=0;
+    [loop]for(int di=-1;di<=1;di++){int bi=row+di;if(bi<0||bi>=36)continue;[loop]for(int dj=-1;dj<=1;dj++){int bj=(int)((uint)(col+dj+72)%72u);int2 range=_WorldVolcanoRanges[bi*72+bj];[loop]for(int ci=0;ci<range.y;ci++)
+    {WorldVolcano v=_WorldVolcanos[_WorldVolcanoReferences[range.x+ci]];double dotValue=WorldDot(p,v.position);if(dotValue<.9999L)continue;double squared=WorldMax(0,2*(1-dotValue)),gauss=WorldExp(squared*v.inverseSigmaSquared);if(gauss>.01L)uplift+=v.height*gauss;}}}
+    if(uplift>.001L){r_elevation[r] = (float)((double)r_elevation[r] + (uplift));_WorldHotspot[r] = (float)((double)_WorldHotspot[r] + (uplift));}
+}
+struct WorldDome {double3 position,u,v;double strength,sigma,cosPeak,cosSwell,invPeak,invSwell,swellStrength,stretch,calderaDepth,invCaldera,age;double3 riftAngles;uint riftCount,hasCaldera;};
+// The source captures at most three rift angles. Explicit components avoid FXC's
+// forced unrolling of dynamic double-vector indexing inside the catalog loop.
+double WorldRiftLobe(double angle,double riftAngle)
+{double da=angle-riftAngle;da-=WorldRound(da/(2*WorldPi))*2*WorldPi;double c=WorldCos(da);return c*c*c*c;}
+struct WorldLip {double3 position,u,v;double sigma,height,aspect;};
+StructuredBuffer<WorldDome> _WorldDomes;
+StructuredBuffer<WorldLip> _WorldLips;
+StructuredBuffer<int2> _WorldDomeRanges;
+StructuredBuffer<int> _WorldDomeReferences;
+int _WorldLipCount;
+#pragma kernel HotspotDomes
+[numthreads(32,1,1)]void HotspotDomes(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double3 p=(double3)_WorldPositions[r];double lat=WorldAsin(WorldClamp(p.y,-1,1)),lon=WorldAtan2(p.x,p.z);
+    int row=(int)WorldClamp(WorldFloor((lat+WorldPi*.5L)/WorldPi*18),0,17),col=(int)WorldClamp(WorldFloor((lon+WorldPi)/(2*WorldPi)*36),0,35);bool nearPeak=false,contributes=false;
+    [loop]for(int scanDomeDi=-1;scanDomeDi<=1;scanDomeDi++){int bi=row+scanDomeDi;if(bi<0||bi>=18)continue;[loop]for(int scanDomeDj=-1;scanDomeDj<=1;scanDomeDj++){int bj=(int)((uint)(col+scanDomeDj+36)%36u);int2 range=_WorldDomeRanges[bi*36+bj];[loop]for(int scanDomeCi=0;scanDomeCi<range.y;scanDomeCi++){WorldDome d=_WorldDomes[_WorldDomeReferences[range.x+scanDomeCi]];double dotValue=WorldDot(d.position,p);if(dotValue>d.cosSwell)contributes=true;if(dotValue>d.cosPeak&&!nearPeak)nearPeak=true;}}}
+    if(!contributes)return;double shapeWarpSq=1;
+    if(nearPeak)
+    {
+        double3 warp;
+        warp.x=WorldAuxFbm(_HotspotWarpPermutation,p.x*8+5.1L,p.y*8+3.7L,p.z*8+9.2L,2,.5L)*.4L;
+        warp.y=WorldAuxFbm(_HotspotWarpPermutation,p.x*8+11.3L,p.y*8+7.1L,p.z*8+2.9L,2,.5L)*.4L;
+        warp.z=WorldAuxFbm(_HotspotWarpPermutation,p.x*8+1.7L,p.y*8+13.5L,p.z*8+6.4L,2,.5L)*.4L;
+        double shape=1+.40L*WorldAuxFbm(_HotspotPermutation,(p.x+warp.x)*20+3.2L,(p.y+warp.y)*20+7.8L,(p.z+warp.z)*20+1.5L,4,.5L);shapeWarpSq=shape*shape;
+    }
+    double uplift=0,swell=0,weightedAge=0,ageWeight=0;
+    [loop]for(int di=-1;di<=1;di++){int bi=row+di;if(bi<0||bi>=18)continue;[loop]for(int dj=-1;dj<=1;dj++){int bj=(int)((uint)(col+dj+36)%36u);int2 range=_WorldDomeRanges[bi*36+bj];[loop]for(int ci=0;ci<range.y;ci++)
+    {
+        WorldDome d=_WorldDomes[_WorldDomeReferences[range.x+ci]];double dotValue=WorldDot(d.position,p);
+        if(dotValue>d.cosSwell)swell+=d.swellStrength*WorldExp(2*(1-dotValue)*d.invSwell);if(dotValue<d.cosPeak)continue;
+        double3 off=p-dotValue*d.position;double par=WorldDot(off,d.u),perp=WorldDot(off,d.v),stretched=par*d.stretch,squared=stretched*stretched+perp*perp,gauss=WorldExp(squared*shapeWarpSq*d.invPeak);
+        if(d.riftCount>0&&gauss>.01L)
+        {
+            double angle=WorldAtan2(perp,par),maximumRift=0;
+            double factor=WorldRiftLobe(angle,d.riftAngles.x);if(factor>maximumRift)maximumRift=factor;
+            if(d.riftCount>1){factor=WorldRiftLobe(angle,d.riftAngles.y);if(factor>maximumRift)maximumRift=factor;}
+            if(d.riftCount>2){factor=WorldRiftLobe(angle,d.riftAngles.z);if(factor>maximumRift)maximumRift=factor;}
+            gauss*=1+.5L*maximumRift;
+        }
+        double peak=d.strength*gauss;uplift+=peak;weightedAge+=d.age*peak;ageWeight+=peak;
+        if(d.hasCaldera!=0)uplift-=d.calderaDepth*WorldExp(squared*d.invCaldera);
+    }}}
+    if(swell+uplift>.001L)
+    {
+        double age=ageWeight>0?weightedAge/ageWeight:0;
+        double textureWeight=.7L*WorldAuxRidged(_HotspotPermutation,p.x*12,p.y*12,p.z*12,4,2,.5L,1)+.3L*WorldAuxRidged(_HotspotPermutation,p.x*30,p.y*30,p.z*30,3,2,.5L,1);
+        double minimum=.4L+age*.3L,maximum=1.2L-age*.2L,volcanic=minimum+(maximum-minimum)*textureWeight;
+        double total=swell+WorldMax(0,uplift)*volcanic;r_elevation[r] = (float)((double)r_elevation[r] + (total));_WorldHotspot[r] = (float)((float)total);
+    }
+}
+#pragma kernel LargeIgneousProvinces
+[numthreads(32,1,1)]void LargeIgneousProvinces(uint3 tid:SV_DispatchThreadID)
+{
+    uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double3 p=(double3)_WorldPositions[r];double3 w;
+    w.x=p.x+WorldAuxNoise(_LipWarpPermutation,p*6)*.08L;
+    w.y=p.y+WorldAuxNoise(_LipWarpPermutation,p*6+40)*.08L;
+    w.z=p.z+WorldAuxNoise(_LipWarpPermutation,p*6+80)*.08L;w=WorldUnit(w);
+    [loop]for(int li=0;li<_WorldLipCount;li++)
+    {WorldLip lip=_WorldLips[li];double dotValue=WorldDot(w,lip.position);if(dotValue<.9L)continue;double3 d=w-lip.position*dotValue;double u=WorldDot(d,lip.u),v=WorldDot(d,lip.v),elliptical=u*u/(lip.aspect*lip.aspect)+v*v,gauss=WorldExp(elliptical*(-.5L/(lip.sigma*lip.sigma)));if(gauss>.01L){double contribution=lip.height*gauss;r_elevation[r] = (float)((double)r_elevation[r] + (contribution));_WorldHotspot[r] = (float)((double)_WorldHotspot[r] + (contribution));}}
+}
+
+#pragma kernel BuildSkeleton
+[numthreads(32,1,1)] void BuildSkeleton(uint3 tid:SV_DispatchThreadID){uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double warpScale=WARP_SCALE;int warpOctaves=numRegions>200000?2:3;double eps=1e-3L;
+
+        bool isOceanPlate = (r_isOcean[r]!=0);
+        double sf_r = r_subductFactor[r];
+        double stressNorm = WorldMin(1, r_stress[r] / maxStress);
+        uint btype = r_boundaryType[r];
+        double x = _WorldPositions[r].x, y = _WorldPositions[r].y, z = _WorldPositions[r].z;
+
+        
+        double sfAsym = sf_r;
+        double asymmetry = 1.0L + (sfAsym - 0.5L) * ASYMMETRY_FACTOR;
+        double a = dist_mountain[r] * asymmetry + eps;
+        double b = dist_ocean[r]     + eps;
+        double c = dist_coastline[r] + eps;
+        if (a == Infinity && b == Infinity) {
+            r_elevation[r] = (float)(0.1L * BASE_SCALE);
+        } else {
+            r_elevation[r] = (float)((1/a - 1/b) / (1/a + 1/b + 1/c) * BASE_SCALE);
+        }
+
+
+        
+        double wx = x + warpScale * BaseFbm(x + 5.3L, y + 1.7L, z + 3.1L, warpOctaves);
+        double wy = y + warpScale * BaseFbm(x + 8.1L, y + 2.9L, z + 7.3L, warpOctaves);
+        double wz = z + warpScale * BaseFbm(x + 1.4L, y + 6.2L, z + 4.8L, warpOctaves);
+
+        
+        double rawOro = BaseNoise(x * OROGENIC_FREQ + 33.7L, y * OROGENIC_FREQ + 11.2L, z * OROGENIC_FREQ + 22.9L);
+        double shaped = rawOro >= 0 ? WorldSqrt(rawOro) : -WorldSqrt(-rawOro);
+        double orogenicPower = WorldMax(0, WorldMin(1, 0.5L + 0.5L * shaped));
+        dl_orogenicPower[r] = (float)(orogenicPower - 0.5L);
+
+        if (!isOceanPlate) {
+            
+            uint pid = r_plate[r];
+            if (true) {
+                r_elevation[r] = (float)((double)r_elevation[r] + (_PlateBaseHeight[pid]));
+            }
+            double elevBefore = r_elevation[r];
+
+            if (sf_r > 0.5L && r_elevation[r] > 0) {
+                double suppression = (sf_r - 0.5L) * 2;
+                r_elevation[r] = (float)((double)r_elevation[r] * (1 - suppression * SUBDUCTING_SUPPRESSION));
+            }
+
+            
+            if (stressNorm > 0.01L) {
+                double stressMag = stressNorm * stressNorm * STRESS_MAG_SCALE * orogenicPower;
+                double uplift  = stressMag * (1 - sf_r);
+                double depress = stressMag * STRESS_DEPRESS_FRAC * sf_r;
+                double heightVar = STRESS_HEIGHT_VAR_BASE + STRESS_HEIGHT_VAR_SCALE * BaseFbm(x * 8 + 13.7L, y * 8 + 9.2L, z * 8 + 4.5L, 3);
+                r_elevation[r] = (float)((double)r_elevation[r] + ((uplift - depress) * heightVar));
+            }
+
+            
+            {
+                double dMtn = dist_mountain[r];
+                if (dMtn != Infinity && stressNorm < FORELAND_STRESS_THRESH && sf_r < BACK_ARC_SUBDUCT_THRESH) {
+                    int forelandWidth = (int)WorldMax(2, WorldRound(interiorBand * FORELAND_WIDTH_FRAC));
+                    if (dMtn < forelandWidth) {
+                        double t = dMtn / forelandWidth;
+                        double peakPos = FORELAND_PEAK_POS;
+                        double profile;
+                        if (t < peakPos) {
+                            double s = t / peakPos;
+                            profile = s * s * (3 - 2 * s);
+                        } else {
+                            double s = (t - peakPos) / (1 - peakPos);
+                            profile = 1 - s * s * (3 - 2 * s);
+                        }
+                        double stressFade = 1 - WorldMin(1, stressNorm / FORELAND_STRESS_THRESH);
+                        double basinDeepening = FORELAND_BASIN_DEEPENING_BASE + FORELAND_BASIN_DEEPENING_SCALE * r_basinFactor[r];
+                        r_elevation[r] = (float)((double)r_elevation[r] - (FORELAND_BASIN_DEPTH * profile * stressFade * basinDeepening));
+                    }
+                }
+            }
+
+            
+            {
+                double rd = riftDist[r];
+                if (rd != Infinity) {
+                    
+                    
+                    double widthRaw = RiftFbm(
+                        x * RIFT_WIDTH_VAR_FREQ + 91.3L,
+                        y * RIFT_WIDTH_VAR_FREQ + 17.6L,
+                        z * RIFT_WIDTH_VAR_FREQ + 64.2L, 2);
+                    double widthNorm = WorldMax(0, WorldMin(1, 0.5L + widthRaw));
+                    
+                    
+                    
+                    double floorScale = RIFT_FLOOR_VAR_MIN + (1 - RIFT_FLOOR_VAR_MIN) * widthNorm * widthNorm;
+                    double shoulderScale = RIFT_SHOULDER_VAR_MIN + (1 - RIFT_SHOULDER_VAR_MIN) * widthNorm;
+
+                    
+                    
+                    
+                    
+                    
+                    double plateOffset = WorldMod((double)r_plate[r] * 0.6180339887L,1) * 100;
+                    double asymRaw = RiftFbm(
+                        x * RIFT_WIDTH_ASYM_FREQ + plateOffset,
+                        y * RIFT_WIDTH_ASYM_FREQ + plateOffset * 1.7L,
+                        z * RIFT_WIDTH_ASYM_FREQ + plateOffset * 0.3L, 2);
+                    double asymNorm = WorldMax(0, WorldMin(1, 0.5L + asymRaw));
+                    double widthAsym = RIFT_WIDTH_ASYM_MIN + (1 - RIFT_WIDTH_ASYM_MIN) * asymNorm;
+
+                    
+                    
+                    
+                    
+                    double floorEnd = RIFT_FLOOR_MULT * scaleFactor * floorScale * widthAsym;
+                    double shoulderEnd = floorEnd + RIFT_SHOULDER_INNER_MULT * scaleFactor * shoulderScale * widthAsym;
+                    double localHalfWidth = floorEnd + RIFT_SHOULDER_OUTER_MULT * scaleFactor * shoulderScale * widthAsym;
+
+                    if (rd <= localHalfWidth + 0.5L) {
+                        double shoulderHeightNoise = RIFT_SHOULDER_HEIGHT_VAR_BASE
+                            + RIFT_SHOULDER_HEIGHT_VAR_SCALE * FoldFbm(
+                                x * RIFT_SHOULDER_HEIGHT_VAR_FREQ + 41.7L,
+                                y * RIFT_SHOULDER_HEIGHT_VAR_FREQ + 53.1L,
+                                z * RIFT_SHOULDER_HEIGHT_VAR_FREQ + 27.4L, 2);
+                        double riftEffect = 0;
+                        if (rd <= 0.5L) {
+                            riftEffect = RIFT_AXIS_DEPTH;
+                            riftEffect += RiftRidged(x * 8, y * 8, z * 8, 3) * RIFT_AXIS_VOLCANIC_AMP;
+                        } else if (rd <= floorEnd) {
+                            double t = floorEnd > 0 ? rd / floorEnd : 1;
+                            riftEffect = RIFT_FLOOR_DEPTH * (1 - t * RIFT_FLOOR_TAPER);
+                            riftEffect += RiftRidged(x * 8, y * 8, z * 8, 3) * RIFT_FLOOR_VOLCANIC_AMP * (1 - t);
+                        } else if (rd <= shoulderEnd) {
+                            riftEffect = RIFT_SHOULDER_UPLIFT * shoulderHeightNoise;
+                        } else if (localHalfWidth > shoulderEnd) {
+                            double t = (rd - shoulderEnd) / (localHalfWidth - shoulderEnd);
+                            double fadeT = WorldMin(1, WorldMax(0, t));
+                            double fade = fadeT * fadeT * (3 - 2 * fadeT);
+                            riftEffect = RIFT_SHOULDER_UPLIFT * (1 - fade) * RIFT_FADEOUT_RESIDUAL * shoulderHeightNoise;
+                        }
+                        r_elevation[r] = (float)((double)r_elevation[r] + (riftEffect));
+                    }
+                }
+            }
+
+            
+            {
+                double bad = backArcDist[r];
+                if (bad != Infinity && bad >= baStart) {
+                    double dMtn = dist_mountain[r];
+                    double orogenyFactor = (dMtn != Infinity && dMtn < bad) ? WorldMax(0, dMtn / bad) : 1.0L;
+                    double baEffect = 0;
+                    if (bad <= baPeak) {
+                        double t = (bad - baStart) / WorldMax(1, baPeak - baStart);
+                        double s = t * t * (3 - 2 * t);
+                        baEffect = -BACK_ARC_DEPTH * backArcStress[r] * s * orogenyFactor;
+                    } else if (bad <= baEnd) {
+                        double t = (bad - baPeak) / WorldMax(1, baEnd - baPeak);
+                        double s = t * t * (3 - 2 * t);
+                        baEffect = -BACK_ARC_DEPTH * backArcStress[r] * (1 - s) * orogenyFactor;
+                    }
+                    r_elevation[r] = (float)((double)r_elevation[r] + (baEffect));
+
+                }
+            }
+
+            
+            {
+                double dMtnRidge = dist_mountain[r];
+                if (dMtnRidge != Infinity && dMtnRidge < ridgeExtent && stressNorm > 0.01L) {
+                    double sfAsymmetry = WorldAbs(sf_r - 0.5L) * 2;
+                    double signedDist = sf_r > 0.5L ? dMtnRidge : -dMtnRidge;
+                    double peakPos = -sfAsymmetry * ridgePeakShift;
+                    double dFromPeak = signedDist - peakPos;
+                    double stressWidthMod = RIDGE_STRESS_WIDTH_BASE + RIDGE_STRESS_WIDTH_SCALE * stressNorm;
+                    double widthNoise = 1.0L + RIDGE_WIDTH_NOISE_AMP * FoldFbm(x * 3 + 44.1L, y * 3 + 22.7L, z * 3 + 11.3L, 2);
+                    double localRidgeSigma = ridgeSigmaBase * stressWidthMod * widthNoise;
+                    double sigma = dFromPeak > 0
+                        ? localRidgeSigma * (1 - sfAsymmetry * RIDGE_ASYM_SUBDUCT_NARROW)
+                        : localRidgeSigma * (1 + sfAsymmetry * RIDGE_ASYM_OVERRIDE_WIDEN);
+                    double safeSigma = WorldMax(0.5L, sigma);
+                    double gauss = WorldExp(-0.5L * ((dFromPeak / safeSigma)*(dFromPeak / safeSigma)));
+                    double ridgeHeightNoise = RIDGE_HEIGHT_VAR_BASE + RIDGE_HEIGHT_VAR_SCALE * FoldFbm(x * RIDGE_HEIGHT_VAR_FREQ + 17.3L, y * RIDGE_HEIGHT_VAR_FREQ + 31.7L, z * RIDGE_HEIGHT_VAR_FREQ + 8.9L, 2);
+                    r_elevation[r] = (float)((double)r_elevation[r] + (gauss * stressNorm * RIDGE_STRENGTH * ridgeHeightNoise));
+                }
+            }
+
+
+            double tectonicActivity = r_tectonicActivity[r];
+            double dMtnFold = dist_mountain[r];
+
+            
+            double lcd = dist_coast_land[r];
+            if (lcd < Infinity) {
+                double mountainBoost = 0;
+                if (dMtnFold != Infinity && sf_r < BACK_ARC_SUBDUCT_THRESH && dMtnFold < lcd) {
+                    double proximity = WorldMax(0, 1 - dMtnFold / WorldMax(1, tectonicReach));
+                    mountainBoost = proximity * interiorBand * MOUNTAIN_BOOST_FRAC;
+                }
+                double effectiveLcd = lcd + mountainBoost;
+
+                double tDown = WorldMin(effectiveLcd / interiorBand, 1);
+                double sDown = tDown * tDown * (3 - 2 * tDown);
+                double tUp = WorldMin(effectiveLcd / (interiorBand * INTERIOR_UPLIFT_RAMP_FRAC), 1);
+                double sUp = tUp * tUp * (3 - 2 * tUp);
+                double bf = r_basinFactor[r];
+                double interiorBase = INTERIOR_BASE_SHIELD * (1 - bf) + INTERIOR_BASE_BASIN * bf;
+                double interiorUplift = interiorBase + tectonicActivity * INTERIOR_TECTONIC;
+                double coastalDepression = COASTAL_DEPRESSION * (1 - bf * COASTAL_DEPRESSION_BASIN_REDUCE);
+                double baseBias = coastalDepression * (1 - sDown) + interiorUplift * sUp;
+                double mod = 1.0L + INTERIOR_UPLIFT_MOD_AMP * BaseFbm(x * 2 + 19.3L, y * 2 + 7.6L, z * 2 + 13.1L, 2);
+                double bias = baseBias * mod;
+                r_elevation[r] = (float)((double)r_elevation[r] + (bias));
+
+            }
+
+            
+            if ((r_t_plateau[r]!=0) && tectonicActivity > 0.1L) {
+                double plateauBoost = PLATEAU_BOOST * tectonicActivity * (1 - sf_r);
+                r_elevation[r] = (float)((double)r_elevation[r] + (plateauBoost));
+
+            }
+
+            
+            {
+                int coastPlainWidth = (int)WorldMax(6, WorldRound(COASTAL_PLAIN_WIDTH_BASE * scaleFactor));
+                if (lcd < coastPlainWidth && dBdry[r] <= maxCD && coastConvergent[r]==0) {
+                    double t = lcd / coastPlainWidth;
+                    double fade = t * t * (3 - 2 * t);
+                    double suppressionStrength = PLAIN_SUPPRESSION_STRENGTH * (1 - fade);
+                    if (r_elevation[r] > PLAIN_TARGET) {
+                        double excess = r_elevation[r] - PLAIN_TARGET;
+                        double suppression = excess * suppressionStrength;
+                        r_elevation[r] = (float)((double)r_elevation[r] - (suppression));
+
+                    }
+                }
+            }
+
+            
+            
+            
+            
+            
+            
+            {
+                double rd = riftDist[r];
+                bool inRiftFloor = rd != Infinity &&
+                    rd <= RIFT_FLOOR_MULT * scaleFactor + 0.5L;
+                if (!inRiftFloor) {
+                    double floorRamp = WorldMin(1, lcd / (5 * scaleFactor));
+                    double minElev = INTERIOR_FLOOR * floorRamp;
+                    if (r_elevation[r] < minElev) r_elevation[r] = (float)(minElev);
+                }
+            }
+        } else {
+            
+            double dc = dist_coast[r];
+            bool isActiveMarginShelf = coastConvergent[r] == 1;
+            int shelfWidth = (int)(isActiveMarginShelf
+                ? WorldMax(2, WorldRound(SHELF_NARROW_BASE * scaleFactor))
+                : WorldMax(4, WorldRound(SHELF_WIDE_BASE * scaleFactor)));
+            int slopeWidth = (int)WorldMax(3, WorldRound(SLOPE_WIDTH_BASE * scaleFactor));
+            int totalMargin = shelfWidth + slopeWidth;
+
+            double oceanBase;
+            if (dc < shelfWidth) {
+                oceanBase = SHELF_DEPTH_START - SHELF_DEPTH_RANGE * (dc / shelfWidth);
+            } else if (dc < totalMargin) {
+                oceanBase = (SHELF_DEPTH_START - SHELF_DEPTH_RANGE) - SLOPE_DEPTH_RANGE * ((dc - shelfWidth) / slopeWidth);
+            } else {
+                oceanBase = ABYSS_BASE + BaseFbm(x * 2, y * 2, z * 2, 3) * ABYSS_NOISE_AMP;
+            }
+
+            r_elevation[r] = (float)(WorldMin(r_elevation[r], oceanBase));
+
+
+            bool isActiveMargin = coastConvergent[r] == 1;
+
+
+
+            double elevBeforeOcTec = r_elevation[r];
+
+            
+            double rd = ridgeDist[r];
+            if (rd != Infinity && rd <= ridgeHalfWidth) {
+                double t = rd / ridgeHalfWidth;
+                double ridgeFade = (1 - t) * (1 - t);
+                double ridgeNoise = BaseRidged(x * 3, y * 3, z * 3, 4);
+                double ridgeUplift = (RIDGE_UPLIFT_NOISE * ridgeNoise + RIDGE_UPLIFT_BASE) * ridgeFade;
+                r_elevation[r] = (float)((double)r_elevation[r] + (ridgeUplift));
+            }
+
+            
+            double fd = fractureDist[r];
+            if (fd != Infinity && fd <= fractureHalfWidth) {
+                double ft = fd / fractureHalfWidth;
+                double fractureFade = 1 - ft;
+                r_elevation[r] = (float)((double)r_elevation[r] - (FRACTURE_DEPTH * fractureFade));
+            }
+
+            
+            if (btype == 1) {
+                r_elevation[r] = (float)((double)r_elevation[r] - (TRENCH_BASE_DEPTH + TRENCH_STRESS_DEPTH * stressNorm));
+            }
+
+            
+            {
+                double bad = backArcDist[r];
+                if (bad != Infinity && bad >= baStart) {
+                    double dMtn = dist_mountain[r];
+                    double orogenyFactor = (dMtn != Infinity && dMtn < bad) ? WorldMax(0, dMtn / bad) : 1.0L;
+                    double baEffect = 0;
+                    if (bad <= baPeak) {
+                        double t = (bad - baStart) / WorldMax(1, baPeak - baStart);
+                        double s = t * t * (3 - 2 * t);
+                        baEffect = -BACK_ARC_DEPTH * backArcStress[r] * s * orogenyFactor;
+                    } else if (bad <= baEnd) {
+                        double t = (bad - baPeak) / WorldMax(1, baEnd - baPeak);
+                        double s = t * t * (3 - 2 * t);
+                        baEffect = -BACK_ARC_DEPTH * backArcStress[r] * (1 - s) * orogenyFactor;
+                    }
+                    r_elevation[r] = (float)((double)r_elevation[r] + (baEffect));
+
+                }
+            }
+
+
+            
+            if (r_elevation[r] > OCEAN_FLOOR_CLAMP) r_elevation[r] = (float)(OCEAN_FLOOR_CLAMP);
+        }
+    
+}
+
+#pragma kernel TectonicBandNoise
+[numthreads(32,1,1)] void TectonicBandNoise(uint3 tid:SV_DispatchThreadID){uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double warpScale=WARP_SCALE;int warpOctaves=numRegions>200000?2:3;
+
+        double x = _WorldPositions[r].x, y = _WorldPositions[r].y, z = _WorldPositions[r].z;
+        double wx = x + warpScale * BaseFbm(x + 5.3L, y + 1.7L, z + 3.1L, warpOctaves);
+        double wy = y + warpScale * BaseFbm(x + 8.1L, y + 2.9L, z + 7.3L, warpOctaves);
+        double wz = z + warpScale * BaseFbm(x + 1.4L, y + 6.2L, z + 4.8L, warpOctaves);
+
+        if ((r_isOcean[r]!=0)) {
+            
+            double ocf = CONTINENTAL_FREQ_MULT;
+            double oceanNoise = BaseFbm(wx * ocf, wy * ocf, wz * ocf) * noiseMag * OCEAN_NOISE_AMP;
+            r_elevation[r] = (float)((double)r_elevation[r] + (oceanNoise));
+
+            
+            
+            
+            
+            
+            if (r_elevation[r] > OCEAN_FLOOR_CLAMP && r_elevation[r] < ISLAND_PEAK_FLOOR) {
+                r_elevation[r] = (float)(OCEAN_FLOOR_CLAMP);
+            }
+            return;
+        }
+
+        double foldBelt = r_t_foldBelt[r];
+        double foldFreqMult = 1.0L + foldBelt * FOLD_FREQ_MULT_SCALE;
+        double continentalFreq = foldFreqMult * CONTINENTAL_FREQ_MULT;
+        double noiseScale = r_noiseAmp[r];
+
+        double continental = BaseFbm(wx * continentalFreq, wy * continentalFreq, wz * continentalFreq) * noiseMag;
+        double ridged      = BaseRidged(wx * continentalFreq, wy * continentalFreq, wz * continentalFreq) * noiseMag * RIDGED_NOISE_AMP;
+        double continentalMixed = continental * (1 - foldBelt) + ridged * foldBelt;
+
+        double regional = BaseFbm(
+            wx * DETAIL_NOISE_FREQ_MULT * foldFreqMult + 22.1L,
+            wy * DETAIL_NOISE_FREQ_MULT * foldFreqMult + 6.8L,
+            wz * DETAIL_NOISE_FREQ_MULT * foldFreqMult + 15.4L,
+            4, 0.5L
+        ) * noiseMag * DETAIL_NOISE_AMP;
+
+        double local = BaseFbm(
+            wx * FINE_NOISE_FREQ_MULT + 41.7L,
+            wy * FINE_NOISE_FREQ_MULT + 13.2L,
+            wz * FINE_NOISE_FREQ_MULT + 27.9L,
+            3, 0.5L
+        ) * noiseMag * FINE_NOISE_AMP;
+
+        double total = (continentalMixed + regional) * noiseScale + local * WorldSqrt(noiseScale);
+        r_elevation[r] = (float)((double)r_elevation[r] + (total));
+
+    
+}
+
+#pragma kernel DetailTexture
+[numthreads(32,1,1)] void DetailTexture(uint3 tid:SV_DispatchThreadID){uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double warpScale=WARP_SCALE;int warpOctaves=numRegions>200000?2:3;
+
+        if ((r_isOcean[r]!=0)) return;
+        double currentElev = r_elevation[r];
+        if (currentElev <= DISSECT_THRESHOLD) return;
+
+        double x = _WorldPositions[r].x, y = _WorldPositions[r].y, z = _WorldPositions[r].z;
+        double wx = x + warpScale * BaseFbm(x + 5.3L, y + 1.7L, z + 3.1L, warpOctaves);
+        double wy = y + warpScale * BaseFbm(x + 8.1L, y + 2.9L, z + 7.3L, warpOctaves);
+        double wz = z + warpScale * BaseFbm(x + 1.4L, y + 6.2L, z + 4.8L, warpOctaves);
+
+        double stressNorm = WorldMin(1, r_stress[r] / maxStress);
+        double elevExcess = currentElev - DISSECT_THRESHOLD;
+
+        
+        double dissectVal = BaseFbm(wx * 32 + 71.3L, wy * 32 + 44.8L, wz * 32 + 29.1L, 3, 0.5L);
+        double elevDrive = WorldMin(1, WorldSqrt(elevExcess) * DISSECT_ELEV_SCALE);
+        double dissectAmp = WorldSqrt(elevExcess) * WorldMax(elevDrive, stressNorm) * noiseMag * DISSECT_AMP;
+        double dissectContrib = dissectVal * dissectAmp;
+        r_elevation[r] = (float)((double)r_elevation[r] + (dissectContrib));
+
+
+        
+        double elevAfterDissect = r_elevation[r];
+        if (elevAfterDissect > SUMMIT_THRESHOLD && stressNorm > SUMMIT_STRESS_MIN) {
+            double excess = elevAfterDissect - SUMMIT_THRESHOLD;
+            double peakNoise = BaseRidged(wx * 36 + 91.3L, wy * 36 + 55.7L, wz * 36 + 38.2L, 3, 0.5L);
+            double spike = WorldMax(0, peakNoise - SUMMIT_SPIKE_OFFSET);
+            double peakContrib = spike * excess * WorldMax(stressNorm, SUMMIT_STRESS_FLOOR) * 1.0L;
+            r_elevation[r] = (float)((double)r_elevation[r] + (peakContrib));
+
+        }
+    
+}
+
+#pragma kernel CoastalDetail
+[numthreads(32,1,1)] void CoastalDetail(uint3 tid:SV_DispatchThreadID){uint r=tid.x+(uint)_WorldDispatchOffset;if(r>=(uint)numRegions)return;double coastRoughenDist=WorldMax(8,WorldRound(COAST_ROUGHEN_BASE*scaleFactor));double islandMaxDist=WorldMax(4,WorldRound(ISLAND_DIST_BASE*scaleFactor));
+
+        if (dBdry[r] > coastRoughenDist) return;
+        double x = _WorldPositions[r].x, y = _WorldPositions[r].y, z = _WorldPositions[r].z;
+        double t = dBdry[r] / coastRoughenDist;
+
+        double sn = WorldMin(1, WorldMax(coastStressMax[r], r_stress[r] / maxStress));
+
+        bool isSubductingOcean = (r_isOcean[r]!=0) && (coastConvergent[r]!=0) && coastSubductMax[r] > COAST_SUBDUCT_SUP_LOW;
+        double subSup = isSubductingOcean
+            ? WorldMin(1, (coastSubductMax[r] - COAST_SUBDUCT_SUP_LOW) / COAST_SUBDUCT_SUP_RANGE)
+            : 0;
+
+        double elevBeforeCoast = r_elevation[r];
+        bool isPassiveCoast = coastConvergent[r]==0;
+
+        
+        double falloff1 = (1 - t) * (1 - t);
+        double stressAmp1 = 1 + sn * 5;
+        double coastFreq = isPassiveCoast ? COAST_PASSIVE_FREQ : COAST_ACTIVE_FREQ;
+        double coastAmp  = isPassiveCoast ? COAST_PASSIVE_AMP  : COAST_ACTIVE_AMP;
+        double n1 = CoastFbm(x * coastFreq + 3.7L, y * coastFreq + 7.1L, z * coastFreq + 2.3L, 5, 0.55L);
+        double coastNoise1 = n1 * coastAmp * falloff1 * stressAmp1;
+        if (subSup > 0 && coastNoise1 > 0) coastNoise1 *= (1 - subSup);
+        r_elevation[r] = (float)((double)r_elevation[r] + (coastNoise1));
+
+        
+        double warpReach = isPassiveCoast ? COAST_WARP_PASSIVE_REACH : COAST_WARP_ACTIVE_REACH;
+        double falloffW = WorldMax(0, 1 - t * warpReach);
+        if (falloffW > 0) {
+            double warpAmt = COAST_WARP_AMT * falloffW * (1 + sn * 2);
+            double dwx = CoastWarpFbm(x * 3 + 11.3L, y * 3 + 4.7L, z * 3 + 8.2L, 3, 0.6L) * warpAmt;
+            double dwy = CoastWarpFbm(x * 3 + 2.9L,  y * 3 + 9.4L, z * 3 + 1.6L, 3, 0.6L) * warpAmt;
+            double dwz = CoastWarpFbm(x * 3 + 7.5L,  y * 3 + 0.3L, z * 3 + 5.9L, 3, 0.6L) * warpAmt;
+            double origN = BaseFbm(x, y, z) * noiseMag;
+            double warpN = BaseFbm(x + dwx, y + dwy, z + dwz) * noiseMag;
+            double warpDelta = (warpN - origN) * falloffW;
+            if (subSup > 0 && warpDelta > 0) warpDelta *= (1 - subSup);
+            r_elevation[r] = (float)((double)r_elevation[r] + (warpDelta));
+        }
+
+        
+        if ((r_isOcean[r]!=0) && r_elevation[r] > OCEAN_FLOOR_CLAMP && r_elevation[r] < ISLAND_PEAK_FLOOR) {
+            r_elevation[r] = (float)(OCEAN_FLOOR_CLAMP);
+        }
+
+        
+        if ((r_isOcean[r]!=0) && dBdry[r] > 0 && dBdry[r] <= islandMaxDist && subSup < ISLAND_SUBDUCT_MAX) {
+            double islandN = IslandFbm(x * ISLAND_FREQ + 5.1L, y * ISLAND_FREQ + 9.3L, z * ISLAND_FREQ + 2.7L, 4, 0.5L);
+            double threshold = ISLAND_THRESHOLD_BASE - sn * ISLAND_THRESHOLD_STRESS;
+            if (islandN > threshold) {
+                double excess = (islandN - threshold) / (1 - threshold);
+                double distFade = 1 - (dBdry[r] / islandMaxDist);
+                double peakN = IslandRidged(x * ISLAND_FREQ * 2.5L + 31.7L, y * ISLAND_FREQ * 2.5L + 17.3L, z * ISLAND_FREQ * 2.5L + 8.9L, 3, 0.5L);
+                double peakMask = peakN * peakN;
+                double bump = excess * excess * ISLAND_BUMP_AMP * (1 + sn * 2) * distFade * peakMask;
+                bump *= (1 - subSup / ISLAND_SUBDUCT_MAX);
+                if (bump + r_elevation[r] > ISLAND_PEAK_FLOOR) {
+                    r_elevation[r] = (float)((double)r_elevation[r] + (bump));
+                }
+            }
+        }
+
+    
+}
+
+#pragma kernel UniformLandNoiseChunk
+int _TerrainChunkStart,_TerrainChunkCount;
+[numthreads(1,1,1)] void UniformLandNoiseChunk(uint3 tid:SV_DispatchThreadID){double freq=UNIFORM_LAND_NOISE_FREQ,oct=UNIFORM_LAND_NOISE_OCTAVES,amp=UNIFORM_LAND_NOISE_AMP*noiseMag,mtnRampDist=WorldMax(4,WorldRound(20*scaleFactor)),halfFreq=freq*.5L,halfAmp=amp*.5L;
+[loop]for(uint r=(uint)_TerrainChunkStart;r<(uint)(_TerrainChunkStart+_TerrainChunkCount)&&r<(uint)numRegions;r++){
+
+        if ((r_isOcean[r]!=0) && r_elevation[r] <= 0) continue;
+
+        double ex = r_elevation[r];
+        double sum = 0, count = 0;
+        for (uint ni = adjOffset[r], niEnd = adjOffset[r + 1]; ni < niEnd; ni++) {
+            sum += WorldAbs(r_elevation[adjList[ni]] - ex);
+            count++;
+        }
+        double slopeVal = sum / ((uint)count | 1u);
+
+        double gradDamp = 1.0L / (1.0L + 4.0L * slopeVal);
+        double elev = ex > 0 ? ex : 0;
+        double elevT = elev < 0.3L ? elev / 0.3L : 1.0L;
+        double elevBoost = elevT * elevT * (3.0L - 2.0L * elevT);
+        double basinDamp = 1.0L - 0.6L * r_basinFactor[r];
+        double dm = dist_mountain[r];
+        double mtnT = dm == Infinity ? 0.0L : (dm < mtnRampDist ? 1.0L - dm / mtnRampDist : 0.0L);
+        double modulation = WorldMax(0.10L, gradDamp * elevBoost * basinDamp * (1.0L + 0.5L * mtnT * mtnT));
+
+        int i3 = 3 * r;
+        double x = _WorldPositions[r].x, y = _WorldPositions[r].y, z = _WorldPositions[r].z;
+        double addVal = AddFbm(x * halfFreq + 55.3L, y * halfFreq + 18.7L, z * halfFreq + 42.1L, oct) * amp;
+        double subVal = SubtractFbm(x * freq + 88.9L, y * freq + 33.4L, z * freq + 61.6L, oct) * halfAmp;
+        double uniformContrib = (addVal - subVal) * modulation;
+        r_elevation[r] = (float)((double)r_elevation[r] + (uniformContrib));
+
+    
+}}

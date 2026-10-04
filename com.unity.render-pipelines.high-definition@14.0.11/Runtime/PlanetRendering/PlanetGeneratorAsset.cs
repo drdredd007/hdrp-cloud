@@ -1,5 +1,6 @@
 using System;
 using Unity.Mathematics;
+using SpaceRunner.PlanetTerrain;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
@@ -9,6 +10,15 @@ namespace UnityEngine.Rendering.HighDefinition
         [HideInInspector] public int PlanetId=1;
         [Header("Surface")]
         public int Seed=7243;
+        public WorldOrogenSettings Orogen=new WorldOrogenSettings();
+        public WorldOrogenMapView MapView=WorldOrogenMapView.Terrain;
+        [Tooltip("0 selects a canonical base map resolution from the original graph detail. Generation detail remains independent.")]
+        public int BaseMapResolution;
+        public PlanetOrogenDetailSettings TerrainDetail = new PlanetOrogenDetailSettings();
+        [SerializeField,HideInInspector] WorldOrogenSettings publishedOrogen;
+        public WorldOrogenSettings PublishedOrogen=>publishedOrogen?.Clone();
+        public WorldOrogenSettings CaptureOrogen(){var value=(Orogen??new WorldOrogenSettings()).Clone();value.Seed=Seed;return value;}
+        public void RecordPublishedOrogen(WorldOrogenSettings value){publishedOrogen=value?.Clone();}
         public PlanetTerrainStyle TerrainStyle=PlanetTerrainStyle.EarthLike;
         public double Radius=6371000.0/3;
         public double Relief=6000;
@@ -18,6 +28,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetTerrainMaterialSettings NativeMaterialSettings;
         [Tooltip("Camera-owned native terrain coverage, geometry spacing and bounded preparation. These settings do not change collision sampling.")]
         public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
+        [Tooltip("Opaque static sea for signed EarthLike recipes. SeaLevel belongs to the immutable surface recipe; this does not change seabed collision.")]
+        public PlanetOceanSettings OceanSettings=PlanetOceanSettings.Default;
         [Tooltip("Optional deterministic GPU scatter. Collision interest is managed independently by the host.")]
         public PlanetScatterSettings ScatterSettings;
         public Vector3 Orientation=new Vector3(0,0,35);
