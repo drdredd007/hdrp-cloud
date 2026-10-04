@@ -61,6 +61,8 @@ namespace UnityEngine.Rendering.HighDefinition
         readonly Dictionary<int,int> groupSizes=new Dictionary<int,int>();
         PlanetSurfaceGpuData surfaceData;
         GraphicsBuffer vertices,indices,attributes,parentVertices,parentAttributes;
+        GraphicsBuffer periodicHeights;
+        uint4 periodicIdentity;
         int capacity;
         readonly Stack<int> free=new Stack<int>();
         readonly HashSet<int> used=new HashSet<int>();
@@ -127,6 +129,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public void GenerateFar(CommandBuffer cmd,int slot,in PlanetDefinition definition,PlanetPatchKey key)
         {
             var shader=Prepare(cmd,definition,slot,PlanetPatchLayout.Far,out int kernel);
+            if(definition.GeneratorVersion==4)cmd.SetComputeFloatParam(shader,"_PeriodicNormalStepMetres",(float)(2*definition.Radius/((1<<key.Level)*(double)Resolution)));
             double skirt=PlanetLodSelector.RenderedSkirtDepthMetres(definition,key,Resolution);
             cmd.SetComputeIntParam(shader,"_PatchFace",key.Face);cmd.SetComputeIntParam(shader,"_PatchLevel",key.Level);
             cmd.SetComputeIntParam(shader,"_PatchX",key.X);cmd.SetComputeIntParam(shader,"_PatchY",key.Y);
@@ -141,6 +144,14 @@ namespace UnityEngine.Rendering.HighDefinition
         public void GenerateLocal(CommandBuffer cmd,int slot,in PlanetDefinition definition,in PlanetSurfaceFrame frame,int2 key,double size)
         {
             var shader=Prepare(cmd,definition,slot,PlanetPatchLayout.Local,out int kernel);
+            if(definition.GeneratorVersion==4)
+            {
+                SetPeriodicVector(cmd,shader,"_PeriodicRight",frame.Right);
+                SetPeriodicVector(cmd,shader,"_PeriodicUp",frame.Up);
+                SetPeriodicVector(cmd,shader,"_PeriodicForward",frame.Forward);
+                double periodicRadius=math.length(frame.Position);
+                SetPeriodicPair(cmd,shader,"_PeriodicFrameRadiusAndHeight",periodicRadius,periodicRadius-definition.Radius);
+            }
             double radius=math.length(frame.Position);
             cmd.SetComputeVectorParam(shader,"_FrameRight",(Vector3)(float3)frame.Right);
             cmd.SetComputeVectorParam(shader,"_FrameUp",(Vector3)(float3)frame.Up);
@@ -188,7 +199,27 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             if(layout!=Layout)throw new InvalidOperationException($"This backend stores {Layout} patches.");
             if(vertices==null || !used.Contains(slot))throw new ArgumentOutOfRangeException(nameof(slot));
-            if(definition.GeneratorVersion==3)
+            if(definition.GeneratorVersion==4)
+            {
+                SelectGenerator(Resources.Load<ComputeShader>("PlanetPeriodicPatchGenerator"));
+                if(!generator)throw new InvalidOperationException("Periodic height patch generator is unavailable.");
+                if(farKernel<0){farKernel=generator.FindKernel("FarPatch");localKernel=generator.FindKernel("LocalPatch");}
+                kernel=layout==PlanetPatchLayout.Far?farKernel:localKernel;
+                if(!generator.IsSupported(kernel))throw new NotSupportedException("Periodic planetary height rendering requires double-precision compute support.");
+                ref var source=ref definition.PeriodicHeight.Value;
+                if(periodicHeights==null||!math.all(periodicIdentity==source.Identity))
+                {
+                    var values=new float[source.Samples.Length];for(int i=0;i<values.Length;i++)values[i]=source.Samples[i];
+                    periodicHeights?.Dispose();periodicHeights=new GraphicsBuffer(GraphicsBuffer.Target.Structured,values.Length,sizeof(float));
+                    periodicHeights.name="Periodic planet source heights";periodicHeights.SetData(values);periodicIdentity=source.Identity;
+                }
+                cmd.SetComputeBufferParam(generator,kernel,"_PeriodicHeights",periodicHeights);
+                cmd.SetComputeIntParam(generator,"_PeriodicWidth",source.Width);cmd.SetComputeIntParam(generator,"_PeriodicHeight",source.Height);
+                cmd.SetComputeVectorParam(generator,"_PeriodicParameters",new Vector4(source.TileMetres,source.HeightScaleMetres,0,0));
+                cmd.SetComputeFloatParam(generator,"_PeriodicNormalStepMetres",source.TileMetres/source.Width);
+                SetPeriodicPair(cmd,generator,"_PeriodicRadius",definition.Radius,0);
+            }
+            else if(definition.GeneratorVersion==3)
             {
                 if(surfaceData==null || surfaceData.IsDisposed || !surfaceData.Key.Equals(definition.Surface))
                 {var next=layout==PlanetPatchLayout.Far&&FilterRenderingDetail?PlanetSurfaceGpuData.AcquireForFiltering(definition):PlanetSurfaceGpuData.Acquire(definition);
@@ -270,8 +301,16 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public void Dispose()
         {
+            periodicHeights?.Dispose();periodicHeights=null;
             PlanetSurfaceGpuData.Release(surfaceData);surfaceData=null;
             vertices?.Dispose();indices?.Dispose();attributes?.Dispose();parentVertices?.Dispose();parentAttributes?.Dispose();vertices=null;indices=null;attributes=null;parentVertices=null;parentAttributes=null;capacity=0;free.Clear();used.Clear();
         }
+        static void SetPeriodicPair(CommandBuffer cmd,ComputeShader shader,string name,double a,double b)
+        {
+            ulong x=unchecked((ulong)BitConverter.DoubleToInt64Bits(a)),y=unchecked((ulong)BitConverter.DoubleToInt64Bits(b));
+            cmd.SetComputeIntParams(shader,name,unchecked((int)x),unchecked((int)(x>>32)),unchecked((int)y),unchecked((int)(y>>32)));
+        }
+        static void SetPeriodicVector(CommandBuffer cmd,ComputeShader shader,string name,double3 value)
+        {SetPeriodicPair(cmd,shader,name+"XY",value.x,value.y);SetPeriodicPair(cmd,shader,name+"Z",value.z,0);}
     }
 }

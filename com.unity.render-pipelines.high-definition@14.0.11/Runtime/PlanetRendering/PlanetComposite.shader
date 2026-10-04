@@ -26,6 +26,13 @@ Shader "SpaceRunner/Planet Composite"
             float _PlanetDebugView;
             // 1 when HDRP's resolved PhysicallyBasedSky describes this planet (see PlanetAtmosphere.Matches).
             float _PlanetAtmosphere;
+            TEXTURE2D(_PeriodicFarSolar);TEXTURE2D(_PeriodicNearSolar);
+            TEXTURE2D(_PeriodicFarShadow);TEXTURE2D(_PeriodicNearShadow);
+            SAMPLER(sampler_LinearClamp);
+            float _PeriodicTerrainShadowEnabled,_PeriodicTerrainShadowStrength;
+            float4x4 _PeriodicShadowInverseProjection;
+            float3 _PeriodicShadowCamera,_PeriodicShadowSunWorld;
+            float4 _PeriodicShadowBody;
             // Points this close to the sea-level sphere are shaded as "ground" by the sky tables,
             // which avoids the numerically unstable segment subtraction right at the horizon.
             #define PLANET_SEA_LEVEL_BAND 50.0
@@ -53,11 +60,12 @@ Shader "SpaceRunner/Planet Composite"
             {
                 if(_PlanetHasNativeCoverage>0&&LOAD_TEXTURE2D_X(_PlanetNativeCoverage,uint2(input.positionCS.xy)).r>0)return 0;
                 float4 far=LOAD_TEXTURE2D(_PlanetFarBuffer,uint2(input.positionCS.xy));
+                bool nearReceiver=false;
                 if(_PlanetHasNear>0)
                 {
                     float4 local=LOAD_TEXTURE2D(_PlanetNearBuffer,uint2(input.positionCS.xy));
                     // Local terrain replaces its coarse approximation wherever it covers the pixel.
-                    if(local.a>0){far=local;if(_PlanetDebugView>0)far.rgb*=float3(1,.25,.25);}
+                    if(local.a>0){far=local;nearReceiver=true;}
                 }
                 if(far.a<=0)return _PlanetDebugView>0?float4(0,1,0,1):0;
                 if(_PlanetHasAccumulatedDepth>0)
@@ -80,6 +88,26 @@ Shader "SpaceRunner/Planet Composite"
                     if(nearDistance<far.a)return 0;
                 }
                 float3 color=far.rgb;
+                if(_PeriodicTerrainShadowEnabled>0)
+                {
+                    float2 uv=input.positionCS.xy*_ScreenSize.zw;
+                    float visibility=nearReceiver?SAMPLE_TEXTURE2D_LOD(_PeriodicNearShadow,sampler_LinearClamp,uv,0).r:
+                        SAMPLE_TEXTURE2D_LOD(_PeriodicFarShadow,sampler_LinearClamp,uv,0).r;
+                    float3 solar=nearReceiver?LOAD_TEXTURE2D(_PeriodicNearSolar,uint2(input.positionCS.xy)).rgb:
+                        LOAD_TEXTURE2D(_PeriodicFarSolar,uint2(input.positionCS.xy)).rgb;
+                    // Apply the solid-body test at the actual full-resolution receiver as well. A sky texel
+                    // next to a terrain silhouette cannot leak sunlit mask values onto night-side microfacets.
+                    if(_PeriodicShadowBody.y>0)
+                    {
+                        float4 ray=mul(_PeriodicShadowInverseProjection,float4(uv.x*2-1,1-uv.y*2,.5,1));
+                        float3 receiver=normalize(_PeriodicShadowCamera+normalize(ray.xyz/ray.w)*far.a)*_PeriodicShadowBody.y;
+                        float b=dot(receiver,_PeriodicShadowSunWorld);
+                        float c=(_PeriodicShadowBody.y-_PeriodicShadowBody.x)*(_PeriodicShadowBody.y+_PeriodicShadowBody.x);
+                        if(b<0&&b*b>c)visibility=0;
+                    }
+                    color+=solar*lerp(1,visibility,_PeriodicTerrainShadowStrength);
+                }
+                if(nearReceiver&&_PlanetDebugView>0)color*=float3(1,.25,.25);
                 if(_PlanetAtmosphere>0 && _PlanetDebugView<=0)color=ApplyAtmosphere(color,input.positionCS.xy,far.a);
                 return float4(color,_PlanetHasAccumulatedDepth>0?_PlanetLayerWeight:1);
             }

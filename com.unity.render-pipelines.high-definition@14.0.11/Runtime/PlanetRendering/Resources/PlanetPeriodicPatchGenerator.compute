@@ -1,0 +1,100 @@
+#pragma kernel FarPatch
+#pragma kernel LocalPatch
+#pragma target 5.0
+
+// Independent periodic heightmap geometry; shares only the existing renderer's vertex ABI.
+StructuredBuffer<float> _PeriodicHeights;
+struct PlanetVertex { float3 position; float3 normal; float4 color; };
+RWStructuredBuffer<PlanetVertex> _PlanetVertices;
+uint _PlanetBaseVertex,_PlanetVertexCount;
+int _PlanetResolution,_PeriodicWidth,_PeriodicHeight;
+float4 _PeriodicParameters;
+float _PeriodicNormalStepMetres;
+uint4 _PeriodicRadius,_PeriodicRightXY,_PeriodicRightZ,_PeriodicUpXY,_PeriodicUpZ,_PeriodicForwardXY,_PeriodicForwardZ,_PeriodicFrameRadiusAndHeight;
+int _PatchFace,_PatchLevel,_PatchX,_PatchY,_LocalKeyX,_LocalKeyZ;
+float _PatchSkirtDepth,_LocalCellSize;
+
+double D(uint2 value){return asdouble(value.x,value.y);}
+double DotD(double3 a,double3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+double3 CrossD(double3 a,double3 b){return double3(a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x);}
+double FloorD(double x){int n=(int)x;return x<(double)n?(double)(n-1):(double)n;}
+double SqrtD(double x){double y=(double)sqrt((float)x);y=(y+x/y)*0.5L;y=(y+x/y)*0.5L;return (y+x/y)*0.5L;}
+double3 VectorD(uint4 xy,uint4 z){return double3(D(xy.xy),D(xy.zw),D(z.xy));}
+// Periodic texel-centre addressing produces only [-1,count], so one correction suffices.
+int Wrap(int value,int count){return value<0?value+count:value>=count?value-count:value;}
+float SamplePeriodic(double u,double v)
+{
+    double px=(u-FloorD(u))*_PeriodicWidth-0.5L,py=((1.0L-v)-FloorD(1.0L-v))*_PeriodicHeight-0.5L;
+    int x=(int)FloorD(px),y=(int)FloorD(py);
+    float tx=(float)(px-x),ty=(float)(py-y);
+    int x0=Wrap(x,_PeriodicWidth),x1=Wrap(x+1,_PeriodicWidth),y0=Wrap(y,_PeriodicHeight),y1=Wrap(y+1,_PeriodicHeight);
+    float top=lerp(_PeriodicHeights[y0*_PeriodicWidth+x0],_PeriodicHeights[y0*_PeriodicWidth+x1],tx);
+    float bottom=lerp(_PeriodicHeights[y1*_PeriodicWidth+x0],_PeriodicHeights[y1*_PeriodicWidth+x1],tx);
+    return lerp(top,bottom,ty)*_PeriodicParameters.y;
+}
+double HeightPeriodic(double3 direction)
+{
+    double3 p=direction*(D(_PeriodicRadius.xy)/(double)_PeriodicParameters.x);
+    double3 w=direction*direction;w*=w;w*=w;w*=w;w/=w.x+w.y+w.z;
+    return w.x*(double)SamplePeriodic(p.z,p.y)+w.y*(double)SamplePeriodic(p.x,p.z)+w.z*(double)SamplePeriodic(p.x,p.y);
+}
+double3 Unit(double3 v){return v/SqrtD(DotD(v,v));}
+double3 NormalPeriodic(double3 direction)
+{
+    double radius=D(_PeriodicRadius.xy);
+    double3 hint=abs(direction.y)<0.9L?double3(0,1,0):double3(1,0,0);
+    double3 tangent=Unit(CrossD(hint,direction)),bitangent=CrossD(direction,tangent);
+    double step=max((double)_PeriodicNormalStepMetres,(double)_PeriodicParameters.x/(double)_PeriodicWidth)/radius;
+    double3 a0=Unit(direction-tangent*step),a1=Unit(direction+tangent*step);
+    double3 b0=Unit(direction-bitangent*step),b1=Unit(direction+bitangent*step);
+    double3 a=radius*(a1-a0)+a1*HeightPeriodic(a1)-a0*HeightPeriodic(a0);
+    double3 b=radius*(b1-b0)+b1*HeightPeriodic(b1)-b0*HeightPeriodic(b0);
+    return Unit(CrossD(a,b));
+}
+double3 CubeDirection(double u,double v)
+{
+    double count=(double)(1<<_PatchLevel),a=2.0L*((double)_PatchX+u)/count-1.0L,b=2.0L*((double)_PatchY+v)/count-1.0L;
+    double3 cube;
+    if(_PatchFace==0)cube=double3(1,b,-a);
+    else if(_PatchFace==1)cube=double3(-1,b,a);
+    else if(_PatchFace==2)cube=double3(a,1,-b);
+    else if(_PatchFace==3)cube=double3(a,-1,b);
+    else if(_PatchFace==4)cube=double3(a,b,1);
+    else cube=double3(-a,b,-1);
+    return Unit(cube);
+}
+[numthreads(64,1,1)]
+void FarPatch(uint3 id:SV_DispatchThreadID)
+{
+    uint index=id.x;if(index>=_PlanetVertexCount)return;
+    uint resolution=(uint)_PlanetResolution,row=resolution+1,top=index;bool skirt=index>=row*row;
+    if(skirt)
+    {
+        uint local=index-row*row,edge=local/row,j=local%row;
+        top=edge==0?j:edge==1?j*row+resolution:edge==2?resolution*row+resolution-j:(resolution-j)*row;
+    }
+    double3 direction=CubeDirection((double)(top%row)/(double)resolution,(double)(top/row)/(double)resolution);
+    double3 pivot=CubeDirection(0.5L,0.5L);
+    double height=HeightPeriodic(direction);if(skirt)height-=(double)_PatchSkirtDepth;
+    PlanetVertex vertex;
+    vertex.position=(float3)((D(_PeriodicRadius.xy)*(direction-pivot)+direction*height)*0.001L);
+    vertex.normal=(float3)NormalPeriodic(direction);vertex.color=float4(0.55,0.55,0.55,1);
+    _PlanetVertices[_PlanetBaseVertex+index]=vertex;
+}
+[numthreads(64,1,1)]
+void LocalPatch(uint3 id:SV_DispatchThreadID)
+{
+    uint index=id.x;if(index>=_PlanetVertexCount)return;
+    uint row=(uint)_PlanetResolution+1;
+    double lx=((double)_LocalKeyX*(double)_PlanetResolution+(double)(index%row))*(double)_LocalCellSize;
+    double lz=((double)_LocalKeyZ*(double)_PlanetResolution+(double)(index/row))*(double)_LocalCellSize;
+    double3 right=VectorD(_PeriodicRightXY,_PeriodicRightZ),up=VectorD(_PeriodicUpXY,_PeriodicUpZ),forward=VectorD(_PeriodicForwardXY,_PeriodicForwardZ);
+    double rho=D(_PeriodicFrameRadiusAndHeight.xy),radius=D(_PeriodicRadius.xy);
+    double3 q=up*rho+right*lx+forward*lz,direction=Unit(q);
+    double3 delta=radius*(direction-up)+direction*HeightPeriodic(direction)-up*D(_PeriodicFrameRadiusAndHeight.zw);
+    double3 normal=NormalPeriodic(direction);
+    PlanetVertex vertex;
+    vertex.position=(float3)double3(DotD(delta,right),DotD(delta,up),DotD(delta,forward));
+    vertex.normal=(float3)double3(DotD(normal,right),DotD(normal,up),DotD(normal,forward));vertex.color=float4(0.55,0.55,0.55,1);
+    _PlanetVertices[_PlanetBaseVertex+index]=vertex;
+}

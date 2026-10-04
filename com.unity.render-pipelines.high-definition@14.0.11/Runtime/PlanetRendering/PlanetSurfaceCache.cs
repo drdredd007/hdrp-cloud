@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Unity.Mathematics;
+using Unity.Profiling;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
@@ -8,6 +9,9 @@ namespace UnityEngine.Rendering.HighDefinition
     // IPlanetPatchBackend (GPU in rendering), so lifecycle can be tested without a graphics device.
     public sealed class PlanetSurfaceCache : IDisposable
     {
+        static readonly ProfilerMarker UpdateMarker=new ProfilerMarker("PlanetTerrain.FarUpdate");
+        static readonly ProfilerMarker GenerateMarker=new ProfilerMarker("PlanetTerrain.FarGenerate");
+        static readonly ProfilerMarker PublishMarker=new ProfilerMarker("PlanetTerrain.CoverPublish");
         List<PlanetPatchKey> active=new List<PlanetPatchKey>();
         readonly Dictionary<PlanetPatchKey,int> slots=new Dictionary<PlanetPatchKey,int>();
         readonly Dictionary<PlanetPatchKey,int> stitch=new Dictionary<PlanetPatchKey,int>();
@@ -46,6 +50,7 @@ namespace UnityEngine.Rendering.HighDefinition
             =>Update(cmd,definition,camera,height,view.FieldOfView,view,requested);
         void Update(CommandBuffer cmd,PlanetDefinition definition,double3 camera,int height,float fov,PlanetLodView? view,PlanetLodSettings requested)
         {
+            using var profile=UpdateMarker.Auto();
             if(cmd==null || !definition.IsValid || !math.all(math.isfinite(camera)) || height<=0 || !math.isfinite(fov)||
                 view.HasValue&&!view.Value.IsValid)return;
             var settings=requested.Clamped;
@@ -54,7 +59,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(backend is PlanetGpuPatchBackend gpu&&gpu.FilterRenderingDetail&&definition.GeneratorVersion==3)
             {gpu.PrepareRegionalFiltering(definition);filterGeneration=gpu.FilteringGeneration;}
             if(discarded || !initialized || generated.Id!=definition.Id || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius ||
-                generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface)||lastFilterGeneration!=filterGeneration)
+                generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface)||!PlanetPeriodicHeight.SameSource(generated,definition)||lastFilterGeneration!=filterGeneration)
             {Restart(cmd,definition);lastFilterGeneration=filterGeneration;}
             double altitude=math.length(camera)-definition.Radius;
             int errorVersion=definition.GeneratorVersion==3?PlanetSurfaceDataRegistry.LodPreparationVersion(definition.Surface):0;
@@ -89,6 +94,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 pending=null;lastHeight=0;ReleaseObsolete();return;
             }
             // One complete covering set replaces another; camera motion cannot cancel pending generation forever.
+            using var publication=PublishMarker.Auto();
             active=pending;pending=null;
             var cover=new HashSet<PlanetPatchKey>(active);stitch.Clear();
             foreach(var key in active){int mask=PlanetLodSelector.CoarserEdges(cover,key);if(mask!=0)stitch.Add(key,mask);}
@@ -111,6 +117,7 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         void Generate(CommandBuffer cmd,in PlanetDefinition definition,PlanetPatchKey key)
         {
+            using var profile=GenerateMarker.Auto();
             int slot=backend.Acquire();slots.Add(key,slot);
             backend.GenerateFar(cmd,slot,definition,key);
         }

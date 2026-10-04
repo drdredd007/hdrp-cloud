@@ -1,0 +1,73 @@
+#pragma kernel TraceScreen
+#pragma kernel ProbeHeights
+#pragma kernel ProbeVisibility
+#pragma target 5.0
+Texture2D<float> _ShadowHeights;
+SamplerState sampler_ShadowHeights;
+Texture2D<float4> _ShadowColor;
+RWTexture2D<float> _ShadowMask;
+StructuredBuffer<float3> _ShadowProbeDirections;
+RWStructuredBuffer<float> _ShadowProbeHeights;
+int _ShadowProbeCount;
+float4 _ShadowSource,_ShadowTrace,_ShadowDimensions;
+float3 _ShadowSun,_ShadowCamera;
+float4x4 _ShadowInverseViewProjection,_ShadowWorldToLocal;
+int _ShadowSteps,_ShadowHorizon;
+float _ShadowInnerRadius;
+float Height(float3 direction)
+{
+    float3 p=direction*(_ShadowSource.x/_ShadowSource.y),w=direction*direction;w*=w;w*=w;w*=w;w/=w.x+w.y+w.z;
+    float h=0;
+    // Keep canonical addressing. Skip only numerically negligible projection weights.
+    if(w.x>1e-7)h+=w.x*_ShadowHeights.SampleLevel(sampler_ShadowHeights,float2(p.z,1-p.y),0);
+    if(w.y>1e-7)h+=w.y*_ShadowHeights.SampleLevel(sampler_ShadowHeights,float2(p.x,1-p.z),0);
+    if(w.z>1e-7)h+=w.z*_ShadowHeights.SampleLevel(sampler_ShadowHeights,float2(p.x,1-p.y),0);
+    return _ShadowSource.z*h;
+}
+float Trace(float3 up)
+{
+    float3 origin=up*(_ShadowSource.x+Height(up)+_ShadowTrace.y);
+    // The solid planet blocks the sun even when normal detail points a night-side facet toward it.
+    float b=dot(origin,_ShadowSun),c=dot(origin,origin)-_ShadowInnerRadius*_ShadowInnerRadius;
+    if(b<0&&b*b>c)return 0;
+    // Intersection with the outermost possible terrain sphere bounds the complete physical ray.
+    // Horizon mode has no user step/distance cutoff; the 8 m minimum advance bounds its work.
+    float outer=_ShadowSource.x+_ShadowSource.w+_ShadowTrace.y;
+    float exitDistance=max(0,-b+sqrt(max(0,b*b+outer*outer-dot(origin,origin))));
+    float limit=_ShadowHorizon!=0?exitDistance:min(_ShadowTrace.x,exitDistance);
+    int count=_ShadowHorizon!=0?(int)ceil(limit/8)+1:_ShadowSteps;
+    float distance=8,visibility=1;
+    [loop]for(int i=0;i<count&&distance<limit;i++)
+    {
+        float3 rayPosition=origin+_ShadowSun*distance;float radius=length(rayPosition),altitude=radius-_ShadowSource.x;
+        if(altitude>_ShadowSource.w+_ShadowTrace.y&&dot(rayPosition,_ShadowSun)>=0)break;
+        float gap=altitude-Height(rayPosition/radius);
+        if(gap<0)return 0;
+        if(_ShadowTrace.z>0)visibility=min(visibility,saturate(.5+gap/(2*distance*_ShadowTrace.z)));
+        distance+=clamp(gap/(_ShadowTrace.w+1),8,128);
+    }
+    return visibility;
+}
+[numthreads(8,8,1)]
+void TraceScreen(uint3 id:SV_DispatchThreadID)
+{
+    if(any(id.xy>=(uint2)_ShadowDimensions.zw))return;
+    // Reconstruct the ray at the exact depth texel centre, never at the reduced-resolution texel centre.
+    uint2 pixel=min((uint2)(((float2(id.xy)+.5)/_ShadowDimensions.zw)*_ShadowDimensions.xy),(uint2)_ShadowDimensions.xy-1);
+    float distance=_ShadowColor.Load(int3(pixel,0)).a;
+    // Visibility is a geometric property, independent of the normal/BRDF and current sunlight energy.
+    // A dark representative must not turn into an unoccluded neighbour when this mask is upsampled.
+    if(distance<=0)
+    {_ShadowMask[id.xy]=1;return;}
+    float2 uv=(float2(pixel)+.5)/_ShadowDimensions.xy;
+    float4 ray=mul(_ShadowInverseViewProjection,float4(uv.x*2-1,1-uv.y*2,.5,1));
+    float3 worldPosition=_ShadowCamera+normalize(ray.xyz/ray.w)*distance;
+    float3 localPosition=mul((float3x3)_ShadowWorldToLocal,worldPosition);
+    _ShadowMask[id.xy]=Trace(normalize(localPosition));
+}
+[numthreads(64,1,1)]
+void ProbeHeights(uint3 id:SV_DispatchThreadID)
+{if(id.x<(uint)_ShadowProbeCount)_ShadowProbeHeights[id.x]=Height(normalize(_ShadowProbeDirections[id.x]));}
+[numthreads(64,1,1)]
+void ProbeVisibility(uint3 id:SV_DispatchThreadID)
+{if(id.x<(uint)_ShadowProbeCount)_ShadowProbeHeights[id.x]=Trace(normalize(_ShadowProbeDirections[id.x]));}

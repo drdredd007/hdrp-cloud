@@ -1,11 +1,14 @@
 using System.Collections.Generic;
 using SpaceRunner.PlanetTerrain;
 using Unity.Mathematics;
+using Unity.Profiling;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
     public static class PlanetLodSelector
     {
+        static readonly ProfilerMarker SelectionMarker=new ProfilerMarker("PlanetTerrain.LodSelect");
+        static readonly ProfilerMarker BalanceMarker=new ProfilerMarker("PlanetTerrain.LodBalance");
         public const int MaximumSupportedLevel=16;
         /// <summary>Exact float parameter sent to the existing far generator, without changing its geometry.</summary>
         public static double RenderedSkirtDepthMetres(PlanetDefinition definition,PlanetPatchKey key,int resolution=32)
@@ -121,6 +124,14 @@ namespace UnityEngine.Rendering.HighDefinition
             double step=span/32;
             // Curvature term plus estimated relief variation; not a measured terrain error bound.
             double metres=definition.Radius*(1-math.cos(step))+definition.Relief*step*4;
+            if(definition.GeneratorVersion==4)
+            {
+                ref var source=ref definition.PeriodicHeight.Value;
+                double range=source.MaximumMetres-source.MinimumMetres;
+                // Conservative Lipschitz estimate for periodic bilinear sampling and the smooth projection weights.
+                double slope=source.MaximumSlope+96*range/definition.Radius;
+                metres=definition.Radius*(1-math.cos(step))+math.min(range,slope*definition.Radius*step);
+            }
             return metres*pixelsPerRadian/closest;
         }
         // PatchBudget bounds error-driven refinement; balancing can add a bounded number of leaves on top.
@@ -139,6 +150,7 @@ namespace UnityEngine.Rendering.HighDefinition
         static List<PlanetPatchKey> Select(PlanetDefinition definition,double3 camera,int height,float fieldOfView,PlanetLodView? view,
             PlanetLodSettings requested,out PlanetLodDiagnostics diagnostics,IReadOnlyList<PlanetPatchKey> previous)
         {
+            using var profile=SelectionMarker.Auto();
             var result=new List<PlanetPatchKey>();
             diagnostics=default;
             if(!definition.IsValid || !math.all(math.isfinite(camera)) || height<=0 || !math.isfinite(fieldOfView)||
@@ -153,6 +165,17 @@ namespace UnityEngine.Rendering.HighDefinition
             for(int face=0;face<6;face++)result.Add(new PlanetPatchKey(face,0,0,0));
             var blocked=new HashSet<PlanetPatchKey>();
             double pixelScale=height/(2*math.tan(math.radians(math.clamp(fieldOfView,1,179))*.5));
+            // Periodic source bounds, camera and view are immutable during this selection. Evaluate each
+            // candidate once; measured version-3 contexts can advance asynchronously and retain their path.
+            var periodicErrors=definition.GeneratorVersion==4?new Dictionary<PlanetPatchKey,double>():null;
+            HashSet<PlanetPatchKey> previousSplits=null;
+            if(periodicErrors!=null&&previous!=null)
+            {
+                previousSplits=new HashSet<PlanetPatchKey>();
+                foreach(var leaf in previous)
+                    for(int level=0;level<leaf.Level&&level<MaximumSupportedLevel;level++)
+                        previousSplits.Add(new PlanetPatchKey(leaf.Face,level,leaf.X>>(leaf.Level-level),leaf.Y>>(leaf.Level-level)));
+            }
             while(result.Count+3<=settings.PatchBudget)
             {
                 int best=-1;double score=1;
@@ -160,8 +183,15 @@ namespace UnityEngine.Rendering.HighDefinition
                 {
                     var key=result[i];if(key.Level>=settings.MaximumLevel||blocked.Contains(key))continue;
                     bool wasSplit=false;
-                    if(previous!=null)for(int j=0;j<previous.Count;j++)if(previous[j].Level>key.Level && Contains(key,previous[j])){wasSplit=true;break;}
-                    double error=Error(definition,key,camera,pixelScale,view,context,out bool complete,out bool pending,out bool bounded)/(settings.PixelError*(wasSplit?.7:1.2));
+                    if(periodicErrors!=null)wasSplit=previousSplits!=null&&previousSplits.Contains(key);
+                    else if(previous!=null)for(int j=0;j<previous.Count;j++)if(previous[j].Level>key.Level && Contains(key,previous[j])){wasSplit=true;break;}
+                    bool complete=true,pending=false,bounded=true;double measured;
+                    if(periodicErrors==null||!periodicErrors.TryGetValue(key,out measured))
+                    {
+                        measured=Error(definition,key,camera,pixelScale,view,context,out complete,out pending,out bounded);
+                        if(periodicErrors!=null)periodicErrors.Add(key,measured);
+                    }
+                    double error=measured/(settings.PixelError*(wasSplit?.7:1.2));
                     diagnostics.MeasurementIncomplete|=!complete;
                     diagnostics.PreparationPending|=pending;
                     if(!complete&&!bounded)continue; // Valid incomplete intervals refine under the same hard balanced leaf budget.
@@ -252,6 +282,7 @@ namespace UnityEngine.Rendering.HighDefinition
         // midpoint identifies it.
         public static void Balance(List<PlanetPatchKey> leaves)
         {
+            using var profile=BalanceMarker.Auto();
             var set=new HashSet<PlanetPatchKey>(leaves);
             var queue=new Queue<PlanetPatchKey>(leaves);
             while(queue.Count>0)

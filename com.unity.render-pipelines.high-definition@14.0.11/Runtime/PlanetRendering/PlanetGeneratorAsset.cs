@@ -24,6 +24,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public double Relief=6000;
         [Tooltip("Optional immutable signed terrain snapshot. Unassigned keeps the existing noise surface.")]
         public PlanetSurfaceDataAsset SurfaceData;
+        [Tooltip("Independent periodic heightmap source. Overrides the procedural generator and signed bake when assigned.")]
+        public PlanetPeriodicHeightAsset PeriodicHeightSource;
         [Tooltip("Optional native four-layer PBR palette. Unassigned retains the existing scaled procedural surface renderer.")]
         public PlanetTerrainMaterialSettings NativeMaterialSettings;
         [Tooltip("Camera-owned native terrain coverage, geometry spacing and bounded preparation. These settings do not change collision sampling.")]
@@ -44,6 +46,12 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             get
             {
+                if(PeriodicHeightSource)
+                {
+                    var blob=PeriodicHeightSource.PreviewBlob;
+                    return new PlanetDefinition {Id=PlanetId,Seed=Seed,GeneratorVersion=4,Radius=Radius,
+                        Relief=math.max(math.abs(blob.Value.MinimumMetres),math.abs(blob.Value.MaximumMetres)),PeriodicHeight=blob};
+                }
                 if(!SurfaceData)return new PlanetDefinition {Id=PlanetId,Seed=Seed,GeneratorVersion=(int)TerrainStyle,Radius=Radius,Relief=Relief};
                 if(!SurfaceData.TryCreateSnapshot(out var snapshot,out _))return default;
                 var recipe=snapshot.Recipe;

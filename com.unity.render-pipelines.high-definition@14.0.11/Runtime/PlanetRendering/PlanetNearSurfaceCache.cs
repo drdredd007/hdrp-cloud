@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Unity.Mathematics;
+using Unity.Profiling;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
@@ -8,6 +9,8 @@ namespace UnityEngine.Rendering.HighDefinition
     // IPlanetPatchBackend with the PlanetLocalPatch layout; colliders keep using PlanetLocalPatch on the CPU.
     public sealed class PlanetNearSurfaceCache : IDisposable
     {
+        static readonly ProfilerMarker UpdateMarker=new ProfilerMarker("PlanetTerrain.NearUpdate");
+        static readonly ProfilerMarker GenerateMarker=new ProfilerMarker("PlanetTerrain.NearGenerate");
         public const int PatchCount=16;
         public const double HalfSize=1024,PatchSize=512;
         readonly IPlanetPatchBackend backend;
@@ -35,12 +38,13 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public bool Covers(PlanetDefinition definition,double3 camera,double margin=0)
             => initialized && definition.IsValid && generated.Seed==definition.Seed && generated.Radius==definition.Radius && generated.Relief==definition.Relief &&
-                generated.GeneratorVersion==definition.GeneratorVersion && generated.Surface.Equals(definition.Surface) && Covers(camera,margin);
+                generated.GeneratorVersion==definition.GeneratorVersion && generated.Surface.Equals(definition.Surface) && PlanetPeriodicHeight.SameSource(generated,definition) && Covers(camera,margin);
         public void Update(CommandBuffer cmd,PlanetDefinition definition,double3 camera,int budget=PatchCount)
         {
+            using var profile=UpdateMarker.Auto();
             if(cmd==null || !definition.IsValid || !math.all(math.isfinite(camera)) || math.lengthsq(camera)<1)return;
             bool discarded=backend.Reserve(2*PatchCount);
-            if(discarded || !initialized || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius || generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface))
+            if(discarded || !initialized || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius || generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface)||!PlanetPeriodicHeight.SameSource(generated,definition))
             {Reset();generated=definition;initialized=true;}
             var local=Frame.ToLocal(camera);
             if(pending==null && (active.Count==0 || math.abs(local.x)>256 || math.abs(local.z)>256))
@@ -53,6 +57,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(pending==null)return;
             for(int i=0;i<math.clamp(budget,1,PatchCount) && pending.Count<PatchCount;i++)
             {
+                using var generation=GenerateMarker.Auto();
                 int slot=backend.Acquire();pending.Add(slot);
                 backend.GenerateLocal(cmd,slot,definition,pendingFrame,PatchKey(pending.Count-1),PatchSize);
             }

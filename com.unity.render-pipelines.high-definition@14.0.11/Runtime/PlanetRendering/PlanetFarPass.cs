@@ -45,6 +45,21 @@ namespace UnityEngine.Rendering.HighDefinition
         // Light the surface with HDRP directional lights when the camera has any, instead of LightDirection/LightLux.
         public bool UseSceneLights=true;
         public Quaternion CelestialLightRotation=Quaternion.identity;
+        readonly PlanetPeriodicTerrainShadows terrainShadows=new PlanetPeriodicTerrainShadows();
+        Light terrainShadowSun;
+        public PlanetPeriodicTerrainShadows TerrainShadows=>terrainShadows;
+        Vector3 TerrainSunDirection()
+        {
+            if(!UseSceneLights)return LightLux>0?LightDirection.normalized:Vector3.zero;
+            if(RenderSettings.sun&&RenderSettings.sun.isActiveAndEnabled&&RenderSettings.sun.type==LightType.Directional)terrainShadowSun=RenderSettings.sun;
+            if(!terrainShadowSun||!terrainShadowSun.isActiveAndEnabled)
+            {
+                terrainShadowSun=null;
+                foreach(var candidate in UnityEngine.Object.FindObjectsOfType<Light>())
+                    if(candidate.isActiveAndEnabled&&candidate.type==LightType.Directional&&(!terrainShadowSun||candidate.intensity>terrainShadowSun.intensity))terrainShadowSun=candidate;
+            }
+            return terrainShadowSun?CelestialLightRotation*(-terrainShadowSun.transform.forward):LightLux>0?LightDirection.normalized:Vector3.zero;
+        }
         public bool AtmosphereActive {get;private set;}
         // Diagnostics: 0 off; 1 without atmosphere: skirts magenta, uncovered layer pixels green, near-layer pixels tinted red.
         public int DebugView;
@@ -57,6 +72,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetLodSettings LodSettings=PlanetLodSettings.Default;
         public bool IsRefining=>geometry.IsRefining;
         public bool EnableLocalSurface;
+        public Texture2D PeriodicNormalSlopes;
+        public PlanetPeriodicSurfaceSettings PeriodicSurfaceSettings;
         public PlanetTerrainMaterialSettings NativeMaterialSettings;
         [NonSerialized] public Texture2DArray BaseMapOverride;
         public Texture2DArray BaseMapColour
@@ -168,6 +185,8 @@ namespace UnityEngine.Rendering.HighDefinition
             int width=ctx.hdCamera.actualWidth,height=ctx.hdCamera.actualHeight;
             var q=(double4)((quaternion)PlanetRotation).value;
             var localCamera=PlanetField.Rotate(new double4(-q.xyz,q.w),CameraPosition-Definition.Center);
+            var shadowSun=Definition.GeneratorVersion==4?TerrainSunDirection():Vector3.up;
+            terrainShadows.Prepare(Definition,Quaternion.Inverse(PlanetRotation)*shadowSun,shadowSun,PeriodicSurfaceSettings,properties);
             bool nativeCoverage=UsesNativeSurface&&nativeGeometry!=null&&nativeGeometry.DrawCoverage(ctx);
             bool hasSea=ocean.WantsRender(this);
             if((nativeCoverage||hasSea)&&LayerDepth==null)
@@ -203,6 +222,13 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             // The scaled layer uses its own projection/depth. Its alpha stores unscaled ray distance.
             var projection=GL.GetGPUProjectionMatrix(Matrix4x4.Perspective(Observer.fieldOfView,(float)width/height,.001f,Mathf.Max(30000,(float)((math.length(Definition.Center-CameraPosition)+Definition.Radius+Definition.Relief)*PlanetField.FarScale*1.1))),true);
+            // Construct reversed-Z depth directly. Converting float OpenGL-style depth
+            // cancels near/far terms for bodies tens of Mm away, clipping valid surfaces.
+            if(SystemInfo.usesReversedZBuffer)
+            {
+                double near=.001,far=math.max(30000,(math.length(Definition.Center-CameraPosition)+Definition.Radius+Definition.Relief)*PlanetField.FarScale*1.1);
+                projection.SetRow(2,new Vector4(0,0,(float)(near/(far-near)),(float)(near*far/(far-near))));
+            }
             // Keep HDRP's pixel rays, including lens shift and temporal jitter. Only
             // depth range differs in this scaled layer; a fresh symmetric projection
             // disagrees with sky/media reconstruction and moves surfaces between pixels.
@@ -211,6 +237,15 @@ namespace UnityEngine.Rendering.HighDefinition
             var view=Matrix4x4.Scale(new Vector3(1,1,-1))*Matrix4x4.Rotate(Quaternion.Inverse(Observer.transform.rotation));
             surface.SetMatrix("_FarViewProjection",projection*view);surface.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
             surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor.linear);surface.SetFloat("_PlanetLightLux",LightLux);
+            properties.SetFloat("_PeriodicNormalsEnabled",Definition.GeneratorVersion==4&&PeriodicNormalSlopes?1:0);
+            PlanetPeriodicSurfaceSettings.Bind(properties,PeriodicSurfaceSettings,Definition.GeneratorVersion==4,(float)Altitude);
+            if(Definition.GeneratorVersion==4)
+            {
+                if(PeriodicNormalSlopes)properties.SetTexture("_PeriodicNormalSlopes",PeriodicNormalSlopes);
+                properties.SetFloat("_PeriodicNormalCycles",(float)(Definition.Radius/Definition.PeriodicHeight.Value.TileMetres));
+                properties.SetMatrix("_PeriodicWorldToLocal",Matrix4x4.Rotate(Quaternion.Inverse(PlanetRotation)));
+                properties.SetMatrix("_PeriodicLocalToWorld",Matrix4x4.Rotate(PlanetRotation));
+            }
             properties.SetVector("_PlanetCenterRelative",(Vector3)centerRelative);
             WorldOrogenBaseMapBinding.Bind(properties,BaseMapColour,PlanetRotation,double3.zero,Definition.Radius);
             properties.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
@@ -231,7 +266,7 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             properties.SetFloat("_PlanetDebugView",DebugView);composite.SetFloat("_PlanetDebugView",DebugView);
             properties.SetInteger("_PlanetMainVertexCount",PlanetGpuPatchBackend.Row*PlanetGpuPatchBackend.Row);
-            ctx.cmd.SetRenderTarget(farBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
+            terrainShadows.SetLayerTarget(ctx.cmd,farBuffer,false);ctx.cmd.SetViewport(new Rect(0,0,width,height));
             // Unity-convention depth (clear 1, ZTest LEqual): Unity reverses both for reversed-Z platforms itself.
                 ctx.cmd.ClearRenderTarget(true,true,Color.clear,1);
             properties.SetBuffer("_PlanetVertices",farPatches.Vertices);
@@ -260,6 +295,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetInteger("_PlanetStitchMask",geometry.StitchMask(key));
                 ctx.cmd.DrawProcedural(farPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,farPatches.PatchIndexCount,1,properties);
             }
+            terrainShadows.TraceLayer(ctx.cmd,farBuffer,(projection*view).inverse,(Vector3)(float3)(CameraPosition-Definition.Center),Matrix4x4.Rotate(Quaternion.Inverse(PlanetRotation)),false);
             bool hasNear=EnableLocalSurface && !UsesNativeSurface && nearGeometry.Slots.Count>0 && Altitude<20000;
             if(hasNear)
             {
@@ -268,7 +304,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     ReleaseNearBuffer();nearBuffer=new RenderTexture(width,height,LayerColorFormat,LayerDepthFormat)
                     {name="Planet local surface color + metric ray distance",filterMode=FilterMode.Point};nearBuffer.Create();
                 }
-                ctx.cmd.SetRenderTarget(nearBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
+                terrainShadows.SetLayerTarget(ctx.cmd,nearBuffer,true);ctx.cmd.SetViewport(new Rect(0,0,width,height));
                 // Unity-convention depth (clear 1, ZTest LEqual): Unity reverses both for reversed-Z platforms itself.
                 ctx.cmd.ClearRenderTarget(true,true,Color.clear,1);
                 var frame=nearGeometry.Frame;
@@ -293,7 +329,9 @@ namespace UnityEngine.Rendering.HighDefinition
                     properties.SetInteger("_PlanetBaseVertex",slot*nearPatches.SlotVertexCount);
                     ctx.cmd.DrawProcedural(nearPatches.Indices,Matrix4x4.identity,surface,0,MeshTopology.Triangles,nearPatches.PatchIndexCount,1,properties);
                 }
+                terrainShadows.TraceLayer(ctx.cmd,nearBuffer,(nearProjection*view).inverse,(Vector3)(float3)(CameraPosition-Definition.Center),Matrix4x4.Rotate(Quaternion.Inverse(PlanetRotation)),true);
             }
+            terrainShadows.BindComposite(composite,hasNear);
             composite.SetFloat("_PlanetHasAccumulatedDepth",effectiveDepth!=null?1:0);
             composite.SetFloat("_PlanetLayerWeight",LayerWeight);
             if(effectiveDepth!=null)composite.SetTexture("_PlanetAccumulatedDepth",effectiveDepth.Current);
@@ -326,6 +364,6 @@ namespace UnityEngine.Rendering.HighDefinition
 
         protected override void Cleanup(){CancelSurfaceRevision();liveOwners.Remove(this);geometry.Dispose();nearGeometry.Dispose();nativeGeometry?.Dispose();nativeGeometry=null;scatter?.Dispose();scatter=null;nativeOwnedDepth?.Dispose();nativeOwnedDepth=null;neutralAttributes?.Dispose();neutralAttributes=null;
             activeFilter?.Dispose();activeFilter=null;retiredFilter?.Dispose();retiredFilter=null;
-            ocean.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
+            terrainShadows.Dispose();ocean.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
     }
 }

@@ -25,6 +25,23 @@ Shader "SpaceRunner/Planet Far Surface"
             float3 _PatchOffset, _PlanetLightDirection;
             float4 _PlanetLightColor;
             float _PlanetLightLux, _LayerToMeters;
+            TEXTURE2D(_PeriodicNormalSlopes);SAMPLER(sampler_PeriodicNormalSlopes);
+            float _PeriodicNormalsEnabled,_PeriodicNormalCycles;
+            float4x4 _PeriodicWorldToLocal,_PeriodicLocalToWorld;
+            #include "PlanetPeriodicSurface.hlsl"
+            float _PeriodicTerrainShadowEnabled;
+            float3 _PeriodicShadowSunWorld;
+            float3 PeriodicPixelNormal(float3 radialWorld)
+            {
+                float3 d=normalize(mul((float3x3)_PeriodicWorldToLocal,radialWorld));
+                float3 p=d*_PeriodicNormalCycles,w=d*d;w*=w;w*=w;w*=w;w/=w.x+w.y+w.z;
+                float2 sx=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.zy).rg;
+                float2 sy=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.xz).rg;
+                float2 sz=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.xy).rg;
+                float3 gradient=w.x*float3(0,sx.y,sx.x)+w.y*float3(sy.x,0,sy.y)+w.z*float3(sz.x,sz.y,0);
+                gradient-=d*dot(gradient,d);
+                return normalize(mul((float3x3)_PeriodicLocalToWorld,normalize(d-gradient)));
+            }
             // Planet centre relative to the camera in metres, world axes.
             float3 _PlanetCenterRelative;
             // 1 when HDRP's resolved PhysicallyBasedSky describes this planet (tables and constants are bound).
@@ -97,7 +114,8 @@ Shader "SpaceRunner/Planet Far Surface"
                 o.normal=mul((float3x3)_PlanetRotation,input.normal);o.color=input.color;o.skirt=vertexID>=(uint)_PlanetMainVertexCount?1:0;
                 o.masks=PlanetMaterialMasks(vertexID);return o;
             }
-            float4 PlanetFrag(PlanetVaryings input,uint primitiveID:SV_PrimitiveID):SV_Target
+            struct PlanetFragment {float4 color:SV_Target0;float4 solar:SV_Target1;};
+            PlanetFragment PlanetFrag(PlanetVaryings input,uint primitiveID:SV_PrimitiveID)
             {
                 // Read the whole indexed primitive: interpolated alpha could admit fragments
                 // of a triangle whose missing vertex was collapsed to a harmless finite position.
@@ -109,6 +127,7 @@ Shader "SpaceRunner/Planet Far Surface"
                 }
                 float3 normal=normalize(input.normal);
                 float3 radialUp=normalize(input.relative*_LayerToMeters-_PlanetCenterRelative);
+                if(_PeriodicNormalsEnabled>0)normal=PeriodicPixelNormal(radialUp);
                 float slope=1.0-saturate(dot(normal,radialUp));
                 float broad=FilteredDetail(input.detail/16.0);
                 float fine=FilteredDetail(input.detail);
@@ -116,6 +135,7 @@ Shader "SpaceRunner/Planet Far Surface"
                 float metallic=0,smoothness=.4;
                 // Exposed slopes are slightly lighter rock. Material detail never displaces collision geometry.
                 albedo=lerp(albedo,albedo*1.18,smoothstep(0.04,0.35,slope));
+                if(_PeriodicSurfaceEnabled>0)PeriodicSnowAndRock(radialUp,input.detail,normal,albedo,smoothness);
                 if(_PlanetTerrainPalette>0)
                 {
                     float3 normalPlanet=normalize(mul((float3x3)_PlanetRenderToLocal,normal));
@@ -126,10 +146,18 @@ Shader "SpaceRunner/Planet Far Surface"
                 }
                 if(_OrogenBaseColourEnabled>0)
                 {albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));normal=normalize(input.normal);metallic=0;smoothness=.4;}
+                if(_PlanetGlobalColorBlend>0)
+                {
+                    float3 globalColor=PlanetGlobalColor(radialUp);
+                    // Macro color remains at the surface; retain local material contrast and detail there.
+                    float3 localColor=albedo*globalColor/max(_PlanetGlobalColorReference.rgb,.01);
+                    float3 colored=lerp(localColor,globalColor,_PlanetGlobalColorDistanceBlend);
+                    albedo=lerp(albedo,saturate(colored),_PlanetGlobalColorBlend);
+                }
                 float3 brdf=albedo*INV_PI;
-                if(_PlanetTerrainPalette>0)brdf*=1-metallic;
+                if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)brdf*=1-metallic;
                 float3 viewDirection=normalize(-input.relative);
-                float3 radiance=0;
+                float3 radiance=0,solarRadiance=0;
                 uint directionalCount=_PlanetCelestialLightDataReady!=0?_PlanetCelestialLightCount:_DirectionalLightCount;
                 if(_PlanetUseSceneLights>0 && directionalCount>0)
                 {
@@ -161,29 +189,33 @@ Shader "SpaceRunner/Planet Far Surface"
                             if(_PlanetOwnAir<=0)irradiance*=EvaluateSunColorAttenuation(dot(up,L),r);
                         }
                         float3 transmission=PlanetOwnSunTransmission(position,L);irradiance*=transmission;
-                        radiance+=brdf*irradiance*saturate(dot(normal,L))*
+                        float3 direct=brdf*irradiance*saturate(dot(normal,L))*
                             PlanetNativeDirectDiffuseFactor(normal,viewDirection,L,smoothness);
-                        if(_PlanetTerrainPalette>0)radiance+=PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness)*
+                        if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)direct+=PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness)*
                             specularIrradiance*transmission*saturate(dot(normal,L));
+                        if(_PeriodicTerrainShadowEnabled>0&&dot(L,_PeriodicShadowSunWorld)>.99999)solarRadiance+=direct;
+                        else radiance+=direct;
                     }
                 }
                 else
                 {
-                    float sun=saturate(dot(normal,normalize(_PlanetLightDirection)));
+                    float3 L=normalize(_PlanetLightDirection);
+                    float sun=saturate(dot(normal,L));
                     float3 p=input.relative*_LayerToMeters-_PlanetCenterRelative;
-                    radiance=albedo*(_PlanetLightLux/PI)*(sun*PlanetNativeDirectDiffuseFactor(normal,viewDirection,normalize(_PlanetLightDirection),smoothness)*_PlanetLightColor.rgb*
-                        PlanetOwnSunTransmission(p,normalize(_PlanetLightDirection))+0.001);
-                    if(_PlanetTerrainPalette>0)
-                    {
-                        float3 L=normalize(_PlanetLightDirection),transmission=PlanetOwnSunTransmission(p,L);
-                        radiance=(brdf*PlanetNativeDirectDiffuseFactor(normal,viewDirection,L,smoothness)+PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness))*
-                            _PlanetLightLux*sun*_PlanetLightColor.rgb*transmission+albedo*(_PlanetLightLux/PI)*.001;
-                    }
+                    float3 transmission=PlanetOwnSunTransmission(p,L);
+                    float3 direct=brdf*PlanetNativeDirectDiffuseFactor(normal,viewDirection,L,smoothness);
+                    if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)
+                        direct+=PlanetFarSpecular(normal,viewDirection,L,albedo,metallic,smoothness);
+                    direct*=_PlanetLightLux*sun*_PlanetLightColor.rgb*transmission;
+                    radiance=albedo*(_PlanetLightLux/PI)*.001;
+                    if(_PeriodicTerrainShadowEnabled>0)solarRadiance=direct;else radiance+=direct;
                 }
                 // One surface/environment term, independent of directional-light count.
                 radiance+=PlanetNativeEnvironmentLighting(albedo,metallic,smoothness,normal,viewDirection,input.relative*_LayerToMeters);
-                if(_PlanetDebugView>0 && input.skirt>0)radiance=float3(1,0,1)*_PlanetLightLux;
-                return float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);
+                if(_PlanetDebugView>0 && input.skirt>0){radiance=float3(1,0,1)*_PlanetLightLux;solarRadiance=0;}
+                // Store environment/other lights independently. Never subtract rounded HDR sunlight to form a shadow.
+                PlanetFragment output;output.color=float4(radiance*GetCurrentExposureMultiplier(),length(input.relative)*_LayerToMeters);
+                output.solar=float4(solarRadiance*GetCurrentExposureMultiplier(),0);return output;
             }
             ENDHLSL
         }
