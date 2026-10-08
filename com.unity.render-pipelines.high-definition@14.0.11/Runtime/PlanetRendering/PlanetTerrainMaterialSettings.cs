@@ -3,10 +3,15 @@ using Unity.Mathematics;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
+    public enum PlanetTerrainNormalEncoding { UnityNormal, MetricSlopeMoments }
     [Serializable]
     public sealed class PlanetTerrainMaterialLayer
     {
         public Texture2D Albedo,Normal,Mask;
+        [Tooltip("UnityNormal accepts existing RG/AG maps. MetricSlopeMoments requires linear RGBAHalf/Float: mean dh/dx, dh/dy (m/m), mean squared gradient, 1; mipmaps average moments without renormalizing.")]
+        public PlanetTerrainNormalEncoding NormalEncoding;
+        [Tooltip("Bounded isotropic slope-variance approximation for GGX roughness; zero disables filtering. Not an exact GGX convolution.")]
+        [Range(0,1)] public float NormalVarianceScale=.5f;
         public Color Tint=Color.white;
         [Tooltip("Planet-local metres per texture repeat; placement and floating origins do not change this phase.")]
         public double MetresPerRepeat=2;
@@ -16,7 +21,11 @@ namespace UnityEngine.Rendering.HighDefinition
         [Range(0,1)] public float AmbientOcclusion=1;
         [Tooltip("Mask B is a shading blend height, never geometry or collision displacement.")]
         public float HeightAmplitudeMetres=.04f,HeightOffsetMetres;
-        public bool IsValid=>math.isfinite(MetresPerRepeat)&&MetresPerRepeat>=.001&&MetresPerRepeat<=1e12&&
+        public bool IsValid=>(NormalEncoding==PlanetTerrainNormalEncoding.UnityNormal ||
+            (NormalEncoding==PlanetTerrainNormalEncoding.MetricSlopeMoments && Normal && !Normal.isDataSRGB &&
+             (Normal.format==TextureFormat.RGBAHalf || Normal.format==TextureFormat.RGBAFloat)))&&
+            math.isfinite(NormalVarianceScale)&&NormalVarianceScale>=0&&NormalVarianceScale<=1&&
+            math.isfinite(MetresPerRepeat)&&MetresPerRepeat>=.001&&MetresPerRepeat<=1e12&&
             math.isfinite(NormalScale)&&NormalScale>=0&&NormalScale<=4&&math.isfinite(Metallic)&&Metallic>=0&&Metallic<=1&&
             math.isfinite(Smoothness)&&Smoothness>=0&&Smoothness<=1&&math.isfinite(AmbientOcclusion)&&AmbientOcclusion>=0&&AmbientOcclusion<=1&&
             math.isfinite(HeightAmplitudeMetres)&&HeightAmplitudeMetres>=0&&math.isfinite(HeightOffsetMetres)&&
@@ -95,8 +104,11 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetVector("_PlanetLayerTint"+i,new Vector4(tint.r,tint.g,tint.b,tint.a));
                 properties.SetVector("_PlanetTexturePhase"+i,new Vector4((float)phase.x,(float)phase.y,(float)phase.z,(float)(1/layer.MetresPerRepeat)));
                 properties.SetVector("_PlanetLayerControl"+i,new Vector4(layer.NormalScale,layer.HeightAmplitudeMetres,layer.HeightOffsetMetres,layer.Mask?1:0));
-                properties.SetVector("_PlanetLayerPbr"+i,new Vector4(layer.Metallic,layer.AmbientOcclusion,layer.Smoothness,layer.Normal?1:0));
+                properties.SetVector("_PlanetLayerPbr"+i,new Vector4(layer.Metallic,layer.AmbientOcclusion,layer.Smoothness,
+                    layer.Normal?(layer.NormalEncoding==PlanetTerrainNormalEncoding.MetricSlopeMoments?2:1):0));
             }
+            properties.SetVector("_PlanetNormalVarianceControls",new Vector4(settings.Grass.NormalVarianceScale,settings.Sand.NormalVarianceScale,
+                settings.Rock.NormalVarianceScale,settings.Snow.NormalVarianceScale));
             properties.SetVector("_PlanetMaterialControls",new Vector4(settings.HeightBlendTransitionMetres,settings.TriplanarBlendSharpness,settings.FarNormalStrength,1));
             var variation=TexturePhase(planetAnchor,settings.VariationWavelengthMetres);var cell=VariationCell(planetAnchor,settings.VariationWavelengthMetres);
             properties.SetVector("_PlanetVariationPhase",new Vector4((float)variation.x,(float)variation.y,(float)variation.z,(float)(1/settings.VariationWavelengthMetres)));
