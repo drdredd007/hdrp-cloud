@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using SpaceRunner.PlanetTerrain;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
 using Unity.Mathematics;
 using Unity.Profiling;
 
@@ -13,9 +16,46 @@ namespace UnityEngine.Rendering.HighDefinition
         static readonly ProfilerMarker BeginMarker=new ProfilerMarker("PlanetTerrain.NativeBegin");
         static readonly ProfilerMarker SubmitMarker=new ProfilerMarker("PlanetTerrain.NativeSubmit");
         static readonly ProfilerMarker MaterialMarker=new ProfilerMarker("PlanetTerrain.NativeMaterialBind");
+        static readonly ProfilerMarker ScheduleMarker=new ProfilerMarker("PlanetTerrain.NativeSchedule");
+        static readonly ProfilerMarker UploadMarker=new ProfilerMarker("PlanetTerrain.NativeUpload");
+        static readonly ProfilerMarker MeshMarker=new ProfilerMarker("PlanetTerrain.NativeMeshBuild");
+        static readonly ProfilerMarker MeshValidationMarker=new ProfilerMarker("PlanetTerrain.NativeMeshValidation");
+        static readonly ProfilerMarker VertexPackMarker=new ProfilerMarker("PlanetTerrain.NativeVertexPack");
+        static readonly ProfilerMarker IndexPackMarker=new ProfilerMarker("PlanetTerrain.NativeIndexPack");
+        static readonly ProfilerMarker MeshUploadMarker=new ProfilerMarker("PlanetTerrain.NativeMeshUpload");
+        static readonly ProfilerMarker RetireMarker=new ProfilerMarker("PlanetTerrain.NativeRetire");
         static readonly ProfilingSampler CoverageSampler=new ProfilingSampler("PlanetTerrain.NativeCoverage");
         [StructLayout(LayoutKind.Sequential)] struct Vertex
         {public Vector3 Position,Normal;public Vector4 Tangent;public Color Weights;public Vector2 Uv0,Uv1,Uv2,Uv3;}
+        // Packing is synchronous: completed patch arrays remain owned by the caller
+        // until upload finishes. Burst removes managed per-vertex array access and
+        // arithmetic without changing the sampling, cell topology or publication.
+        [BurstCompile(FloatMode=FloatMode.Strict,FloatPrecision=FloatPrecision.High,CompileSynchronously=true)]
+        struct PackVerticesJob : IJob
+        {
+            [ReadOnly]public NativeArray<float3> Positions,Normals,Offsets;
+            [ReadOnly]public NativeArray<SurfaceAttributes> Attributes;
+            [WriteOnly]public NativeArray<Vertex> Vertices;
+            public NativeArray<float3> Extrema;
+            public NativeArray<int> Invalid;
+            public void Execute()
+            {
+                var minimum=new float3(float.PositiveInfinity);var maximum=new float3(float.NegativeInfinity);
+                for(int i=0;i<Positions.Length;i++)
+                {
+                    var p=Positions[i];var n=math.normalizesafe(Normals[i],new float3(0,1,0));var offset=Offsets[i];var attributes=Attributes[i];
+                    if(!math.all(math.isfinite(p))||!math.all(math.isfinite(n))||!math.all(math.isfinite(offset)))
+                    {Invalid[0]=1;return;}
+                    minimum=math.min(minimum,p);maximum=math.max(maximum,p);
+                    var tangent=math.normalizesafe(new float3(1,0,0)-n*n.x,new float3(0,0,1));
+                    var weights=(attributes.Channels&SurfaceChannels.MaterialWeights)!=0?attributes.MaterialWeights:new float4(0,0,1,0);
+                    Vertices[i]=new Vertex {Position=(Vector3)p,Normal=(Vector3)n,Tangent=new Vector4(tangent.x,tangent.y,tangent.z,-1),
+                        Uv0=new Vector2(offset.x,offset.y),Uv1=new Vector2(offset.z,0),Uv2=new Vector2(attributes.ErosionData.x,attributes.ErosionData.y),
+                        Uv3=new Vector2(attributes.ErosionData.z,attributes.ErosionData.w),Weights=new Color(weights.x,weights.y,weights.z,weights.w)};
+                }
+                Extrema[0]=minimum;Extrema[1]=maximum;
+            }
+        }
         sealed class Cell
         {public Mesh Mesh;public Matrix4x4 Previous;public bool HasPrevious;}
         sealed class Bank
@@ -246,7 +286,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(pending==null)return;
             if(pending.Ready)return;
             int total=pending.Side*pending.Side,halfSide=pending.Side/2;
-            for(int i=0;i<settings.PatchesPerFrame&&pending.Next<total;i++)
+            using(ScheduleMarker.Auto())for(int i=0;i<settings.PatchesPerFrame&&pending.Next<total;i++)
             {
                 int id=pending.Next++;
                 pending.Requests.Add(PlanetRenderPatch.Schedule(definition,pending.Bank.Frame,new int2(id%pending.Side-halfSide,id/pending.Side-halfSide),
@@ -254,7 +294,7 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             // Upload only a bounded number of cells per preparation. Publishing a whole
             // bank does not require uploading every mesh in a single camera frame.
-            for(int uploaded=0;uploaded<settings.PatchesPerFrame&&pending.Built<pending.Requests.Count;uploaded++)
+            using(UploadMarker.Auto())for(int uploaded=0;uploaded<settings.PatchesPerFrame&&pending.Built<pending.Requests.Count;uploaded++)
             {
                 var request=pending.Requests[pending.Built];if(!request.IsCompleted)break;
                 using(var patch=request.Complete())
@@ -274,24 +314,27 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public static Mesh CreateMesh(PlanetRenderPatch patch)
         {
+            using var profile=MeshMarker.Auto();
+            using(MeshValidationMarker.Auto()) {
             if(patch==null||patch.GeometryStatus!=SurfaceSampleStatus.Ready||patch.AttributeStatus!=SurfaceSampleStatus.Ready)
                 throw new ArgumentException("Only a complete immutable render patch can be published.");
-            int count=patch.Positions.Length;var vertices=new Vertex[count];var minimum=new float3(float.PositiveInfinity);var maximum=new float3(float.NegativeInfinity);
-            for(int i=0;i<count;i++)
-            {
-                var p=patch.Positions[i];var n=math.normalizesafe(patch.Normals[i],new float3(0,1,0));var offset=patch.PlanetOffsets[i];var attributes=patch.Attributes[i];
-                if(!math.all(math.isfinite(p))||!math.all(math.isfinite(n))||!math.all(math.isfinite(offset)))throw new ArgumentException("Native mesh data must be finite.");
-                minimum=math.min(minimum,p);maximum=math.max(maximum,p);
-                var tangent=math.normalizesafe(new float3(1,0,0)-n*n.x,new float3(0,0,1));
-                var weights=(attributes.Channels&SurfaceChannels.MaterialWeights)!=0?attributes.MaterialWeights:new float4(0,0,1,0);
-                vertices[i]=new Vertex {Position=(Vector3)p,Normal=(Vector3)n,Tangent=new Vector4(tangent.x,tangent.y,tangent.z,-1),
-                    Uv0=new Vector2(offset.x,offset.y),Uv1=new Vector2(offset.z,0),Uv2=new Vector2(attributes.ErosionData.x,attributes.ErosionData.y),
-                    Uv3=new Vector2(attributes.ErosionData.z,attributes.ErosionData.w),Weights=new Color(weights.x,weights.y,weights.z,weights.w)};
             }
+            int count=patch.Positions.Length;
+            using var vertices=new NativeArray<Vertex>(count,Allocator.TempJob,NativeArrayOptions.UninitializedMemory);
+            using var extrema=new NativeArray<float3>(2,Allocator.TempJob,NativeArrayOptions.UninitializedMemory);
+            using var invalid=new NativeArray<int>(1,Allocator.TempJob);
+            using(VertexPackMarker.Auto())
+            {
+                new PackVerticesJob {Positions=patch.Positions,Normals=patch.Normals,Offsets=patch.PlanetOffsets,Attributes=patch.Attributes,
+                    Vertices=vertices,Extrema=extrema,Invalid=invalid}.Run();
+                if(invalid[0]!=0)throw new ArgumentException("Native mesh data must be finite.");
+            }
+            var minimum=extrema[0];var maximum=extrema[1];
             int resolution=patch.Resolution;var indices=new ushort[resolution*resolution*6];int next=0;
-            for(int z=0;z<resolution;z++)for(int x=0;x<resolution;x++)
+            using(IndexPackMarker.Auto())for(int z=0;z<resolution;z++)for(int x=0;x<resolution;x++)
             {int a=z*(resolution+1)+x,b=a+1,c=a+resolution+1,d=c+1;indices[next++]=(ushort)a;indices[next++]=(ushort)c;indices[next++]=(ushort)b;indices[next++]=(ushort)b;indices[next++]=(ushort)c;indices[next++]=(ushort)d;}
             var mesh=new Mesh {name="Native planet cell "+patch.Key,hideFlags=HideFlags.HideAndDontSave};
+            using(MeshUploadMarker.Auto()) {
             mesh.SetVertexBufferParams(count,new VertexAttributeDescriptor(VertexAttribute.Position,VertexAttributeFormat.Float32,3),
                 new VertexAttributeDescriptor(VertexAttribute.Normal,VertexAttributeFormat.Float32,3),new VertexAttributeDescriptor(VertexAttribute.Tangent,VertexAttributeFormat.Float32,4),
                 new VertexAttributeDescriptor(VertexAttribute.Color,VertexAttributeFormat.Float32,4),
@@ -300,7 +343,9 @@ namespace UnityEngine.Rendering.HighDefinition
             mesh.SetVertexBufferData(vertices,0,0,count);mesh.SetIndexBufferParams(indices.Length,IndexFormat.UInt16);mesh.SetIndexBufferData(indices,0,0,indices.Length);
             var bounds=new Bounds((Vector3)((minimum+maximum)*.5f),(Vector3)(maximum-minimum+new float3(.02f)));
             mesh.subMeshCount=1;mesh.SetSubMesh(0,new SubMeshDescriptor(0,indices.Length,MeshTopology.Triangles){bounds=bounds,vertexCount=count},MeshUpdateFlags.DontRecalculateBounds);
-            mesh.bounds=bounds;mesh.UploadMeshData(true);return mesh;
+            mesh.bounds=bounds;mesh.UploadMeshData(true);
+            }
+            return mesh;
         }
         public static Bounds WorldBounds(Bounds bounds,Matrix4x4 matrix)
         {
@@ -311,7 +356,7 @@ namespace UnityEngine.Rendering.HighDefinition
         void PollAbandoned()
         {for(int i=abandoned.Count-1;i>=0;i--)if(abandoned[i].Completed){abandoned[i].Dispose();abandoned.RemoveAt(i);}}
         void EndFrame(ScriptableRenderContext context,Camera[] cameras)
-        {foreach(var bank in retired)bank.Dispose();retired.Clear();PollAbandoned();}
+        {using var profile=RetireMarker.Auto();foreach(var bank in retired)bank.Dispose();retired.Clear();PollAbandoned();}
         public void Dispose()
         {
             if(disposed)return;disposed=true;RenderPipelineManager.beginCameraRendering-=BeginCamera;RenderPipelineManager.endFrameRendering-=EndFrame;
