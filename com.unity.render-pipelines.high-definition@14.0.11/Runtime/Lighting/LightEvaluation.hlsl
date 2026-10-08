@@ -1,6 +1,8 @@
 #ifndef UNITY_LIGHT_EVALUATION_INCLUDED
 #define UNITY_LIGHT_EVALUATION_INCLUDED
 
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/PlanetRendering/PlanetCelestialLights.hlsl"
+
 // This files include various function uses to evaluate lights
 // use #define LIGHT_EVALUATION_NO_HEIGHT_FOG to disable Height fog attenuation evaluation
 // use #define LIGHT_EVALUATION_NO_COOKIE to disable cookie evaluation
@@ -217,6 +219,11 @@ float4 EvaluateLight_Directional(LightLoopContext lightLoopContext, PositionInpu
         float3 C = _PlanetCenterPosition.xyz;
 
         float r        = distance(X, C);
+        // Signed authored terrain can lie below the atmosphere's reference sphere.
+        // Planet media and far terrain cap density at sea level; extrapolating the
+        // short aerosol scale height underground would extinguish native sunlight.
+        // Keep the stock path for cameras without a planet media owner.
+        if (_PlanetCelestialLightDataReady != 0) r = max(r, _PlanetaryRadius);
         float cosHoriz = ComputeCosineOfHorizonAngle(r);
         float cosTheta = dot(X - C, L) * rcp(r); // Normalize
 

@@ -672,7 +672,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     {
                         Vector3 transm = PhysicallyBasedSky.EvaluateAtmosphericAttenuation(
                             airScaleHeight, aerosolScaleHeight, airExtinctionCoefficient, aerosolExtinctionCoefficient,
-                            planetCenterPosition, planetaryRadius, -lightData.forward, cameraPos);
+                            planetCenterPosition, planetaryRadius, -lightData.forward, cameraPos, recordCelestialLights);
                         lightData.color.x *= transm.x;
                         lightData.color.y *= transm.y;
                         lightData.color.z *= transm.z;

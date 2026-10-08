@@ -560,9 +560,12 @@ namespace UnityEngine.Rendering.HighDefinition
         // Computes transmittance along the light path segment.
         internal static Vector3 EvaluateAtmosphericAttenuation(
             float airScaleHeight, float aerosolScaleHeight, in Vector3 airExtinctionCoefficient, float aerosolExtinctionCoefficient,
-            in Vector3 C, float R, in Vector3 L, in Vector3 X)
+            in Vector3 C, float R, in Vector3 L, in Vector3 X, bool clampBelowGround = false)
         {
             float r = Vector3.Distance(X, C);
+            // Match the per-fragment planet-owned path and its capped sea-level density.
+            // Existing ordinary HDRP callers retain their original behavior.
+            if (clampBelowGround) r = Mathf.Max(r, R);
             float cosHoriz = ComputeCosineOfHorizonAngle(r, R);
             float cosTheta = Vector3.Dot(X - C, L) * Rcp(r);
 
