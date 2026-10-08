@@ -296,18 +296,33 @@ namespace SpaceRunner.PlanetTerrain
                 tileProvenance = new NativeArray<int>(structuralMaterials ? snapshot.Tiles.Count : 0, allocator);
                 regionalProfiles = new NativeArray<SurfaceAutomaticMaterialProfile>(structuralMaterials ? snapshot.Regions.Count : 0, allocator);
                 int heightCount = 0, regionCount = 0;
-                foreach (var tile in snapshot.Tiles) heightCount = checked(heightCount + tile.SampleCount);
-                foreach (var region in snapshot.Regions) regionCount = checked(regionCount + region.SampleCount);
+                bool tileMaterials=resolved!=null,tileErosion=false,regionalMaterials=false,regionalErosion=false;
+                foreach (var tile in snapshot.Tiles)
+                {
+                    heightCount = checked(heightCount + tile.SampleCount);
+                    tileMaterials|=tile.HasMaterialWeights;tileErosion|=tile.HasErosionData;
+                }
+                foreach (var region in snapshot.Regions)
+                {
+                    regionCount = checked(regionCount + region.SampleCount);
+                    regionalMaterials|=region.HasMaterialWeights;regionalErosion|=region.HasErosionData;
+                }
                 if(resolved != null) foreach(var layer in resolved.Layers) regionCount = checked(regionCount+layer.SampleCount);
                 if(resolved != null) foreach(var layer in resolved.StampLayers) regionCount = checked(regionCount+layer.SampleCount);
                 tiles = new NativeArray<SurfaceTileHeader>(snapshot.Tiles.Count, allocator);
                 heights = new NativeArray<float>(heightCount, allocator);
-                materialWeights = new NativeArray<float4>(heightCount, allocator); erosionData = new NativeArray<float4>(heightCount, allocator);
+                // Channels gate every CPU/GPU read. Keep the existing shared
+                // attribute offsets and full arrays when any source uses them;
+                // a wholly absent channel needs no planet-sized zero array.
+                // Derived material layers still require regional weight storage.
+                materialWeights = new NativeArray<float4>(tileMaterials?heightCount:0, allocator);
+                erosionData = new NativeArray<float4>(tileErosion?heightCount:0, allocator);
                 int derivedCount=(resolved?.Layers.Count??0)+(resolved?.StampLayers.Count??0);
+                regionalMaterials|=derivedCount!=0;
                 regions = new NativeArray<SurfaceRegionHeader>(snapshot.Regions.Count+derivedCount, allocator);
                 regionHeights = new NativeArray<float>(regionCount, allocator); regionMasks = new NativeArray<float>(regionCount, allocator);
-                regionMaterialWeights = new NativeArray<float4>(regionCount, allocator);
-                regionErosionData = new NativeArray<float4>(regionCount, allocator);
+                regionMaterialWeights = new NativeArray<float4>(regionalMaterials?regionCount:0, allocator);
+                regionErosionData = new NativeArray<float4>(regionalErosion?regionCount:0, allocator);
                 stamps = new NativeArray<SurfaceCraterStamp>(snapshot.Stamps.Count, allocator);
                 int offset = 0;
                 for (int i = 0; i < snapshot.Tiles.Count; i++)
