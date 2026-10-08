@@ -9,6 +9,9 @@ namespace UnityEngine.Rendering.HighDefinition
     {
         static readonly ProfilerMarker SelectionMarker=new ProfilerMarker("PlanetTerrain.LodSelect");
         static readonly ProfilerMarker BalanceMarker=new ProfilerMarker("PlanetTerrain.LodBalance");
+        static readonly ProfilerMarker ErrorMarker=new ProfilerMarker("PlanetTerrain.LodError");
+        static readonly ProfilerMarker MeasuredMarker=new ProfilerMarker("PlanetTerrain.LodMeasured");
+        static readonly ProfilerMarker PreviousMarker=new ProfilerMarker("PlanetTerrain.LodPreviousLookup");
         public const int MaximumSupportedLevel=16;
         /// <summary>Exact float parameter sent to the existing far generator, without changing its geometry.</summary>
         public static double RenderedSkirtDepthMetres(PlanetDefinition definition,PlanetPatchKey key,int resolution=32)
@@ -93,6 +96,7 @@ namespace UnityEngine.Rendering.HighDefinition
         static double Error(PlanetDefinition definition,PlanetPatchKey key,double3 camera,double pixelsPerRadian,
             PlanetLodView? view,PlanetSurfaceLodContext context,out bool complete,out bool pending,out bool bounded)
         {
+            using var profile=ErrorMarker.Auto();
             complete=true;pending=false;bounded=true;
             if(view.HasValue&&!IntersectsRenderEnvelope(definition,key,camera,view.Value))return 0;
             var direction=PlanetField.Direction(key,.5,.5);
@@ -109,7 +113,8 @@ namespace UnityEngine.Rendering.HighDefinition
             {
                 if(context==null){complete=false;bounded=false;return double.PositiveInfinity;}
                 var footprint=new SurfaceSamplingFootprint(2*(definition.Radius+definition.Relief)/((1<<key.Level)*32));
-                var measured=context.Error(new SurfaceTileKey(key.Face,key.Level,key.X,key.Y),32,footprint);
+                SurfaceLodError measured;
+                using(MeasuredMarker.Auto())measured=context.Error(new SurfaceTileKey(key.Face,key.Level,key.X,key.Y),32,footprint);
                 complete=measured.IsComplete;pending=measured.Status==SurfaceErrorStatus.Pending;bounded=measured.HasConservativeBound;
                 if(bounded&&measured.HasRenderedHeightRange)
                 {
@@ -169,7 +174,11 @@ namespace UnityEngine.Rendering.HighDefinition
             // candidate once; measured version-3 contexts can advance asynchronously and retain their path.
             var periodicErrors=definition.GeneratorVersion==4?new Dictionary<PlanetPatchKey,double>():null;
             HashSet<PlanetPatchKey> previousSplits=null;
-            if(periodicErrors!=null&&previous!=null)
+            // The previous cover is fixed for this selection. A candidate was split
+            // exactly when it is a strict ancestor of any previous leaf; index those
+            // ancestors once instead of scanning the cover for every greedy round.
+            // Signed error reads stay fresh and keep their existing readiness/LRU path.
+            if(previous!=null)
             {
                 previousSplits=new HashSet<PlanetPatchKey>();
                 foreach(var leaf in previous)
@@ -183,8 +192,9 @@ namespace UnityEngine.Rendering.HighDefinition
                 {
                     var key=result[i];if(key.Level>=settings.MaximumLevel||blocked.Contains(key))continue;
                     bool wasSplit=false;
-                    if(periodicErrors!=null)wasSplit=previousSplits!=null&&previousSplits.Contains(key);
-                    else if(previous!=null)for(int j=0;j<previous.Count;j++)if(previous[j].Level>key.Level && Contains(key,previous[j])){wasSplit=true;break;}
+                    using(PreviousMarker.Auto()) {
+                    wasSplit=previousSplits!=null&&previousSplits.Contains(key);
+                    }
                     bool complete=true,pending=false,bounded=true;double measured;
                     if(periodicErrors==null||!periodicErrors.TryGetValue(key,out measured))
                     {
@@ -232,6 +242,7 @@ namespace UnityEngine.Rendering.HighDefinition
         // so inspect that closure instead of scanning the entire cover for each proposed refinement.
         static bool TrySplitBalanced(List<PlanetPatchKey> current,int index,int budget,out List<PlanetPatchKey> result,out int extra)
         {
+            using var profile=BalanceMarker.Auto();
             result=null;extra=0;var set=new HashSet<PlanetPatchKey>(current);var queue=new Queue<PlanetPatchKey>();
             Split(current[index],set,queue);
             while(queue.Count>0)
