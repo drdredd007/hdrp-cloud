@@ -74,6 +74,9 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool EnableLocalSurface;
         public Texture2D PeriodicNormalSlopes;
         public PlanetPeriodicSurfaceSettings PeriodicSurfaceSettings;
+        public PlanetGlobalColorSettings GlobalColorSettings;
+        public PlanetGlobalColorSettings EffectiveGlobalColor => GlobalColorSettings ? GlobalColorSettings :
+            (Definition.GeneratorVersion==4&&PeriodicSurfaceSettings&&PeriodicSurfaceSettings.IsValid?PeriodicSurfaceSettings.GlobalColor:null);
         public PlanetTerrainMaterialSettings NativeMaterialSettings;
         [NonSerialized] public Texture2DArray BaseMapOverride;
         public Texture2DArray BaseMapColour
@@ -239,6 +242,7 @@ namespace UnityEngine.Rendering.HighDefinition
             surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor.linear);surface.SetFloat("_PlanetLightLux",LightLux);
             properties.SetFloat("_PeriodicNormalsEnabled",Definition.GeneratorVersion==4&&PeriodicNormalSlopes?1:0);
             PlanetPeriodicSurfaceSettings.Bind(properties,PeriodicSurfaceSettings,Definition.GeneratorVersion==4,(float)Altitude);
+            PlanetGlobalColorSettings.Bind(properties,EffectiveGlobalColor,(float)Altitude,PlanetRotation);
             if(Definition.GeneratorVersion==4)
             {
                 if(PeriodicNormalSlopes)properties.SetTexture("_PeriodicNormalSlopes",PeriodicNormalSlopes);

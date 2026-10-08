@@ -6,18 +6,6 @@ TEXTURE2D_ARRAY(_PeriodicDetailSlopes);SAMPLER(sampler_PeriodicDetailSlopes);
 float _PeriodicSurfaceEnabled;
 float4 _PeriodicSnowColor,_PeriodicRockColor,_PeriodicSnowMean,_PeriodicRockMean;
 float4 _PeriodicDetailControls,_PeriodicSmoothness;
-TEXTURE2D(_PlanetGlobalColorMap);SAMPLER(sampler_PlanetGlobalColorMap);
-float _PlanetGlobalColorBlend;
-float _PlanetGlobalColorDistanceBlend;
-float4 _PlanetGlobalColorReference;
-float3 PlanetGlobalColor(float3 radialWorld)
-{
-    float3 d=normalize(mul((float3x3)_PeriodicWorldToLocal,radialWorld));
-    float2 uv=float2(atan2(d.z,d.x)*(0.5/PI)+0.5,asin(clamp(d.y,-1,1))/PI+0.5);
-    // Longitude wraps; its derivative must wrap too, otherwise the meridian selects a coarse mip.
-    float2 dx=ddx(uv),dy=ddy(uv);dx.x-=round(dx.x);dy.x-=round(dy.x);
-    return SAMPLE_TEXTURE2D_GRAD(_PlanetGlobalColorMap,sampler_PlanetGlobalColorMap,uv,dx,dy).rgb;
-}
 float3 PeriodicSurfaceWeights(float3 d)
 {float3 w=d*d;w*=w;w*=w;w*=w;return w/(w.x+w.y+w.z);}
 float4 PeriodicDetailColor(float3 p,float3 w,float slice)

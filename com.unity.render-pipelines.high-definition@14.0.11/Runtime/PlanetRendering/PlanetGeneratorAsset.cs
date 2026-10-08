@@ -28,6 +28,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetPeriodicHeightAsset PeriodicHeightSource;
         [Tooltip("Optional native four-layer PBR palette. Unassigned retains the existing scaled procedural surface renderer.")]
         public PlanetTerrainMaterialSettings NativeMaterialSettings;
+        [Tooltip("Planet-wide albedo and material tint independent of the height source.")]
+        public PlanetGlobalColorSettings GlobalColor;
         [Tooltip("Camera-owned native terrain coverage, geometry spacing and bounded preparation. These settings do not change collision sampling.")]
         public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
         [Tooltip("Opaque static sea for signed EarthLike recipes. SeaLevel belongs to the immutable surface recipe; this does not change seabed collision.")]

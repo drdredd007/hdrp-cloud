@@ -3,6 +3,7 @@
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Material/BuiltinUtilities.hlsl"
 #include "PlanetTerrainMaterialShared.hlsl"
 #include "WorldOrogen/WorldOrogenBaseMap.hlsl"
+#include "PlanetGlobalColor.hlsl"
 void GetSurfaceAndBuiltinData(FragInputs input,float3 V,inout PositionInputs posInput,out SurfaceData surfaceData,out BuiltinData builtinData)
 {
     ZERO_INITIALIZE(SurfaceData,surfaceData);
@@ -14,6 +15,8 @@ void GetSurfaceAndBuiltinData(FragInputs input,float3 V,inout PositionInputs pos
     surfaceData.baseColor=material.albedo;surfaceData.metallic=material.metallic;
     if(_OrogenBaseColourEnabled>0)
     {surfaceData.baseColor=OrogenBaseColour(normalize(_OrogenBaseAnchor+offset*_OrogenInverseRadius));surfaceData.metallic=0;}
+    if(_PlanetGlobalColorBlend>0)surfaceData.baseColor=PlanetApplyGlobalColorLocal(surfaceData.baseColor,
+        _PlanetGlobalColorAnchor+offset*_PlanetGlobalColorInverseRadius);
     surfaceData.perceptualSmoothness=material.smoothness;surfaceData.ambientOcclusion=material.ao;
     surfaceData.normalWS=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
     if(_OrogenBaseColourEnabled>0){surfaceData.normalWS=geomNormal;surfaceData.ambientOcclusion=1;surfaceData.perceptualSmoothness=.4;}

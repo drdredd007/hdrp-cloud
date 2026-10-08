@@ -29,6 +29,7 @@ Shader "SpaceRunner/Planet Far Surface"
             float _PeriodicNormalsEnabled,_PeriodicNormalCycles;
             float4x4 _PeriodicWorldToLocal,_PeriodicLocalToWorld;
             #include "PlanetPeriodicSurface.hlsl"
+            #include "PlanetGlobalColor.hlsl"
             float _PeriodicTerrainShadowEnabled;
             float3 _PeriodicShadowSunWorld;
             float3 PeriodicPixelNormal(float3 radialWorld)
@@ -146,14 +147,7 @@ Shader "SpaceRunner/Planet Far Surface"
                 }
                 if(_OrogenBaseColourEnabled>0)
                 {albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));normal=normalize(input.normal);metallic=0;smoothness=.4;}
-                if(_PlanetGlobalColorBlend>0)
-                {
-                    float3 globalColor=PlanetGlobalColor(radialUp);
-                    // Macro color remains at the surface; retain local material contrast and detail there.
-                    float3 localColor=albedo*globalColor/max(_PlanetGlobalColorReference.rgb,.01);
-                    float3 colored=lerp(localColor,globalColor,_PlanetGlobalColorDistanceBlend);
-                    albedo=lerp(albedo,saturate(colored),_PlanetGlobalColorBlend);
-                }
+                albedo=PlanetApplyGlobalColorWorld(albedo,radialUp);
                 float3 brdf=albedo*INV_PI;
                 if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)brdf*=1-metallic;
                 float3 viewDirection=normalize(-input.relative);

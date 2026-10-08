@@ -98,6 +98,9 @@ namespace UnityEngine.Rendering.HighDefinition
                 bool objectHistory=cell.HasPrevious&&historyValid;
                 cell.Properties.Clear();PlanetTerrainMaterialBinding.Bind(cell.Properties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation);
                 WorldOrogenBaseMapBinding.Bind(cell.Properties,owner.BaseMapColour,owner.PlanetRotation,frame.Position,owner.Definition.Radius);
+                PlanetGlobalColorSettings.Bind(cell.Properties,owner.EffectiveGlobalColor,(float)owner.Altitude,owner.PlanetRotation);
+                cell.Properties.SetVector("_PlanetGlobalColorAnchor",(Vector3)(float3)(frame.Position/owner.Definition.Radius));
+                cell.Properties.SetFloat("_PlanetGlobalColorInverseRadius",(float)(1/owner.Definition.Radius));
                 var parameters=new RenderParams(material)
                 {
                     camera=camera,matProps=cell.Properties,worldBounds=WorldBounds(cell.Mesh.bounds,matrix),
