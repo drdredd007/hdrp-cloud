@@ -57,16 +57,24 @@ namespace UnityEngine.Rendering.HighDefinition
             }
         }
         sealed class Cell
-        {public Mesh Mesh;public Matrix4x4 Previous;public bool HasPrevious;}
+        {
+            public Mesh Mesh;public Matrix4x4 Previous;public bool HasPrevious;int references;
+            public void Retain(){references++;}
+            public void Release(){if(--references==0)CoreUtils.Destroy(Mesh);}
+        }
         sealed class Bank
         {
             public PlanetDefinition Definition;public PlanetSurfaceFrame Frame;public PlanetNativeSurfaceSettings Settings;public bool RequiredMasks;
+            public int2 Centre;public int Reused;
             public readonly List<Cell> Cells=new List<Cell>();
-            public void Dispose(){foreach(var cell in Cells)CoreUtils.Destroy(cell.Mesh);Cells.Clear();}
+            public readonly Dictionary<int2,Cell> ByKey=new Dictionary<int2,Cell>();
+            public void Add(int2 key,Cell cell){ByKey.Add(key,cell);cell.Retain();Cells.Add(cell);}
+            public void Dispose(){foreach(var cell in Cells)cell.Release();Cells.Clear();ByKey.Clear();}
         }
         sealed class Pending
         {
             public Bank Bank;public List<PlanetRenderPatchRequest> Requests=new List<PlanetRenderPatchRequest>();
+            public readonly List<int2> Missing=new List<int2>();
             public int Next,Side,Built;public bool Failed,Ready;
             public bool Completed {get{for(int i=Built;i<Requests.Count;i++)if(!Requests[i].IsCompleted)return false;return true;}}
             public void Dispose(){foreach(var request in Requests)request.Dispose();Requests.Clear();Bank.Dispose();}
@@ -82,6 +90,9 @@ namespace UnityEngine.Rendering.HighDefinition
         PlanetDefinition? stagedRevision;bool stagedEmpty;
         int stagedPreparationFrame=int.MinValue;
         public int PatchCount=>active?.Cells.Count??0;
+        /// <summary>Meshes retained from the preceding bank in the currently published bank.</summary>
+        public int ReusedPatchCount=>active?.Reused??0;
+        public long MeshBuildCount {get;private set;}
         public bool IsReady=>active!=null;
         public bool IsRefining=>pending!=null;
         public int ReservedPatchCount
@@ -108,8 +119,10 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool Covers(PlanetDefinition definition,double3 planetLocalPosition,double margin=0)
         {
             if(active==null||!SameSurface(active.Definition,definition)||RequiresMaterialWeights(definition)&&!active.RequiredMasks)return false;
+            if(math.dot(planetLocalPosition,active.Frame.Up)<=0)return false;
             var p=active.Frame.ToLocal(planetLocalPosition);
-            return math.abs(p.x)<=active.Settings.ReceiverHalfSize-margin&&math.abs(p.z)<=active.Settings.ReceiverHalfSize-margin;
+            return math.abs(p.x-active.Centre.x*active.Settings.PatchSize)<=active.Settings.ReceiverHalfSize-margin&&
+                math.abs(p.z-active.Centre.y*active.Settings.PatchSize)<=active.Settings.ReceiverHalfSize-margin;
         }
         void BeginCamera(ScriptableRenderContext context,Camera camera)
         {
@@ -263,15 +276,14 @@ namespace UnityEngine.Rendering.HighDefinition
             {abandoned.Add(pending);pending=null;}
             bool changed=active==null||!SameSurface(active.Definition,definition)||!SameSettings(active.Settings,settings)||active.RequiredMasks!=requireMasks;
             var delta=active==null?default:active.Frame.ToLocal(localCamera);
-            bool needsBank=pending==null&&(changed||math.abs(delta.x)>settings.RecenterDistance||math.abs(delta.z)>settings.RecenterDistance);
+            bool needsBank=pending==null&&(changed||math.dot(localCamera,active.Frame.Up)<=0||
+                math.abs(delta.x-active.Centre.x*settings.PatchSize)>settings.RecenterDistance||
+                math.abs(delta.z-active.Centre.y*settings.PatchSize)>settings.RecenterDistance);
             if(definition.GeneratorVersion==3&&(needsBank||pending!=null&&!pending.Ready)&&
                 !PlanetSurfaceDataRegistry.TryPrepareForRendering(definition.Surface,out var preparation))
             {Status="Native terrain waits for render filtering: "+preparation;return;}
             if(needsBank)
             {
-                var radial=math.normalize(localCamera);
-                var address=new PlanetSurfaceAddress {Latitude=math.degrees(math.asin(math.clamp(radial.y,-1,1))),Longitude=math.degrees(math.atan2(radial.z,radial.x))};
-                if(!PlanetSurfaceCoordinates.TryResolve(definition,address,out var frame)){Status="Native terrain surface is not ready";return;}
                 int half=(int)math.ceil(settings.ShadowHalfSize/settings.PatchSize);
                 int side=half*2;
                 if(ReservedPatchCount+side*side>settings.MaximumResidentPatches)
@@ -281,15 +293,35 @@ namespace UnityEngine.Rendering.HighDefinition
                         "Native terrain retains previous quality: replacement needs resident budget "+transition:
                         "Native terrain waits for retired workers within the residency budget";return;
                 }
-                pending=new Pending {Bank=new Bank {Definition=definition,Frame=frame,Settings=settings,RequiredMasks=requireMasks},Side=side};
+                // Reuse only identical frame/key sampling. Small authored recenter
+                // thresholds keep the previous exact-centre rebuilding behaviour.
+                bool reuse=!changed&&settings.RecenterDistance>=settings.PatchSize*.5&&
+                    math.dot(localCamera,active.Frame.Up)>0&&TryChartCentre(delta,settings.PatchSize,half,out _);
+                PlanetSurfaceFrame frame;int2 centre;
+                if(reuse){frame=active.Frame;TryChartCentre(delta,settings.PatchSize,half,out centre);}
+                else
+                {
+                    var radial=math.normalize(localCamera);
+                    var address=new PlanetSurfaceAddress {Latitude=math.degrees(math.asin(math.clamp(radial.y,-1,1))),Longitude=math.degrees(math.atan2(radial.z,radial.x))};
+                    if(!PlanetSurfaceCoordinates.TryResolve(definition,address,out frame)){Status="Native terrain surface is not ready";return;}
+                    centre=int2.zero;
+                }
+                pending=new Pending {Bank=new Bank {Definition=definition,Frame=frame,Settings=settings,RequiredMasks=requireMasks,Centre=centre},Side=side};
+                for(int z=-half;z<half;z++)for(int x=-half;x<half;x++)
+                {
+                    var key=centre+new int2(x,z);
+                    if(reuse&&active.ByKey.TryGetValue(key,out var cell))
+                    {pending.Bank.Add(key,cell);pending.Bank.Reused++;}
+                    else pending.Missing.Add(key);
+                }
             }
             if(pending==null)return;
             if(pending.Ready)return;
-            int total=pending.Side*pending.Side,halfSide=pending.Side/2;
-            using(ScheduleMarker.Auto())for(int i=0;i<settings.PatchesPerFrame&&pending.Next<total;i++)
+            int total=pending.Side*pending.Side;
+            using(ScheduleMarker.Auto())for(int i=0;i<settings.PatchesPerFrame&&pending.Next<pending.Missing.Count;i++)
             {
                 int id=pending.Next++;
-                pending.Requests.Add(PlanetRenderPatch.Schedule(definition,pending.Bank.Frame,new int2(id%pending.Side-halfSide,id/pending.Side-halfSide),
+                pending.Requests.Add(PlanetRenderPatch.Schedule(definition,pending.Bank.Frame,pending.Missing[id],
                     settings.PatchSize,settings.Resolution,requireMasks?SurfaceChannels.MaterialWeights:SurfaceChannels.None));
             }
             // Upload only a bounded number of cells per preparation. Publishing a whole
@@ -301,16 +333,26 @@ namespace UnityEngine.Rendering.HighDefinition
                 {
                     pending.Built++;
                     if(patch.GeometryStatus!=SurfaceSampleStatus.Ready||patch.AttributeStatus!=SurfaceSampleStatus.Ready){pending.Failed=true;break;}
-                    pending.Bank.Cells.Add(new Cell {Mesh=CreateMesh(patch)});
+                    pending.Bank.Add(patch.Key,new Cell {Mesh=CreateMesh(patch)});MeshBuildCount++;
                 }
             }
             if(pending.Failed)
             {Status="Native terrain bank rejected incomplete geometry or required material masks";abandoned.Add(pending);pending=null;return;}
-            if(pending.Next!=total||pending.Built!=total){Status="Preparing native terrain "+pending.Built+"/"+total;return;}
+            if(pending.Next!=pending.Missing.Count||pending.Built!=pending.Requests.Count||pending.Bank.Cells.Count!=total)
+            {Status="Preparing native terrain "+pending.Bank.Cells.Count+"/"+total;return;}
             if(!publish){pending.Ready=true;pending.Requests.Clear();Status="Native terrain revision staged";return;}
             if(active!=null)retired.Add(active);
             active=pending.Bank;pending.Requests.Clear();pending=null;
-            Status="Native terrain: "+active.Cells.Count+" meshes";
+            Status="Native terrain: "+active.Cells.Count+" meshes ("+active.Reused+" reused)";
+        }
+        static bool TryChartCentre(double3 local,double size,int half,out int2 centre)
+        {
+            centre=default;var candidate=math.round(new double2(local.x,local.z)/size);
+            // This is the same conservative per-key limit enforced by Schedule,
+            // checked before conversion to integers or creating output arrays.
+            var maximum=math.max(math.abs(candidate-half),math.abs(candidate+half-1));
+            if(!math.all(math.isfinite(candidate))||math.any(maximum*size+size>8192))return false;
+            centre=(int2)candidate;return true;
         }
         public static Mesh CreateMesh(PlanetRenderPatch patch)
         {
