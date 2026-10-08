@@ -3,16 +3,21 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using SpaceRunner.PlanetTerrain;
 using Unity.Mathematics;
+using Unity.Profiling;
 
 namespace UnityEngine.Rendering.HighDefinition
 {
     /// <summary>Camera-owned native opaque submissions. Prepared meshes participate in HDRP culling and every native pass.</summary>
     public sealed class PlanetNativeSurfaceRenderer : IDisposable
     {
+        static readonly ProfilerMarker BeginMarker=new ProfilerMarker("PlanetTerrain.NativeBegin");
+        static readonly ProfilerMarker SubmitMarker=new ProfilerMarker("PlanetTerrain.NativeSubmit");
+        static readonly ProfilerMarker MaterialMarker=new ProfilerMarker("PlanetTerrain.NativeMaterialBind");
+        static readonly ProfilingSampler CoverageSampler=new ProfilingSampler("PlanetTerrain.NativeCoverage");
         [StructLayout(LayoutKind.Sequential)] struct Vertex
         {public Vector3 Position,Normal;public Vector4 Tangent;public Color Weights;public Vector2 Uv0,Uv1,Uv2,Uv3;}
         sealed class Cell
-        {public Mesh Mesh;public MaterialPropertyBlock Properties=new MaterialPropertyBlock();public Matrix4x4 Previous;public bool HasPrevious;}
+        {public Mesh Mesh;public Matrix4x4 Previous;public bool HasPrevious;}
         sealed class Bank
         {
             public PlanetDefinition Definition;public PlanetSurfaceFrame Frame;public PlanetNativeSurfaceSettings Settings;public bool RequiredMasks;
@@ -27,6 +32,7 @@ namespace UnityEngine.Rendering.HighDefinition
             public void Dispose(){foreach(var request in Requests)request.Dispose();Requests.Clear();Bank.Dispose();}
         }
         readonly PlanetFarPass owner;
+        readonly MaterialPropertyBlock sharedProperties=new MaterialPropertyBlock();
         Bank active;Pending pending;
         readonly List<Pending> abandoned=new List<Pending>();
         readonly List<Bank> retired=new List<Bank>();
@@ -68,6 +74,10 @@ namespace UnityEngine.Rendering.HighDefinition
         void BeginCamera(ScriptableRenderContext context,Camera camera)
         {
             if(disposed||camera!=owner.Observer)return;
+            using(BeginMarker.Auto())BeginCameraCore(context,camera);
+        }
+        void BeginCameraCore(ScriptableRenderContext context,Camera camera)
+        {
             submittedThisRendering=false;
             if(!owner.Enabled||!owner.EnableLocalSurface||!owner.NativeMaterialSettings)return;
             if(!owner.NativeMaterialSettings.IsValid||!owner.Definition.IsValid)
@@ -93,17 +103,23 @@ namespace UnityEngine.Rendering.HighDefinition
             var matrix=Matrix4x4.TRS(camera.transform.position+(Vector3)(float3)translation,
                 owner.PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation),Vector3.one);
             bool historyValid=RenderPipelineManager.currentPipeline is HDRenderPipeline pipeline&&pipeline.IsPlanetObjectMotionHistoryValid(camera);
-            foreach(var cell in active.Cells)
+            // Every mesh is relative to the same bank frame. Palette, spherical colour,
+            // texture phase and rotation are camera/bank constants, not cell properties.
+            // Keep each cell's previous transform separate for object motion vectors.
+            using(MaterialMarker.Auto())
+            {
+                sharedProperties.Clear();PlanetTerrainMaterialBinding.Bind(sharedProperties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation);
+                WorldOrogenBaseMapBinding.Bind(sharedProperties,owner.BaseMapColour,owner.PlanetRotation,frame.Position,owner.Definition.Radius);
+                PlanetGlobalColorSettings.Bind(sharedProperties,owner.EffectiveGlobalColor,(float)owner.Altitude,owner.PlanetRotation);
+                sharedProperties.SetVector("_PlanetGlobalColorAnchor",(Vector3)(float3)(frame.Position/owner.Definition.Radius));
+                sharedProperties.SetFloat("_PlanetGlobalColorInverseRadius",(float)(1/owner.Definition.Radius));
+            }
+            using(SubmitMarker.Auto())foreach(var cell in active.Cells)
             {
                 bool objectHistory=cell.HasPrevious&&historyValid;
-                cell.Properties.Clear();PlanetTerrainMaterialBinding.Bind(cell.Properties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation);
-                WorldOrogenBaseMapBinding.Bind(cell.Properties,owner.BaseMapColour,owner.PlanetRotation,frame.Position,owner.Definition.Radius);
-                PlanetGlobalColorSettings.Bind(cell.Properties,owner.EffectiveGlobalColor,(float)owner.Altitude,owner.PlanetRotation);
-                cell.Properties.SetVector("_PlanetGlobalColorAnchor",(Vector3)(float3)(frame.Position/owner.Definition.Radius));
-                cell.Properties.SetFloat("_PlanetGlobalColorInverseRadius",(float)(1/owner.Definition.Radius));
                 var parameters=new RenderParams(material)
                 {
-                    camera=camera,matProps=cell.Properties,worldBounds=WorldBounds(cell.Mesh.bounds,matrix),
+                    camera=camera,matProps=sharedProperties,worldBounds=WorldBounds(cell.Mesh.bounds,matrix),
                     shadowCastingMode=ShadowCastingMode.On,receiveShadows=true,
                     motionVectorMode=objectHistory?MotionVectorGenerationMode.Object:MotionVectorGenerationMode.Camera,
                     lightProbeUsage=LightProbeUsage.BlendProbes,renderingLayerMask=uint.MaxValue,layer=0
@@ -142,9 +158,11 @@ namespace UnityEngine.Rendering.HighDefinition
                 if(!shader||!shader.isSupported)throw new InvalidOperationException("Native planet ownership shader is unavailable.");
                 coverageMaterial=CoreUtils.CreateEngineMaterial(shader);
             }
+            using(new ProfilingScope(context.cmd,CoverageSampler)) {
             CoreUtils.SetRenderTarget(context.cmd,coverage,coverageDepth,ClearFlag.All,Color.clear);
             context.cmd.SetViewport(new Rect(0,0,width,height));
             foreach(var cell in active.Cells)context.cmd.DrawMesh(cell.Mesh,cell.Previous,coverageMaterial,0,0);
+            }
             return true;
         }
         void ReleaseCoverage()
