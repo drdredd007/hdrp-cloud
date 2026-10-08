@@ -93,24 +93,57 @@ namespace UnityEngine.Rendering.HighDefinition
             return DistanceLowerBound(definition,key,camera,-definition.Relief-RenderedSkirtDepthMetres(definition,key)-reserve,
                 definition.Relief+reserve,reserve);
         }
+        struct ErrorProjection
+        {
+            public bool Visible;
+            public double Closest,Minimum,Maximum,Reserve;
+        }
+        // Geometry alone is invariant within Select. Never retain readiness or the
+        // measured error here: every visible signed query still calls context.Error.
+        sealed class SelectionProjections
+        {
+            readonly PlanetDefinition definition;readonly double3 camera;readonly PlanetLodView? view;
+            readonly Dictionary<PlanetPatchKey,ErrorProjection> global=new Dictionary<PlanetPatchKey,ErrorProjection>();
+            readonly Dictionary<PlanetPatchKey,ErrorProjection> rendered=new Dictionary<PlanetPatchKey,ErrorProjection>();
+            public SelectionProjections(PlanetDefinition definition,double3 camera,PlanetLodView? view)
+            {this.definition=definition;this.camera=camera;this.view=view;}
+            public ErrorProjection Global(PlanetPatchKey key)
+            {
+                if(global.TryGetValue(key,out var result))return result;
+                result=SignedGlobalProjection(definition,key,camera,view);global.Add(key,result);return result;
+            }
+            public ErrorProjection Rendered(PlanetPatchKey key,double minimum,double maximum,double reserve)
+            {
+                if(rendered.TryGetValue(key,out var result)&&result.Minimum==minimum&&result.Maximum==maximum&&result.Reserve==reserve)return result;
+                result=SignedRenderedProjection(definition,key,camera,view,minimum,maximum,reserve);rendered[key]=result;return result;
+            }
+        }
+        static ErrorProjection SignedGlobalProjection(PlanetDefinition definition,PlanetPatchKey key,double3 camera,PlanetLodView? view)
+        {
+            if(view.HasValue&&!IntersectsRenderEnvelope(definition,key,camera,view.Value))return default;
+            var direction=PlanetField.Direction(key,.5,.5);double span=System.Math.PI/(2*(1<<key.Level));double distance=math.length(camera);
+            double outer=definition.Radius+definition.Relief,inner=math.max(0,definition.Radius-definition.Relief);
+            double horizonExtra=math.acos(math.clamp(inner/outer,0,1));
+            if(distance>outer&&math.dot(direction,camera/distance)+math.sin(math.min(System.Math.PI/2,span+horizonExtra))<inner/distance)return default;
+            return new ErrorProjection {Visible=true,Closest=math.max(1,GlobalRenderedDistanceLowerBound(definition,key,camera))};
+        }
+        static ErrorProjection SignedRenderedProjection(PlanetDefinition definition,PlanetPatchKey key,double3 camera,PlanetLodView? view,
+            double minimum,double maximum,double reserve)
+        {
+            bool visible=!view.HasValue||view.Value.Intersects(definition,key,camera,minimum,maximum,reserve);
+            return new ErrorProjection {Minimum=minimum,Maximum=maximum,Reserve=reserve,Visible=visible,
+                Closest=visible?math.max(1,DistanceLowerBound(definition,key,camera,minimum,maximum,reserve)):0};
+        }
         static double Error(PlanetDefinition definition,PlanetPatchKey key,double3 camera,double pixelsPerRadian,
-            PlanetLodView? view,PlanetSurfaceLodContext context,out bool complete,out bool pending,out bool bounded)
+            PlanetLodView? view,PlanetSurfaceLodContext context,out bool complete,out bool pending,out bool bounded,SelectionProjections projections=null)
         {
             using var profile=ErrorMarker.Auto();
             complete=true;pending=false;bounded=true;
-            if(view.HasValue&&!IntersectsRenderEnvelope(definition,key,camera,view.Value))return 0;
-            var direction=PlanetField.Direction(key,.5,.5);
-            double span=System.Math.PI/(2*(1<<key.Level));
-            double distance=math.length(camera);
-            // Conservative patch cone: keep horizon patches, leave hidden hemisphere coarse.
-            double outer=definition.GeneratorVersion==3?definition.Radius+definition.Relief:definition.Radius;
-            double inner=definition.GeneratorVersion==3?math.max(0,definition.Radius-definition.Relief):definition.Radius;
-            double horizonExtra=definition.GeneratorVersion==3?math.acos(math.clamp(inner/outer,0,1)):0;
-            if(distance>outer&&math.dot(direction,camera/distance)+math.sin(math.min(System.Math.PI/2,span+horizonExtra))<inner/distance)return 0;
-            double closest=definition.GeneratorVersion==3?math.max(1,GlobalRenderedDistanceLowerBound(definition,key,camera)):
-                math.max(1,math.distance(direction*definition.Radius,camera)-outer*span);
             if(definition.GeneratorVersion==3)
             {
+                var projection=projections==null?SignedGlobalProjection(definition,key,camera,view):projections.Global(key);
+                if(!projection.Visible)return 0;
+                double signedClosest=projection.Closest;
                 if(context==null){complete=false;bounded=false;return double.PositiveInfinity;}
                 var footprint=new SurfaceSamplingFootprint(2*(definition.Radius+definition.Relief)/((1<<key.Level)*32));
                 SurfaceLodError measured;
@@ -121,11 +154,18 @@ namespace UnityEngine.Rendering.HighDefinition
                     double reserve=RenderedPositionReserveMetres(definition,key,measured.MinimumRenderedHeightMetres,measured.MaximumRenderedHeightMetres);
                     double minimum=measured.MinimumRenderedHeightMetres-RenderedSkirtDepthMetres(definition,key)-reserve;
                     double maximum=measured.MaximumRenderedHeightMetres+reserve;
-                    if(view.HasValue&&!view.Value.Intersects(definition,key,camera,minimum,maximum,reserve))return 0;
-                    closest=math.max(1,DistanceLowerBound(definition,key,camera,minimum,maximum,reserve));
+                    var renderedProjection=projections==null?SignedRenderedProjection(definition,key,camera,view,minimum,maximum,reserve):
+                        projections.Rendered(key,minimum,maximum,reserve);
+                    if(!renderedProjection.Visible)return 0;
+                    signedClosest=renderedProjection.Closest;
                 }
-                return measured.TotalMetres*pixelsPerRadian/closest;
+                return measured.TotalMetres*pixelsPerRadian/signedClosest;
             }
+            if(view.HasValue&&!IntersectsRenderEnvelope(definition,key,camera,view.Value))return 0;
+            var direction=PlanetField.Direction(key,.5,.5);
+            double span=System.Math.PI/(2*(1<<key.Level));double distance=math.length(camera);
+            if(distance>definition.Radius&&math.dot(direction,camera/distance)+math.sin(math.min(System.Math.PI/2,span))<definition.Radius/distance)return 0;
+            double closest=math.max(1,math.distance(direction*definition.Radius,camera)-definition.Radius*span);
             double step=span/32;
             // Curvature term plus estimated relief variation; not a measured terrain error bound.
             double metres=definition.Radius*(1-math.cos(step))+definition.Relief*step*4;
@@ -173,6 +213,7 @@ namespace UnityEngine.Rendering.HighDefinition
             // Periodic source bounds, camera and view are immutable during this selection. Evaluate each
             // candidate once; measured version-3 contexts can advance asynchronously and retain their path.
             var periodicErrors=definition.GeneratorVersion==4?new Dictionary<PlanetPatchKey,double>():null;
+            var projections=definition.GeneratorVersion==3?new SelectionProjections(definition,camera,view):null;
             HashSet<PlanetPatchKey> previousSplits=null;
             // The previous cover is fixed for this selection. A candidate was split
             // exactly when it is a strict ancestor of any previous leaf; index those
@@ -198,7 +239,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     bool complete=true,pending=false,bounded=true;double measured;
                     if(periodicErrors==null||!periodicErrors.TryGetValue(key,out measured))
                     {
-                        measured=Error(definition,key,camera,pixelScale,view,context,out complete,out pending,out bounded);
+                        measured=Error(definition,key,camera,pixelScale,view,context,out complete,out pending,out bounded,projections);
                         if(periodicErrors!=null)periodicErrors.Add(key,measured);
                     }
                     double error=measured/(settings.PixelError*(wasSplit?.7:1.2));
@@ -224,7 +265,7 @@ namespace UnityEngine.Rendering.HighDefinition
             diagnostics.MeasurementIncomplete=false;diagnostics.PreparationPending=false;
             foreach(var key in result)
             {
-                double error=Error(definition,key,camera,pixelScale,view,context,out bool complete,out bool pending,out bool bounded);
+                double error=Error(definition,key,camera,pixelScale,view,context,out bool complete,out bool pending,out bool bounded,projections);
                 diagnostics.MeasurementIncomplete|=!complete;if(!complete&&bounded)diagnostics.ConservativeFallbackPatches++;diagnostics.MaximumPixelError=math.max(diagnostics.MaximumPixelError,error);
                 diagnostics.PreparationPending|=pending;
                 if(!complete)diagnostics.PixelErrorSatisfied=false;
