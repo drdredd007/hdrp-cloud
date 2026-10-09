@@ -52,6 +52,7 @@ namespace UnityEngine.Rendering.HighDefinition
         [Tooltip("Reject a render bank lacking canonical material masks. Disabled explicitly uses one rock layer when masks are absent.")]
         public bool RequireMaterialWeights;
         public Shader NativeShader;
+        public PlanetSurfacePaintSettings SurfacePaint;
         public bool IsValid=>Grass!=null&&Grass.IsValid&&Sand!=null&&Sand.IsValid&&Rock!=null&&Rock.IsValid&&Snow!=null&&Snow.IsValid&&
             math.isfinite(HeightBlendTransitionMetres)&&HeightBlendTransitionMetres>0&&math.isfinite(TriplanarBlendSharpness)&&
             TriplanarBlendSharpness>=1&&TriplanarBlendSharpness<=16&&math.isfinite(FarNormalStrength)&&FarNormalStrength>=0&&FarNormalStrength<=1&&
@@ -114,6 +115,8 @@ namespace UnityEngine.Rendering.HighDefinition
             properties.SetVector("_PlanetVariationPhase",new Vector4((float)variation.x,(float)variation.y,(float)variation.z,(float)(1/settings.VariationWavelengthMetres)));
             properties.SetVector("_PlanetVariationCell",new Vector4((float)cell.x,(float)cell.y,(float)cell.z,settings.VariationSeed&65535));
             properties.SetVector("_PlanetVariationControls",new Vector4(settings.AntiTilingStrength,settings.MacroVariationStrength,settings.VariationSeed>>16,0));
+            // Anchor length includes the local elevation; the map uses only its unit direction.
+            PlanetSurfacePaintSettings.Bind(properties,settings.SurfacePaint,planetAnchor,math.max(math.length(planetAnchor),1));
             properties.SetMatrix("_PlanetLocalToRender",Matrix4x4.Rotate(planetToRender));
             properties.SetMatrix("_PlanetRenderToLocal",Matrix4x4.Rotate(Quaternion.Inverse(planetToRender)));
         }

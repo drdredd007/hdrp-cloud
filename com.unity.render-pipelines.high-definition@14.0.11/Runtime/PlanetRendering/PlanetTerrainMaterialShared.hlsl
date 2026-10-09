@@ -1,5 +1,6 @@
 #ifndef SPACERUNNER_TERRAIN_MATERIAL_INCLUDED
 #define SPACERUNNER_TERRAIN_MATERIAL_INCLUDED
+#include "PlanetSurfacePaint.hlsl"
 TEXTURE2D(_PlanetLayerAlbedo0);TEXTURE2D(_PlanetLayerAlbedo1);TEXTURE2D(_PlanetLayerAlbedo2);TEXTURE2D(_PlanetLayerAlbedo3);
 TEXTURE2D(_PlanetLayerNormal0);TEXTURE2D(_PlanetLayerNormal1);TEXTURE2D(_PlanetLayerNormal2);TEXTURE2D(_PlanetLayerNormal3);
 TEXTURE2D(_PlanetLayerMask0);TEXTURE2D(_PlanetLayerMask1);TEXTURE2D(_PlanetLayerMask2);TEXTURE2D(_PlanetLayerMask3);
@@ -85,6 +86,14 @@ PlanetTerrainLayerSample PlanetTerrainReadLayer(Texture2D albedoMap,Texture2D no
 PlanetTerrainMaterialSample PlanetTerrainEvaluate(float3 offset,float3 normalPlanet,float4 masks,float normalStrength)
 {
     PlanetTerrainMaterialSample result=(PlanetTerrainMaterialSample)0;
+    float paintNoise=0,paintGrain=0;
+    if(_PlanetPaintEnabled>0) {
+        uint seed=(uint)_PlanetPaintSeed.x|((uint)_PlanetPaintSeed.y<<16);
+        paintNoise=PlanetPaintNoise(offset,_PlanetPaintPhase,_PlanetPaintCell,seed,true);
+        paintGrain=PlanetPaintNoise(offset,_PlanetPaintGrainPhase,_PlanetPaintGrainCell,seed^137u,true);
+        float3 direction=normalize(_PlanetPaintAnchor.xyz+offset*_PlanetPaintAnchor.w);
+        masks=PlanetPaintWeights(offset,normalPlanet,direction,paintNoise);
+    }
     float3 variation=0;
     if(_PlanetVariationControls.x>0||_PlanetVariationControls.y>0)variation=PlanetTerrainVariation(offset);
     float3 warp=variation*_PlanetVariationControls.x;
@@ -100,6 +109,7 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluate(float3 offset,float3 normalPla
     float4 weights=masks*saturate((heights-highest+_PlanetMaterialControls.x)/max(_PlanetMaterialControls.x,1e-6));
     weights/=max(dot(weights,1),1e-6);
     result.albedo=(a.albedo*weights.x+b.albedo*weights.y+c.albedo*weights.z+d.albedo*weights.w)*(1+variation.z*_PlanetVariationControls.y);
+    if(_PlanetPaintEnabled>0)result.albedo*=PlanetPaintModulation(weights,paintNoise,paintGrain);
     result.metallic=dot(weights,float4(a.metallic,b.metallic,c.metallic,d.metallic));
     result.ao=dot(weights,float4(a.ao,b.ao,c.ao,d.ao));
     result.smoothness=dot(weights,float4(a.smoothness,b.smoothness,c.smoothness,d.smoothness));
