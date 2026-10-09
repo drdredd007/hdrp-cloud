@@ -146,7 +146,12 @@ Shader "SpaceRunner/Planet Far Surface"
                     normal=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
                 }
                 if(_OrogenBaseColourEnabled>0)
-                {albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));normal=normalize(input.normal);metallic=0;smoothness=.4;}
+                {
+                    albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));metallic=0;smoothness=.4;
+                    float variance;float3 geological=PlanetGeologicalNormal(input.detail,normalize(mul((float3x3)_OrogenRenderToLocal,input.normal)),variance);
+                    normal=_PlanetGeologicalNormalCount>0?normalize(mul((float3x3)_PlanetLocalToRender,geological)):normalize(input.normal);
+                    smoothness=PlanetGeologicalSmoothness(smoothness,variance);
+                }
                 albedo=PlanetApplyGlobalColorWorld(albedo,radialUp);
                 float3 brdf=albedo*INV_PI;
                 if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)brdf*=1-metallic;

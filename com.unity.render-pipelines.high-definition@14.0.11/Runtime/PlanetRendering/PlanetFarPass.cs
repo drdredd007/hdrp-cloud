@@ -282,6 +282,7 @@ namespace UnityEngine.Rendering.HighDefinition
             properties.SetBuffer("_PlanetAttributes",farPatches.Attributes??neutralAttributes);
             properties.SetBuffer("_PlanetParentAttributes",farPatches.ParentAttributes??farPatches.Attributes??neutralAttributes);
             properties.SetFloat("_PlanetTerrainPalette",NativeMaterialSettings&&NativeMaterialSettings.IsValid?1:0);
+            properties.SetInteger("_PlanetGeologicalNormalCount",0);
             properties.SetFloat("_LayerToMeters",1000);
             properties.SetMatrix("_FarViewProjection",projection*view);
             properties.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
@@ -292,7 +293,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 var detailOrigin=PlanetSurfaceCache.Pivot(Definition,key);
                 properties.SetVector("_DetailOrigin",(Vector3)(float3)(detailOrigin-math.floor(detailOrigin/4096)*4096));
                 if(NativeMaterialSettings&&NativeMaterialSettings.IsValid)
-                {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,detailOrigin,PlanetRotation);properties.SetVector("_DetailOrigin",Vector4.zero);}
+                {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,detailOrigin,PlanetRotation,Definition.Surface);properties.SetVector("_DetailOrigin",Vector4.zero);}
                 var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(q,PlanetSurfaceCache.Pivot(Definition,key)));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
                 properties.SetInteger("_PlanetBaseVertex",geometry.Slot(key)*farPatches.SlotVertexCount);
@@ -314,6 +315,8 @@ namespace UnityEngine.Rendering.HighDefinition
                 var frame=nearGeometry.Frame;
                 properties.SetMatrix("_DetailRotation",Matrix4x4.Rotate((Quaternion)new quaternion((float4)frame.Rotation)));
                 properties.SetVector("_DetailOrigin",(Vector3)(float3)(frame.Position-math.floor(frame.Position/4096)*4096));
+                if(NativeMaterialSettings&&NativeMaterialSettings.IsValid)
+                {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,frame.Position,PlanetRotation,Definition.Surface);properties.SetVector("_DetailOrigin",Vector4.zero);}
                 var relative=(Definition.Center-CameraPosition)+PlanetField.Rotate(q,frame.Position);
                 var localRotation=PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation);
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));

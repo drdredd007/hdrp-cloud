@@ -161,7 +161,7 @@ namespace UnityEngine.Rendering.HighDefinition
             // Keep each cell's previous transform separate for object motion vectors.
             using(MaterialMarker.Auto())
             {
-                sharedProperties.Clear();PlanetTerrainMaterialBinding.Bind(sharedProperties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation);
+                sharedProperties.Clear();PlanetTerrainMaterialBinding.Bind(sharedProperties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation,active.Definition.Surface);
                 WorldOrogenBaseMapBinding.Bind(sharedProperties,owner.BaseMapColour,owner.PlanetRotation,frame.Position,owner.Definition.Radius);
                 PlanetGlobalColorSettings.Bind(sharedProperties,owner.EffectiveGlobalColor,(float)owner.Altitude,owner.PlanetRotation);
                 sharedProperties.SetVector("_PlanetGlobalColorAnchor",(Vector3)(float3)(frame.Position/owner.Definition.Radius));

@@ -19,7 +19,12 @@ void GetSurfaceAndBuiltinData(FragInputs input,float3 V,inout PositionInputs pos
         _PlanetGlobalColorAnchor+offset*_PlanetGlobalColorInverseRadius);
     surfaceData.perceptualSmoothness=material.smoothness;surfaceData.ambientOcclusion=material.ao;
     surfaceData.normalWS=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
-    if(_OrogenBaseColourEnabled>0){surfaceData.normalWS=geomNormal;surfaceData.ambientOcclusion=1;surfaceData.perceptualSmoothness=.4;}
+    if(_OrogenBaseColourEnabled>0)
+    {
+        float variance;float3 geological=PlanetGeologicalNormal(offset,normalPlanet,variance);
+        surfaceData.normalWS=normalize(mul((float3x3)_PlanetLocalToRender,geological));
+        surfaceData.ambientOcclusion=1;surfaceData.perceptualSmoothness=PlanetGeologicalSmoothness(.4,variance);
+    }
     surfaceData.geomNormalWS=geomNormal;surfaceData.tangentWS=normalize(input.tangentToWorld[0]);
     surfaceData.specularOcclusion=1;surfaceData.thickness=1;surfaceData.ior=1;
     surfaceData.transmittanceColor=1;surfaceData.atDistance=1000000;

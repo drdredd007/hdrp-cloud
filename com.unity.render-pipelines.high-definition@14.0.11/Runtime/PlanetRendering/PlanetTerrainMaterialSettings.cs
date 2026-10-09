@@ -53,6 +53,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool RequireMaterialWeights;
         public Shader NativeShader;
         public PlanetSurfacePaintSettings SurfacePaint;
+        public PlanetGeologicalNormalSettings GeologicalNormals;
         public bool IsValid=>Grass!=null&&Grass.IsValid&&Sand!=null&&Sand.IsValid&&Rock!=null&&Rock.IsValid&&Snow!=null&&Snow.IsValid&&
             math.isfinite(HeightBlendTransitionMetres)&&HeightBlendTransitionMetres>0&&math.isfinite(TriplanarBlendSharpness)&&
             TriplanarBlendSharpness>=1&&TriplanarBlendSharpness<=16&&math.isfinite(FarNormalStrength)&&FarNormalStrength>=0&&FarNormalStrength<=1&&
@@ -88,7 +89,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 wrapMode=TextureWrapMode.Repeat,filterMode=FilterMode.Bilinear};
             value.SetPixel(0,0,color);value.Apply(false,true);return value;
         }
-        public static void Bind(MaterialPropertyBlock properties,PlanetTerrainMaterialSettings settings,double3 planetAnchor,Quaternion planetToRender)
+        public static void Bind(MaterialPropertyBlock properties,PlanetTerrainMaterialSettings settings,double3 planetAnchor,Quaternion planetToRender,PlanetSurfaceDescriptor surface=default)
         {
             if(properties==null)throw new ArgumentNullException(nameof(properties));
             if(!settings||!settings.IsValid)throw new ArgumentException("A valid four-layer material palette is required.");
@@ -119,6 +120,7 @@ namespace UnityEngine.Rendering.HighDefinition
             PlanetSurfacePaintSettings.Bind(properties,settings.SurfacePaint,planetAnchor,math.max(math.length(planetAnchor),1));
             properties.SetMatrix("_PlanetLocalToRender",Matrix4x4.Rotate(planetToRender));
             properties.SetMatrix("_PlanetRenderToLocal",Matrix4x4.Rotate(Quaternion.Inverse(planetToRender)));
+            PlanetGeologicalNormalBinding.Bind(properties,settings.GeologicalNormals,surface,planetAnchor);
         }
         static void Cleanup()
         {CoreUtils.Destroy(flatNormal);CoreUtils.Destroy(neutralMask);flatNormal=null;neutralMask=null;}

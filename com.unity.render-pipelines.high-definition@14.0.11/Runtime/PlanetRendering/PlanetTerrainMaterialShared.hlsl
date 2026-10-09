@@ -1,6 +1,7 @@
 #ifndef SPACERUNNER_TERRAIN_MATERIAL_INCLUDED
 #define SPACERUNNER_TERRAIN_MATERIAL_INCLUDED
 #include "PlanetSurfacePaint.hlsl"
+#include "PlanetGeologicalNormal.hlsl"
 TEXTURE2D(_PlanetLayerAlbedo0);TEXTURE2D(_PlanetLayerAlbedo1);TEXTURE2D(_PlanetLayerAlbedo2);TEXTURE2D(_PlanetLayerAlbedo3);
 TEXTURE2D(_PlanetLayerNormal0);TEXTURE2D(_PlanetLayerNormal1);TEXTURE2D(_PlanetLayerNormal2);TEXTURE2D(_PlanetLayerNormal3);
 TEXTURE2D(_PlanetLayerMask0);TEXTURE2D(_PlanetLayerMask1);TEXTURE2D(_PlanetLayerMask2);TEXTURE2D(_PlanetLayerMask3);
@@ -86,6 +87,8 @@ PlanetTerrainLayerSample PlanetTerrainReadLayer(Texture2D albedoMap,Texture2D no
 PlanetTerrainMaterialSample PlanetTerrainEvaluate(float3 offset,float3 normalPlanet,float4 masks,float normalStrength)
 {
     PlanetTerrainMaterialSample result=(PlanetTerrainMaterialSample)0;
+    float geologicalVariance;
+    normalPlanet=PlanetGeologicalNormal(offset,normalPlanet,geologicalVariance);
     float paintNoise=0,paintGrain=0;
     if(_PlanetPaintEnabled>0) {
         uint seed=(uint)_PlanetPaintSeed.x|((uint)_PlanetPaintSeed.y<<16);
@@ -113,6 +116,7 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluate(float3 offset,float3 normalPla
     result.metallic=dot(weights,float4(a.metallic,b.metallic,c.metallic,d.metallic));
     result.ao=dot(weights,float4(a.ao,b.ao,c.ao,d.ao));
     result.smoothness=dot(weights,float4(a.smoothness,b.smoothness,c.smoothness,d.smoothness));
+    result.smoothness=PlanetGeologicalSmoothness(result.smoothness,geologicalVariance);
     float3 gradient=a.gradient*weights.x+b.gradient*weights.y+c.gradient*weights.z+d.gradient*weights.w;
     gradient-=normalPlanet*dot(normalPlanet,gradient);
     result.normal=normalize(normalPlanet-gradient);return result;
