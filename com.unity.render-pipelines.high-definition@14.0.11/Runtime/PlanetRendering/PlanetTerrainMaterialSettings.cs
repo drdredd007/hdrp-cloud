@@ -54,6 +54,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public Shader NativeShader;
         public PlanetSurfacePaintSettings SurfacePaint;
         public PlanetGeologicalNormalSettings GeologicalNormals;
+        public PlanetRegionalColorSettings RegionalColor;
         public bool IsValid=>Grass!=null&&Grass.IsValid&&Sand!=null&&Sand.IsValid&&Rock!=null&&Rock.IsValid&&Snow!=null&&Snow.IsValid&&
             math.isfinite(HeightBlendTransitionMetres)&&HeightBlendTransitionMetres>0&&math.isfinite(TriplanarBlendSharpness)&&
             TriplanarBlendSharpness>=1&&TriplanarBlendSharpness<=16&&math.isfinite(FarNormalStrength)&&FarNormalStrength>=0&&FarNormalStrength<=1&&
@@ -121,6 +122,7 @@ namespace UnityEngine.Rendering.HighDefinition
             properties.SetMatrix("_PlanetLocalToRender",Matrix4x4.Rotate(planetToRender));
             properties.SetMatrix("_PlanetRenderToLocal",Matrix4x4.Rotate(Quaternion.Inverse(planetToRender)));
             PlanetGeologicalNormalBinding.Bind(properties,settings.GeologicalNormals,surface,planetAnchor);
+            PlanetRegionalColorBinding.Bind(properties,settings.RegionalColor,surface,planetAnchor);
         }
         static void Cleanup()
         {CoreUtils.Destroy(flatNormal);CoreUtils.Destroy(neutralMask);flatNormal=null;neutralMask=null;}

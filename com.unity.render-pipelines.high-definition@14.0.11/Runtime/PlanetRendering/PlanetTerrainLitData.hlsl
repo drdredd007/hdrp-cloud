@@ -17,6 +17,10 @@ void GetSurfaceAndBuiltinData(FragInputs input,float3 V,inout PositionInputs pos
     {surfaceData.baseColor=OrogenBaseColour(normalize(_OrogenBaseAnchor+offset*_OrogenInverseRadius));surfaceData.metallic=0;}
     if(_PlanetGlobalColorBlend>0)surfaceData.baseColor=PlanetApplyGlobalColorLocal(surfaceData.baseColor,
         _PlanetGlobalColorAnchor+offset*_PlanetGlobalColorInverseRadius);
+    float3 regionalTone=1;
+    if(_PlanetRegionalColorCount>0&&_PlanetRegionalColorControls.y>0&&_PlanetGlobalColorBlend>0)
+        regionalTone=PlanetGlobalColorRelativeTint(_PlanetGlobalColorAnchor+offset*_PlanetGlobalColorInverseRadius);
+    surfaceData.baseColor=PlanetRegionalColorApply(surfaceData.baseColor,offset,regionalTone,dot(material.albedo,float3(.2126,.7152,.0722)));
     surfaceData.perceptualSmoothness=material.smoothness;surfaceData.ambientOcclusion=material.ao;
     surfaceData.normalWS=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
     if(_OrogenBaseColourEnabled>0)

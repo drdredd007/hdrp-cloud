@@ -23,6 +23,13 @@ float3 PlanetApplyGlobalColorLocal(float3 albedo,float3 directionLocal)
     float weight=_PlanetGlobalColorBlend*lerp(1,saturate(map.a),_PlanetGlobalColorControls.y);
     return lerp(albedo,saturate(colored),weight);
 }
+float3 PlanetGlobalColorRelativeTint(float3 directionLocal)
+{
+    if(_PlanetGlobalColorBlend<=0)return 1;
+    float4 map=PlanetGlobalColorSample(directionLocal);
+    float weight=_PlanetGlobalColorBlend*_PlanetGlobalColorControls.x*lerp(1,saturate(map.a),_PlanetGlobalColorControls.y);
+    return lerp(1,map.rgb/max(_PlanetGlobalColorReference.rgb,.01),weight);
+}
 float3 PlanetApplyGlobalColorWorld(float3 albedo,float3 radialWorld)
 {
     return PlanetApplyGlobalColorLocal(albedo,mul((float3x3)_PlanetGlobalColorWorldToLocal,radialWorld));

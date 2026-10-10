@@ -2,6 +2,7 @@
 #define SPACERUNNER_TERRAIN_MATERIAL_INCLUDED
 #include "PlanetSurfacePaint.hlsl"
 #include "PlanetGeologicalNormal.hlsl"
+#include "PlanetRegionalColor.hlsl"
 TEXTURE2D(_PlanetLayerAlbedo0);TEXTURE2D(_PlanetLayerAlbedo1);TEXTURE2D(_PlanetLayerAlbedo2);TEXTURE2D(_PlanetLayerAlbedo3);
 TEXTURE2D(_PlanetLayerNormal0);TEXTURE2D(_PlanetLayerNormal1);TEXTURE2D(_PlanetLayerNormal2);TEXTURE2D(_PlanetLayerNormal3);
 TEXTURE2D(_PlanetLayerMask0);TEXTURE2D(_PlanetLayerMask1);TEXTURE2D(_PlanetLayerMask2);TEXTURE2D(_PlanetLayerMask3);

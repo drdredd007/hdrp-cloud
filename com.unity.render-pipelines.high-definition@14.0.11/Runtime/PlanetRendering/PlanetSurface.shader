@@ -152,7 +152,12 @@ Shader "SpaceRunner/Planet Far Surface"
                     normal=_PlanetGeologicalNormalCount>0?normalize(mul((float3x3)_PlanetLocalToRender,geological)):normalize(input.normal);
                     smoothness=PlanetGeologicalSmoothness(smoothness,variance);
                 }
+                float regionalDetailLuminance=dot(albedo,float3(.2126,.7152,.0722));
                 albedo=PlanetApplyGlobalColorWorld(albedo,radialUp);
+                float3 regionalTone=1;
+                if(_PlanetRegionalColorCount>0&&_PlanetRegionalColorControls.y>0&&_PlanetGlobalColorBlend>0)
+                    regionalTone=PlanetGlobalColorRelativeTint(mul((float3x3)_PlanetGlobalColorWorldToLocal,radialUp));
+                albedo=PlanetRegionalColorApply(albedo,input.detail,regionalTone,regionalDetailLuminance);
                 float3 brdf=albedo*INV_PI;
                 if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)brdf*=1-metallic;
                 float3 viewDirection=normalize(-input.relative);
