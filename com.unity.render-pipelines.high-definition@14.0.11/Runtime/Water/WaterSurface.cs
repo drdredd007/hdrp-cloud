@@ -357,7 +357,7 @@ namespace UnityEngine.Rendering.HighDefinition
         /// Controls the approximative distance in meters that the camera can perceive through a water surface. This distance can vary widely depending on the intensity of the light the object receives.
         /// </summary>
         [Tooltip("Controls the approximative distance in meters that the camera can perceive through a water surface. This distance can vary widely depending on the intensity of the light the object receives.")]
-        public float absorptionDistance = 5.0f;
+        [Min(.01f)] public float absorptionDistance = 5.0f;
         #endregion
 
         #region Water Scattering

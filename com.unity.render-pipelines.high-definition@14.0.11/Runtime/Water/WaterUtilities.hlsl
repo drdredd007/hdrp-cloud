@@ -263,6 +263,20 @@ float UnpackLowFrequencyHeight(float normalizedDisplacement)
     return normalizedDisplacement * 2.0 - 1.0;
 }
 
+float3 SampleWaterDisplacementBand(float3 positionAWS,float2 uv,int band)
+{
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())
+    {
+        float3 weights=PlanetWaterProjectionWeights(positionAWS),value=0;
+        [unroll]for(int plane=0;plane<3;plane++)
+            value+=weights[plane]*SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer,s_linear_repeat_sampler,PlanetWaterProjectionUV(positionAWS,band,plane),band,0).xyz;
+        return value;
+    }
+#endif
+    return SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer,s_linear_repeat_sampler,uv,band,0).xyz;
+}
+
 void EvaluateWaterDisplacement(float3 positionAWS, float4 bandsMultiplier, out WaterDisplacementData displacementData)
 {
     // Compute the simulation coordinates
@@ -285,14 +299,14 @@ void EvaluateWaterDisplacement(float3 positionAWS, float4 bandsMultiplier, out W
     float2 waterMask = SAMPLE_TEXTURE2D_LOD(_WaterMask, sampler_WaterMask, maskUV, 0).xy;
 
     // First band
-    rawDisplacement = SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer, s_linear_repeat_sampler, waterCoord.uvBand0, 0, 0).xyz * _PatchAmplitudeMultiplier[0] * waterMask.x * bandsMultiplier.x;
+    rawDisplacement = SampleWaterDisplacementBand(positionAWS,waterCoord.uvBand0,0) * _PatchAmplitudeMultiplier[0] * waterMask.x * bandsMultiplier.x;
     rawDisplacement = lerp(rawDisplacement, rawDisplacement * _PatchFadeValue[0], saturate((distanceToCamera - _PatchFadeStart[0]) / _PatchFadeDistance[0]));
     totalDisplacement += rawDisplacement;
     lowFrequencyHeight += rawDisplacement.x;
 
 #if defined(WATER_TWO_BANDS) || defined(WATER_THREE_BANDS)
     // Second band
-    rawDisplacement = SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer, s_linear_repeat_sampler, waterCoord.uvBand1, 1, 0).xyz * _PatchAmplitudeMultiplier[1] * waterMask.x * bandsMultiplier.y;
+    rawDisplacement = SampleWaterDisplacementBand(positionAWS,waterCoord.uvBand1,1) * _PatchAmplitudeMultiplier[1] * waterMask.x * bandsMultiplier.y;
     rawDisplacement = lerp(rawDisplacement, rawDisplacement * _PatchFadeValue[1], saturate((distanceToCamera - _PatchFadeStart[1]) / _PatchFadeDistance[1]));
     totalDisplacement += rawDisplacement;
     lowFrequencyHeight += rawDisplacement.x;
@@ -300,7 +314,7 @@ void EvaluateWaterDisplacement(float3 positionAWS, float4 bandsMultiplier, out W
 
 #if defined(WATER_THREE_BANDS)
     // Third band
-    rawDisplacement = SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer, s_linear_repeat_sampler, waterCoord.uvBand2, 2, 0).xyz * _PatchAmplitudeMultiplier[2] * waterMask.y * bandsMultiplier.z;
+    rawDisplacement = SampleWaterDisplacementBand(positionAWS,waterCoord.uvBand2,2) * _PatchAmplitudeMultiplier[2] * waterMask.y * bandsMultiplier.z;
     rawDisplacement = lerp(rawDisplacement, rawDisplacement * _PatchFadeValue[2], saturate((distanceToCamera - _PatchFadeStart[2]) / _PatchFadeDistance[2]));
     totalDisplacement += rawDisplacement;
 #endif
@@ -351,6 +365,24 @@ struct WaterAdditionalData
 };
 
 #if !defined(WATER_SIMULATION)
+void SampleWaterAdditionalBand(float3 positionAWS,float2 uv,int band,float4 texSize,out float4 data,out float3 gradient)
+{
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())
+    {
+        float3 weights=PlanetWaterProjectionWeights(positionAWS);data=0;gradient=0;
+        [unroll]for(int plane=0;plane<3;plane++)
+        {
+            float4 sampleData=SampleTexture2DArrayBicubic(TEXTURE2D_ARRAY_ARGS(_WaterAdditionalDataBuffer,s_linear_repeat_sampler),PlanetWaterProjectionUV(positionAWS,band,plane),band,texSize);
+            data+=weights[plane]*sampleData;
+            gradient+=weights[plane]*PlanetWaterBandGradient(sampleData.xy,plane);
+        }
+        return;
+    }
+#endif
+    data=SampleTexture2DArrayBicubic(TEXTURE2D_ARRAY_ARGS(_WaterAdditionalDataBuffer,s_linear_repeat_sampler),uv,band,texSize);
+    gradient=float3(data.x,0,data.y);
+}
 void EvaluateWaterAdditionalData(float3 positionAWS, float4 bandsMultiplier, out WaterAdditionalData waterAdditionalData)
 {
     // Compute the simulation coordinates
@@ -378,24 +410,19 @@ void EvaluateWaterAdditionalData(float3 positionAWS, float4 bandsMultiplier, out
     float jacobianDeep = 0.0;
 
     // First band
-    float4 additionalData = SampleTexture2DArrayBicubic(TEXTURE2D_ARRAY_ARGS(_WaterAdditionalDataBuffer, s_linear_repeat_sampler), waterCoord.uvBand0, 0, texSize);
+    float4 additionalData;float3 band0SG;
+    SampleWaterAdditionalBand(positionAWS,waterCoord.uvBand0,0,texSize,additionalData,band0SG);
     jacobianSurface += additionalData.z;
     jacobianDeep += additionalData.w;
-    float3 band0SG = float3(additionalData.x, 0, additionalData.y) * waterMask.x * bandsMultiplier.x;
-#if defined(SHADER_API_D3D11)
-    if(PlanetWaterEnabled())band0SG=PlanetWaterBandGradient(additionalData.xy,0)*waterMask.x*bandsMultiplier.x;
-#endif
+    band0SG *= waterMask.x * bandsMultiplier.x;
     surfaceGradient += lerp(band0SG, band0SG * _PatchFadeValue[0], saturate((distanceToCamera - _PatchFadeStart[0]) / _PatchFadeDistance[0]));
 
 #if defined(WATER_TWO_BANDS) || defined(WATER_THREE_BANDS)
     // Second band
-    additionalData = SampleTexture2DArrayBicubic(TEXTURE2D_ARRAY_ARGS(_WaterAdditionalDataBuffer, s_linear_repeat_sampler), waterCoord.uvBand1, 1, texSize);
+    float3 band1SG;SampleWaterAdditionalBand(positionAWS,waterCoord.uvBand1,1,texSize,additionalData,band1SG);
     jacobianSurface += additionalData.z;
     jacobianDeep += additionalData.w;
-    float3 band1SG = float3(additionalData.x, 0, additionalData.y) * waterMask.x * bandsMultiplier.y;
-#if defined(SHADER_API_D3D11)
-    if(PlanetWaterEnabled())band1SG=PlanetWaterBandGradient(additionalData.xy,1)*waterMask.x*bandsMultiplier.y;
-#endif
+    band1SG *= waterMask.x * bandsMultiplier.y;
     surfaceGradient += lerp(band1SG, band1SG * _PatchFadeValue[1], saturate((distanceToCamera - _PatchFadeStart[1]) / _PatchFadeDistance[1]));
 #endif
 
@@ -404,13 +431,10 @@ void EvaluateWaterAdditionalData(float3 positionAWS, float4 bandsMultiplier, out
 
 #if defined(WATER_THREE_BANDS)
     // Third band
-    additionalData = SampleTexture2DArrayBicubic(TEXTURE2D_ARRAY_ARGS(_WaterAdditionalDataBuffer, s_linear_repeat_sampler), waterCoord.uvBand2, 2, texSize);
+    float3 band2SG;SampleWaterAdditionalBand(positionAWS,waterCoord.uvBand2,2,texSize,additionalData,band2SG);
     jacobianSurface += additionalData.z;
     jacobianDeep += additionalData.w;
-    float3 band2SG = float3(additionalData.x, 0, additionalData.y) * waterMask.y * bandsMultiplier.z;
-#if defined(SHADER_API_D3D11)
-    if(PlanetWaterEnabled())band2SG=PlanetWaterBandGradient(additionalData.xy,2)*waterMask.y*bandsMultiplier.z;
-#endif
+    band2SG *= waterMask.y * bandsMultiplier.z;
     surfaceGradient += lerp(band2SG, band2SG * _PatchFadeValue[2], saturate((distanceToCamera - _PatchFadeStart[2]) / _PatchFadeDistance[2]));
 #endif
 
@@ -472,6 +496,22 @@ void EvaluateFoamData(float3 surfaceGradient, float3 lowFrequencySurfaceGradient
     float2 foamUV = EvaluateFoamUV(positionAWS);
 
     float foamTex = SAMPLE_TEXTURE2D(_FoamTexture, s_linear_repeat_sampler, foamUV).x;
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())
+    {
+        float3 weights=PlanetWaterProjectionWeights(positionAWS);foamTex=0;
+        float3 relative=(float3)(PlanetWaterLocalPoint(positionAWS)-PlanetWaterOrigin());
+        float3 dx=ddx(relative)*_FoamTilling,dy=ddy(relative)*_FoamTilling;
+        [unroll]for(int plane=0;plane<3;plane++)
+        {
+            float2 uv=PlanetWaterWrappedProjection(positionAWS,plane,(double)_FoamTilling,OrientationToDirection(_PatchCurrentOrientation[0])*_PatchCurrentSpeed[0]*_SimulationTime);
+            // Wrapped UV derivatives must not select a coarse mip at a repeat boundary.
+            float2 uvDx=plane==0?dx.xy:plane==1?dx.yz:dx.xz;
+            float2 uvDy=plane==0?dy.xy:plane==1?dy.yz:dy.xz;
+            foamTex+=weights[plane]*SAMPLE_TEXTURE2D_GRAD(_FoamTexture,s_linear_repeat_sampler,uv,uvDx,uvDy).x;
+        }
+    }
+#endif
 
     // Final foam value
     foamData.foamValue = surfaceFoam * _WindFoamAttenuation * foamTex;
@@ -487,6 +527,26 @@ void EvaluateFoamData(float3 surfaceGradient, float3 lowFrequencySurfaceGradient
 }
 
 #define WATER_BACKGROUND_ABSORPTION_DISTANCE 1000.f
+TEXTURE2D(_WaterPlanetOpaqueDepth);
+
+bool WaterBackgroundPosition(float2 uv,bool planetary,out float3 positionRWS)
+{
+    float rawDepth=SampleCameraDepth(uv);
+    positionRWS=ComputeWorldSpacePosition(uv,rawDepth,UNITY_MATRIX_I_VP);
+    bool ready=rawDepth!=UNITY_RAW_FAR_CLIP_VALUE;
+    if(planetary)
+    {
+        float metric=LOAD_TEXTURE2D(_WaterPlanetOpaqueDepth,(int2)clamp(uv*_ScreenSize.xy,0,_ScreenSize.xy-1)).a;
+        if(metric>0)
+        {
+            float3 nearPoint=ComputeWorldSpacePosition(uv,UNITY_NEAR_CLIP_VALUE,UNITY_MATRIX_I_VP);
+            float3 origin=GetCurrentViewPosition();
+            if(!ready||metric<length(positionRWS-origin))
+            {positionRWS=origin+normalize(nearPoint-origin)*metric;ready=true;}
+        }
+    }
+    return ready;
+}
 
 float EvaluateHeightBasedScattering(float lowFrequencyHeight)
 {
@@ -618,11 +678,11 @@ void ComputeWaterRefractionParams(float3 waterPosRWS, float3 waterNormal, float3
     out float3 refractedWaterPosRWS, out float2 distortedWaterNDC, out float refractedWaterDistance, out float3 absorptionTint)
 {
     // Compute the position of the surface behind the water surface
-    float  directWaterDepth = SampleCameraDepth(screenUV);
-    float3 directWaterPosRWS = ComputeWorldSpacePosition(screenUV, directWaterDepth, UNITY_MATRIX_I_VP);
+    float3 directWaterPosRWS;
+    bool directReady=WaterBackgroundPosition(screenUV,planetary,directWaterPosRWS);
 
     // Compute the distance between the water surface and the object behind
-    float underWaterDistance = directWaterDepth == UNITY_RAW_FAR_CLIP_VALUE ? WATER_BACKGROUND_ABSORPTION_DISTANCE : length(directWaterPosRWS - waterPosRWS);
+    float underWaterDistance = directReady ? length(directWaterPosRWS - waterPosRWS) : WATER_BACKGROUND_ABSORPTION_DISTANCE;
 
     // Blend both normals to decide what normal will be used for the refraction
     float3 refractionNormal = normalize(lerp(waterNormal, lowFrequencyNormals, saturate(underWaterDistance / max(maxRefractionDistance, 0.00001f))));
@@ -648,9 +708,8 @@ void ComputeWaterRefractionParams(float3 waterPosRWS, float3 waterNormal, float3
     distortedWaterNDC = ComputeNormalizedDeviceCoordinates(distortedWaterWS, UNITY_MATRIX_VP);
 
     // Compute the position of the surface behind the water surface
-    float refractedWaterDepth = SampleCameraDepth(distortedWaterNDC);
-    refractedWaterPosRWS = ComputeWorldSpacePosition(distortedWaterNDC, refractedWaterDepth, UNITY_MATRIX_I_VP);
-    refractedWaterDistance = refractedWaterDepth == UNITY_RAW_FAR_CLIP_VALUE ? WATER_BACKGROUND_ABSORPTION_DISTANCE : length(refractedWaterPosRWS - waterPosRWS);
+    bool refractedReady=WaterBackgroundPosition(distortedWaterNDC,planetary,refractedWaterPosRWS);
+    refractedWaterDistance = refractedReady ? length(refractedWaterPosRWS - waterPosRWS) : WATER_BACKGROUND_ABSORPTION_DISTANCE;
 
     // If the point that we are reading is closer than the water surface
     if (dot(refractedWaterPosRWS - waterPosRWS, viewWS) > 0.0)

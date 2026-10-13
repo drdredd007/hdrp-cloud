@@ -16,6 +16,9 @@ namespace UnityEngine.Rendering.HighDefinition
         RenderTexture metricDepth;
         bool disposed;
         MaterialPropertyBlock shorelineProperties;
+        Material opaqueDepthMaterial;
+        MaterialPropertyBlock opaqueDepthProperties;
+        PlanetLayerDepth opaqueDepth;
         public bool Active => surface && surface.enabled && state.Matches(owner.Observer);
         public WaterSurface Surface => surface;
         public RenderTexture MetricDepth => state.RenderedFrame >= 0 ? metricDepth : null;
@@ -25,12 +28,14 @@ namespace UnityEngine.Rendering.HighDefinition
             this.owner = owner;
             RenderPipelineManager.beginCameraRendering += BeginCamera;
             PlanetaryWaterRendering.MetricDepthReady += CaptureDepth;
+            PlanetaryWaterRendering.BindOpaqueDepth += BindOpaqueDepth;
         }
         void BeginCamera(ScriptableRenderContext context, Camera camera)
         {
             if (disposed || camera != owner.Observer) return;
             // A disabled camera frame setting/volume must not republish the previous render's endpoint.
             state.ResetHistory();
+            opaqueDepth=null;
             if (!owner.Enabled || !owner.HdrpWaterTemplate || !owner.Definition.IsValid || owner.Definition.GeneratorVersion != 3)
             { ReleaseSurface(); return; }
             if (SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Direct3D11)
@@ -81,6 +86,35 @@ namespace UnityEngine.Rendering.HighDefinition
             shoreline?.BindCanonicalShoreline(properties);
             properties.SetTexture("_PlanetWaterOpaqueEndpoints",owner.LayerDepth?.Current ? (Texture)owner.LayerDepth.Current : Texture2D.blackTexture);
             properties.SetTexture("_PlanetWaterOwnCoarseEndpoints",owner.OceanCoarseTerrainDistance ? (Texture)owner.OceanCoarseTerrainDistance : Texture2D.blackTexture);
+            properties.SetTexture("_WaterPlanetOpaqueDepth",opaqueDepth?.Current ? (Texture)opaqueDepth.Current : Texture2D.blackTexture);
+        }
+        void BindOpaqueDepth(Camera camera,CommandBuffer cmd,ComputeShader shader,int kernel)
+        {
+            if(!disposed&&camera==owner.Observer&&Active&&opaqueDepth?.Current)
+                cmd.SetComputeTextureParam(shader,kernel,"_WaterPlanetOpaqueDepth",opaqueDepth.Current);
+        }
+        internal void PrepareOpaqueDepth(CustomPassContext ctx,PlanetLayerDepth depth)
+        {
+            if(!Active||depth?.Current==null)return;
+            opaqueDepth=depth;
+            if(!state.Shoreline||!owner.OceanCoarseTerrainDistance)return;
+            if(!opaqueDepthMaterial)opaqueDepthMaterial=CoreUtils.CreateEngineMaterial(Resources.Load<Shader>("PlanetOcean"));
+            if(opaqueDepthProperties==null)opaqueDepthProperties=new MaterialPropertyBlock();
+            var properties=opaqueDepthProperties;properties.Clear();shoreline.BindCanonicalShoreline(properties);
+            var origin=owner.CameraPosition-owner.Definition.Center;float3 high=(float3)origin,low=(float3)(origin-(double3)high);
+            properties.SetVector("_OceanOriginHigh",new Vector4(high.x,high.y,high.z,0));
+            properties.SetVector("_OceanOriginLow",new Vector4(low.x,low.y,low.z,0));
+            double radius=state.Radius,altitude=state.Altitude,sea=state.SeaLevel;
+            properties.SetVector("_OceanDimensionsHigh",new Vector4((float)radius,(float)altitude,(float)sea,0));
+            properties.SetVector("_OceanDimensionsLow",new Vector4((float)(radius-(double)(float)radius),(float)(altitude-(double)(float)altitude),(float)(sea-(double)(float)sea),0));
+            var q=Quaternion.Inverse(owner.PlanetRotation);
+            properties.SetVector("_OceanWorldToLocal",new Vector4(q.x,q.y,q.z,q.w));
+            properties.SetInt("_OceanShorelineEnabled",1);
+            properties.SetTexture("_OceanBuffer",Texture2D.blackTexture);
+            properties.SetTexture("_OceanCoarseTerrainDistance",owner.OceanCoarseTerrainDistance);
+            // The legacy merge already refines a root's chord when no opaque sea
+            // is submitted. Reuse it for both dry terrain and submerged seabed.
+            depth.Merge(ctx,opaqueDepthMaterial,properties);
         }
         void CaptureDepth(Camera camera, CommandBuffer cmd, RenderTexture source)
         {
@@ -108,6 +142,8 @@ namespace UnityEngine.Rendering.HighDefinition
             if (disposed) return; disposed = true;
             RenderPipelineManager.beginCameraRendering -= BeginCamera;
             PlanetaryWaterRendering.MetricDepthReady -= CaptureDepth;
+            PlanetaryWaterRendering.BindOpaqueDepth -= BindOpaqueDepth;
+            CoreUtils.Destroy(opaqueDepthMaterial);opaqueDepthMaterial=null;opaqueDepth=null;
             ReleaseSurface();
         }
     }

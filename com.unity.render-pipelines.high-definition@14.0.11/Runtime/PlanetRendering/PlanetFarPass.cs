@@ -209,9 +209,10 @@ namespace UnityEngine.Rendering.HighDefinition
             terrainShadows.Prepare(Definition,Quaternion.Inverse(PlanetRotation)*shadowSun,shadowSun,PeriodicSurfaceSettings,properties);
             bool nativeCoverage=UsesNativeSurface&&nativeGeometry!=null&&nativeGeometry.DrawCoverage(ctx);
             bool hasSea=!(hdrpWater?.Active??false)&&ocean.WantsRender(this);
-            if((nativeCoverage||hasSea)&&LayerDepth==null)
+            bool nativeWater=hdrpWater?.Active??false;
+            if((nativeCoverage||hasSea||nativeWater)&&LayerDepth==null)
             {if(nativeOwnedDepth==null)nativeOwnedDepth=new PlanetLayerDepth();nativeOwnedDepth.Begin(ctx);}
-            var effectiveDepth=LayerDepth??((nativeCoverage||hasSea)?nativeOwnedDepth:null);
+            var effectiveDepth=LayerDepth??((nativeCoverage||hasSea||nativeWater)?nativeOwnedDepth:null);
             composite.SetFloat("_PlanetHasNativeCoverage",nativeCoverage?1:0);
             if(nativeCoverage)composite.SetTexture("_PlanetNativeCoverage",nativeGeometry.Coverage);
             // Generation is enqueued before the draws below on the same command buffer.
@@ -377,6 +378,7 @@ namespace UnityEngine.Rendering.HighDefinition
             renderedThisFrame=true;renderedNear=hasNear;
             if(effectiveDepth!=null)effectiveDepth.Merge(ctx,composite);
             if(hasSea)ocean.Render(ctx,this,effectiveDepth);
+            if(nativeWater)hdrpWater.PrepareOpaqueDepth(ctx,effectiveDepth);
             // Published after this camera's layers, consumed by opaque fog and cloud tracing.
             ctx.cmd.SetGlobalTexture("_PlanetWeatherFarDistance",effectiveDepth!=null?effectiveDepth.Current:farBuffer);
             ctx.cmd.SetGlobalTexture("_PlanetWeatherNearDistance",hasNear?nearBuffer:farBuffer);

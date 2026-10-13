@@ -18,16 +18,29 @@ double3 PlanetWaterLocalPoint(float3 positionAWS)
     float3 relative=GetCameraRelativePositionWS(positionAWS)/max(_PlanetWaterOptions.y,1e-8);
     return PlanetWaterOrigin()+(double3)PlanetWaterInverseRotate(relative);
 }
-float2 PlanetWaterUV(float3 positionAWS,int band)
+float2 PlanetWaterWrappedProjection(float3 positionAWS,int plane,double scale,float2 offset)
 {
     double3 p=PlanetWaterLocalPoint(positionAWS);
-    double2 projected=band==0?p.xy:band==1?p.yz:p.xz;
-    double2 uv=(projected-(double2)(OrientationToDirection(_PatchCurrentOrientation[band])*_PatchCurrentSpeed[band]*_SimulationTime))/(double)_PatchSize[band];
+    double2 projected=plane==0?p.xy:plane==1?p.yz:p.xz;
+    double2 uv=(projected-(double2)offset)*scale;
     // Wrapped before float conversion so floating origins cannot reset or quantize wave phase.
     double2 whole=(double2)floor((float2)uv);
     uv-=whole;
     uv-=(double2)floor((float2)uv);
     return (float2)uv;
+}
+float2 PlanetWaterProjectionUV(float3 positionAWS,int band,int plane)
+{
+    return PlanetWaterWrappedProjection(positionAWS,plane,1.0L/(double)_PatchSize[band],OrientationToDirection(_PatchCurrentOrientation[band])*_PatchCurrentSpeed[band]*_SimulationTime);
+}
+float2 PlanetWaterUV(float3 positionAWS,int band){return PlanetWaterProjectionUV(positionAWS,band,band);}
+float3 PlanetWaterProjectionWeights(float3 positionAWS)
+{
+    float3 n=(float3)PlanetWaterUnit(PlanetWaterLocalPoint(positionAWS));
+    // Every FFT band uses all three charts. A chart loses weight before its
+    // projection becomes edge-on; assigning one chart to a band stretches it at its poles.
+    float3 w=n*n;w*=w;w*=w;
+    return w.zxy/(w.x+w.y+w.z);
 }
 bool PlanetWaterIntersect(float3 worldRay,double radius,out double distance)
 {
@@ -42,7 +55,9 @@ bool PlanetWaterIntersect(float3 worldRay,double radius,out double distance)
 float3 PlanetWaterBandGradient(float2 gradient,int band)
 {
     float3 g=band==0?float3(gradient,0):band==1?float3(0,gradient):float3(gradient.x,0,gradient.y);
-    return float3(dot(g,planetWaterTangentU),0,dot(g,planetWaterTangentV));
+    float3 n=(float3)PlanetWaterUnit(planetWaterPixelPoint);
+    // WaterSurfaceGradients subtracts this directly from the world-space normal.
+    return PlanetWaterRotate(g-n*dot(g,n));
 }
 #endif
 #endif

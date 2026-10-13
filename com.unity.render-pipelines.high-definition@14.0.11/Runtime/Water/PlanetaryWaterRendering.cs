@@ -7,6 +7,12 @@ namespace UnityEngine.Rendering.HighDefinition
     public sealed class PlanetaryWaterRendering
     {
         public static event Action<Camera, CommandBuffer, RenderTexture> MetricDepthReady;
+        public static event Action<Camera, CommandBuffer, ComputeShader, int> BindOpaqueDepth;
+        internal static void BindPlanetOpaqueDepth(Camera camera,CommandBuffer cmd,ComputeShader shader,int kernel)
+        {
+            cmd.SetComputeTextureParam(shader,kernel,"_WaterPlanetOpaqueDepth",Texture2D.blackTexture);
+            BindOpaqueDepth?.Invoke(camera,cmd,shader,kernel);
+        }
         internal static void PublishMetricDepth(Camera camera, CommandBuffer cmd, RenderTexture source)
             => MetricDepthReady?.Invoke(camera, cmd, source);
         public Camera Observer;
