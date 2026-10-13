@@ -45,7 +45,7 @@ namespace UnityEngine.Rendering.HighDefinition
         // Light the surface with HDRP directional lights when the camera has any, instead of LightDirection/LightLux.
         public bool UseSceneLights=true;
         public Quaternion CelestialLightRotation=Quaternion.identity;
-        readonly PlanetPeriodicTerrainShadows terrainShadows=new PlanetPeriodicTerrainShadows();
+        [NonSerialized] PlanetPeriodicTerrainShadows terrainShadows;
         Light terrainShadowSun;
         public PlanetPeriodicTerrainShadows TerrainShadows=>terrainShadows;
         Vector3 TerrainSunDirection()
@@ -65,12 +65,12 @@ namespace UnityEngine.Rendering.HighDefinition
         public int DebugView;
         // Optional; PlanetPatchGenerator is otherwise loaded from this module's Resources.
         public ComputeShader Generator;
-        public int PatchCount=>geometry.Active.Count;
+        public int PatchCount=>geometry?.Active.Count??0;
         public double Altitude=>math.length(CameraPosition-Definition.Center)-Definition.Radius;
-        readonly PlanetGpuPatchBackend farPatches=new PlanetGpuPatchBackend(PlanetPatchLayout.Far),nearPatches=new PlanetGpuPatchBackend(PlanetPatchLayout.Local);
-        readonly PlanetSurfaceCache geometry;
+        [NonSerialized] PlanetGpuPatchBackend farPatches,nearPatches;
+        [NonSerialized] PlanetSurfaceCache geometry;
         public PlanetLodSettings LodSettings=PlanetLodSettings.Default;
-        public bool IsRefining=>geometry.IsRefining;
+        public bool IsRefining=>geometry?.IsRefining??false;
         public bool EnableLocalSurface;
         public Texture2D PeriodicNormalSlopes;
         public PlanetPeriodicSurfaceSettings PeriodicSurfaceSettings;
@@ -83,23 +83,23 @@ namespace UnityEngine.Rendering.HighDefinition
         {get{if(BaseMapOverride)return BaseMapOverride;return PlanetSurfaceDataRegistry.TryGetBaseColour(Definition.Surface,out var value)?value:null;}}
         public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
         public PlanetOceanSettings OceanSettings=PlanetOceanSettings.Default;
-        readonly PlanetOceanRenderer ocean=new PlanetOceanRenderer();
+        [NonSerialized] PlanetOceanRenderer ocean;
         public PlanetOceanRenderer OceanRenderer=>ocean;
         internal RenderTexture OceanCoarseTerrainDistance=>farBuffer;
         public PlanetScatterSettings ScatterSettings;
         public SurfaceScatterPlanetId ScatterInstanceId;
         public bool ScatterMaterialsReady;
         [NonSerialized] public SurfaceScatterExclusions ScatterExclusions;
-        public int LocalSurfacePatchCount=>UsesNativeSurface?(nativeGeometry?.PatchCount??0):nearGeometry.Slots.Count;
+        public int LocalSurfacePatchCount=>UsesNativeSurface?(nativeGeometry?.PatchCount??0):(nearGeometry?.Slots.Count??0);
         public bool HasLocalSurfaceAt(double3 position)
         {
             var q=(double4)((quaternion)PlanetRotation).value;
             var local=PlanetField.Rotate(new double4(-q.xyz,q.w),position-Definition.Center);
-            return UsesNativeSurface?nativeGeometry!=null&&nativeGeometry.Covers(Definition,local,0):EnableLocalSurface&&nearGeometry.Covers(Definition,local,128);
+            return UsesNativeSurface?nativeGeometry!=null&&nativeGeometry.Covers(Definition,local,0):EnableLocalSurface&&nearGeometry!=null&&nearGeometry.Covers(Definition,local,128);
         }
-        readonly PlanetNearSurfaceCache nearGeometry;
-        PlanetNativeSurfaceRenderer nativeGeometry;
-        PlanetScatterRenderer scatter;
+        [NonSerialized] PlanetNearSurfaceCache nearGeometry;
+        [NonSerialized] PlanetNativeSurfaceRenderer nativeGeometry;
+        [NonSerialized] PlanetScatterRenderer scatter;
         PlanetLayerDepth nativeOwnedDepth;
         GraphicsBuffer neutralAttributes;
         // An assigned but invalid native palette is an explicit native error, not a silent legacy-near substitution.
@@ -108,7 +108,21 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetNativeSurfaceRenderer NativeRenderer=>nativeGeometry;
         public PlanetScatterRenderer ScatterRenderer=>scatter;
         public string ScatterStatus=>scatter?.Status??"Scatter is released";
-        public PlanetFarPass(){geometry=new PlanetSurfaceCache(farPatches);nearGeometry=new PlanetNearSurfaceCache(nearPatches);nativeGeometry=new PlanetNativeSurfaceRenderer(this);scatter=new PlanetScatterRenderer(this);liveOwners.Add(this);}
+        public PlanetFarPass(){EnsureRuntimeResources();}
+        void EnsureRuntimeResources()
+        {
+            // Reloads may leave runtime fields absent. Construction must use managed state
+            // only: Unity also calls it while deserializing a window or custom pass volume.
+            if(farPatches==null)farPatches=new PlanetGpuPatchBackend(PlanetPatchLayout.Far);
+            if(nearPatches==null)nearPatches=new PlanetGpuPatchBackend(PlanetPatchLayout.Local);
+            if(geometry==null)geometry=new PlanetSurfaceCache(farPatches);
+            if(nearGeometry==null)nearGeometry=new PlanetNearSurfaceCache(nearPatches);
+            if(terrainShadows==null)terrainShadows=new PlanetPeriodicTerrainShadows();
+            if(ocean==null)ocean=new PlanetOceanRenderer();
+            if(nativeGeometry==null)nativeGeometry=new PlanetNativeSurfaceRenderer(this);
+            if(scatter==null)scatter=new PlanetScatterRenderer(this);
+            if(!liveOwners.Contains(this))liveOwners.Add(this);
+        }
         public bool TryPrepareSurfaceRevision(PlanetDefinition candidate,SurfaceScatterExclusions proposedExclusions,out string status)
         {
             status="Surface revision is not ready";
@@ -150,23 +164,21 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public void CancelSurfaceRevision()
         {nativeGeometry?.CancelRevision();scatter?.CancelRevision();stagedFilter?.Dispose();stagedFilter=null;stagedSurface=null;stagedScatterExclusions=null;}
-        Material surface,composite;
-        MaterialPropertyBlock properties;
+        [NonSerialized] Material surface,composite;
+        [NonSerialized] MaterialPropertyBlock properties;
         // Layer depth spans metres to thousands of kilometres; float depth keeps reversed-Z precision across it.
         const GraphicsFormat LayerColorFormat=GraphicsFormat.R32G32B32A32_SFloat,LayerDepthFormat=GraphicsFormat.D32_SFloat;
-        RenderTexture farBuffer;
-        RenderTexture nearBuffer;
+        [NonSerialized] RenderTexture farBuffer;
+        [NonSerialized] RenderTexture nearBuffer;
 
 
 
         protected override void Setup(ScriptableRenderContext context,CommandBuffer cmd)
         {
             if(!PlanetShader || !CompositeShader)throw new InvalidOperationException("Planet shaders must be serialized in the sample scene.");
+            EnsureRuntimeResources();
             surface=CoreUtils.CreateEngineMaterial(PlanetShader);composite=CoreUtils.CreateEngineMaterial(CompositeShader);
             properties=new MaterialPropertyBlock();
-            if(nativeGeometry==null)nativeGeometry=new PlanetNativeSurfaceRenderer(this);
-            if(scatter==null)scatter=new PlanetScatterRenderer(this);
-            if(!liveOwners.Contains(this))liveOwners.Add(this);
         }
         protected override void Execute(CustomPassContext ctx)
         {
@@ -370,8 +382,9 @@ namespace UnityEngine.Rendering.HighDefinition
         void ReleaseBuffer(){if(farBuffer){farBuffer.Release();CoreUtils.Destroy(farBuffer);farBuffer=null;}}
         void ReleaseNearBuffer(){if(nearBuffer){nearBuffer.Release();CoreUtils.Destroy(nearBuffer);nearBuffer=null;}}
 
-        protected override void Cleanup(){CancelSurfaceRevision();liveOwners.Remove(this);geometry.Dispose();nearGeometry.Dispose();nativeGeometry?.Dispose();nativeGeometry=null;scatter?.Dispose();scatter=null;nativeOwnedDepth?.Dispose();nativeOwnedDepth=null;neutralAttributes?.Dispose();neutralAttributes=null;
+        protected override void Cleanup(){CancelSurfaceRevision();liveOwners.Remove(this);geometry?.Dispose();nearGeometry?.Dispose();nativeGeometry?.Dispose();nativeGeometry=null;scatter?.Dispose();scatter=null;nativeOwnedDepth?.Dispose();nativeOwnedDepth=null;neutralAttributes?.Dispose();neutralAttributes=null;
             activeFilter?.Dispose();activeFilter=null;retiredFilter?.Dispose();retiredFilter=null;
-            terrainShadows.Dispose();ocean.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);CoreUtils.Destroy(composite);}
+            terrainShadows?.Dispose();ocean?.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);surface=null;CoreUtils.Destroy(composite);composite=null;
+            properties=null;renderedThisFrame=false;renderedNear=false;AtmosphereActive=false;}
     }
 }

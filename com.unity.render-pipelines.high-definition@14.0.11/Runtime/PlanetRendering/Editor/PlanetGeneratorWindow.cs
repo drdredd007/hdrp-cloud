@@ -15,12 +15,12 @@ namespace UnityEngine.Rendering.HighDefinition
         [SerializeField] bool livePreview=true;
         [SerializeField] double altitude=2000000;
         [SerializeField] Vector2 orbit=new Vector2(35,15);
-        UnityEditor.Editor inspector;
+        [NonSerialized] UnityEditor.Editor inspector;
         Vector2 scroll;
-        Scene previewScene;
-        Camera previewCamera;
-        PlanetFarPass pass;
-        RenderTexture texture;
+        [NonSerialized] Scene previewScene;
+        [NonSerialized] Camera previewCamera;
+        [NonSerialized] PlanetFarPass pass;
+        [NonSerialized] RenderTexture texture;
         bool dirty=true,manualRefresh;
         double changedAt;
         string failure;
@@ -30,8 +30,8 @@ namespace UnityEngine.Rendering.HighDefinition
         double3 pickOrigin;
         double4 pickRotation,pickCameraRotation;
         string placementError;
-        WorldOrogenGenerationController generation;
-        OrogenDetailGenerationController detailGeneration;
+        [NonSerialized] WorldOrogenGenerationController generation;
+        [NonSerialized] OrogenDetailGenerationController detailGeneration;
 
         [MenuItem("Window/Rendering/HDRP Planet Generator")]
         public static void Open()=>GetWindow<PlanetGeneratorWindow>("Planet Generator");
@@ -59,6 +59,7 @@ namespace UnityEngine.Rendering.HighDefinition
             detailGeneration=new OrogenDetailGenerationController();detailGeneration.Changed+=OnGenerationChanged;
             PlanetGeneratorAssetInspector.SettingsChanged+=OnAssetChanged;minSize=new Vector2(760,440);EditorApplication.update+=Tick;Undo.undoRedoPerformed+=Invalidate;
             EditorApplication.playModeStateChanged+=OnPlayMode;AssemblyReloadEvents.beforeAssemblyReload+=BeforeReload;
+            Invalidate();
         }
         void OnDisable()
         {

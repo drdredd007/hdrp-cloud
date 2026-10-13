@@ -80,7 +80,7 @@ namespace UnityEngine.Rendering.HighDefinition
             public void Dispose(){foreach(var request in Requests)request.Dispose();Requests.Clear();Bank.Dispose();}
         }
         readonly PlanetFarPass owner;
-        readonly MaterialPropertyBlock sharedProperties=new MaterialPropertyBlock();
+        MaterialPropertyBlock sharedProperties;
         Bank active;Pending pending;
         readonly List<Pending> abandoned=new List<Pending>();
         readonly List<Bank> retired=new List<Bank>();
@@ -161,6 +161,7 @@ namespace UnityEngine.Rendering.HighDefinition
             // Keep each cell's previous transform separate for object motion vectors.
             using(MaterialMarker.Auto())
             {
+                if(sharedProperties==null)sharedProperties=new MaterialPropertyBlock();
                 sharedProperties.Clear();PlanetTerrainMaterialBinding.Bind(sharedProperties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation,active.Definition.Surface);
                 WorldOrogenBaseMapBinding.Bind(sharedProperties,owner.BaseMapColour,owner.PlanetRotation,frame.Position,owner.Definition.Radius);
                 PlanetGlobalColorSettings.Bind(sharedProperties,owner.EffectiveGlobalColor,(float)owner.Altitude,owner.PlanetRotation);

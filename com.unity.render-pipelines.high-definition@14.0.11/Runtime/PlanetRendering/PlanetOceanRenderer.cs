@@ -8,7 +8,7 @@ namespace UnityEngine.Rendering.HighDefinition
     public sealed class PlanetOceanRenderer:IDisposable
     {
         Material material;
-        readonly MaterialPropertyBlock properties=new MaterialPropertyBlock();
+        MaterialPropertyBlock properties;
         RenderTexture buffer;
         PlanetSurfaceDescriptor descriptor;
         SurfaceRecipe recipe;
@@ -59,6 +59,9 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             double radius=recipe.Radius+recipe.SeaLevel;
             var origin=owner.CameraPosition-owner.Definition.Center;double altitude=math.length(origin)-radius;
+            // A PlanetFarPass can be constructed by Unity's serializer. Native objects
+            // must be created during rendering, after that constructor has completed.
+            if(properties==null)properties=new MaterialPropertyBlock();
             properties.Clear();SetDoubleVector("_OceanOrigin",origin);
             if(shoreline==null||!shoreline.Key.Equals(owner.Definition.Surface))
             {
