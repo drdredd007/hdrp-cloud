@@ -147,6 +147,16 @@ namespace UnityEngine.Rendering.HighDefinition
         static uint4 Z(double3 value){var z=Bits(value.z);return new uint4(z.x,z.y,0,0);}
         static void Set(CommandBuffer cmd,ComputeShader shader,string name,uint4 value)
             => cmd.SetComputeIntParams(shader,name,unchecked((int)value.x),unchecked((int)value.y),unchecked((int)value.z),unchecked((int)value.w));
+        // A global foundation has no local authority to overlay the canonical cube heights.
+        // Complex geological snapshots keep their existing native occlusion path.
+        internal bool BindCanonicalShoreline(MaterialPropertyBlock properties)
+        {
+            if(IsDisposed)throw new ObjectDisposedException(nameof(PlanetSurfaceGpuData));
+            properties.SetBuffer("_SurfaceTiles",tiles);properties.SetBuffer("_SurfaceHeights",heights);
+            properties.SetInt("_SurfaceTileCount",view.Tiles.Length);properties.SetInt("_SurfaceCanonicalLevel",view.CanonicalTileLevel);
+            return view.Regions.Length==0&&view.Stamps.Length==0&&view.Detail.AmplitudeMetres==0&&
+                !view.StructuralField.Enabled&&!view.OrogenDetail.Enabled;
+        }
         internal void Bind(CommandBuffer cmd,ComputeShader shader,int kernel,PlanetSurfaceGpuFamily family=PlanetSurfaceGpuFamily.Complete)
         {
             if(IsDisposed)throw new ObjectDisposedException(nameof(PlanetSurfaceGpuData));

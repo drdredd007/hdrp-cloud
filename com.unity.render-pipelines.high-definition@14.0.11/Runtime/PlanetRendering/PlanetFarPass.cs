@@ -85,6 +85,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetOceanSettings OceanSettings=PlanetOceanSettings.Default;
         readonly PlanetOceanRenderer ocean=new PlanetOceanRenderer();
         public PlanetOceanRenderer OceanRenderer=>ocean;
+        internal RenderTexture OceanCoarseTerrainDistance=>farBuffer;
         public PlanetScatterSettings ScatterSettings;
         public SurfaceScatterPlanetId ScatterInstanceId;
         public bool ScatterMaterialsReady;

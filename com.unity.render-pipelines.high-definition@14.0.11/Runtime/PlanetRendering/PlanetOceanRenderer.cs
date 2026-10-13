@@ -13,13 +13,16 @@ namespace UnityEngine.Rendering.HighDefinition
         PlanetSurfaceDescriptor descriptor;
         SurfaceRecipe recipe;
         bool resolved;
+        PlanetSurfaceGpuData shoreline;
         public RenderTexture Buffer=>buffer;
+        public bool CanonicalShorelineActive {get;private set;}
         public bool RenderedThisFrame {get;private set;}
         public double SeaLevel=>resolved?recipe.SeaLevel:double.NaN;
         public string Status {get;private set;}="Static sea is not submitted";
         public bool WantsRender(PlanetFarPass owner)
         {
             RenderedThisFrame=false;
+            CanonicalShorelineActive=false;
             // The source's base map already contains ocean colours and bathymetry.
             if(owner.BaseMapColour){Status="World Orogen base map owns the ocean appearance";return false;}
             var settings=owner.OceanSettings.Resolved;
@@ -57,8 +60,17 @@ namespace UnityEngine.Rendering.HighDefinition
             double radius=recipe.Radius+recipe.SeaLevel;
             var origin=owner.CameraPosition-owner.Definition.Center;double altitude=math.length(origin)-radius;
             properties.Clear();SetDoubleVector("_OceanOrigin",origin);
-            properties.SetVector("_OceanDimensionsHigh",new Vector4((float)radius,(float)altitude,0,0));
-            properties.SetVector("_OceanDimensionsLow",new Vector4((float)(radius-(double)(float)radius),(float)(altitude-(double)(float)altitude),0,0));
+            if(shoreline==null||!shoreline.Key.Equals(owner.Definition.Surface))
+            {
+                var next=PlanetSurfaceGpuData.Acquire(owner.Definition);
+                var previous=shoreline;shoreline=next;PlanetSurfaceGpuData.Release(previous);
+            }
+            CanonicalShorelineActive=shoreline.BindCanonicalShoreline(properties);
+            properties.SetInt("_OceanShorelineEnabled",CanonicalShorelineActive?1:0);
+            var inverse=Quaternion.Inverse(owner.PlanetRotation);
+            properties.SetVector("_OceanWorldToLocal",new Vector4(inverse.x,inverse.y,inverse.z,inverse.w));
+            properties.SetVector("_OceanDimensionsHigh",new Vector4((float)radius,(float)altitude,(float)recipe.SeaLevel,0));
+            properties.SetVector("_OceanDimensionsLow",new Vector4((float)(radius-(double)(float)radius),(float)(altitude-(double)(float)altitude),(float)(recipe.SeaLevel-(double)(float)recipe.SeaLevel),0));
             var settings=owner.OceanSettings.Resolved;
             // SetColor converts sRGB to linear itself; these shader values are already linear.
             properties.SetVector("_OceanAlbedo",LinearVector(settings.Albedo));properties.SetFloat("_OceanSmoothness",settings.Smoothness);
@@ -79,16 +91,19 @@ namespace UnityEngine.Rendering.HighDefinition
             ctx.cmd.SetRenderTarget(buffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
             CoreUtils.DrawFullScreen(ctx.cmd,material,properties,shaderPassId:0);
             material.SetTexture("_OceanBuffer",buffer);material.SetTexture("_PlanetAccumulatedDepth",depth.Current);
+            properties.SetInt("_OceanShorelineEnabled",CanonicalShorelineActive&&owner.OceanCoarseTerrainDistance?1:0);
+            material.SetInt("_OceanShorelineEnabled",CanonicalShorelineActive&&owner.OceanCoarseTerrainDistance?1:0);
+            material.SetTexture("_OceanCoarseTerrainDistance",owner.OceanCoarseTerrainDistance?(Texture)owner.OceanCoarseTerrainDistance:Texture2D.blackTexture);
             material.SetFloat("_OceanLayerWeight",owner.LayerWeight);
             CoreUtils.SetRenderTarget(ctx.cmd,ctx.cameraColorBuffer);ctx.cmd.SetViewport(new Rect(0,0,width,height));
-            CoreUtils.DrawFullScreen(ctx.cmd,material,shaderPassId:2);
-            depth.Merge(ctx,material);RenderedThisFrame=true;Status="Opaque static sea submitted at recipe SeaLevel";
+            CoreUtils.DrawFullScreen(ctx.cmd,material,properties,shaderPassId:2);
+            depth.Merge(ctx,material,properties);RenderedThisFrame=true;Status="Opaque static sea submitted at recipe SeaLevel";
         }
         void SetDoubleVector(string name,double3 value)
         {var high=(float3)value;var low=(float3)(value-(double3)high);properties.SetVector(name+"High",new Vector4(high.x,high.y,high.z,0));properties.SetVector(name+"Low",new Vector4(low.x,low.y,low.z,0));}
         static Vector4 LinearVector(Color color)
         {var value=color.linear;return new Vector4(value.r,value.g,value.b,value.a);}
         void ReleaseBuffer(){if(buffer){buffer.Release();CoreUtils.Destroy(buffer);buffer=null;}}
-        public void Dispose(){ReleaseBuffer();CoreUtils.Destroy(material);material=null;resolved=false;RenderedThisFrame=false;}
+        public void Dispose(){PlanetSurfaceGpuData.Release(shoreline);shoreline=null;ReleaseBuffer();CoreUtils.Destroy(material);material=null;resolved=false;RenderedThisFrame=false;CanonicalShorelineActive=false;}
     }
 }

@@ -13,10 +13,10 @@ namespace UnityEngine.Rendering.HighDefinition
    ctx.cmd.SetRenderTarget(a);ctx.cmd.ClearRenderTarget(false,true,Color.clear);
   }
   static RenderTexture Make(int w,int h){var t=new RenderTexture(w,h,0,RenderTextureFormat.ARGBFloat){name="All planet distances",filterMode=FilterMode.Point};t.Create();return t;}
-  public void Merge(CustomPassContext ctx,Material material)
+  public void Merge(CustomPassContext ctx,Material material,MaterialPropertyBlock properties=null)
   {
    material.SetTexture("_PlanetAccumulatedDepth",a);ctx.cmd.SetRenderTarget(b);
-   CoreUtils.DrawFullScreen(ctx.cmd,material,shaderPassId:1);var old=a;a=b;b=old;
+   CoreUtils.DrawFullScreen(ctx.cmd,material,properties,shaderPassId:1);var old=a;a=b;b=old;
   }
   public void Publish(CommandBuffer cmd)
   {cmd.SetGlobalTexture("_PlanetWeatherFarDistance",a);cmd.SetGlobalInt("_PlanetWeatherHasNear",0);cmd.SetGlobalInt("_PlanetWeatherDepthReady",a?1:0);}

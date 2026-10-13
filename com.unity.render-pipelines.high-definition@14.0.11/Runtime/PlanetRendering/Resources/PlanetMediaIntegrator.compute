@@ -78,13 +78,15 @@ void MediaReadCameraRay(float2 pixel,out float3 direction,out float endpoint)
 {
     // Compute GetPositionInput adds the half-pixel center itself.
     uint2 pixelId=(uint2)clamp(floor(pixel+.5),0,_ScreenSize.xy-1);
-    PositionInputs ray=GetPositionInput(pixel,_ScreenSize.zw,.5,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
+    // A reduced grid can request fractional pixels. Its ray must use the same
+    // pixel centre as the sampled opaque endpoint, or it integrates below a sea surface.
+    PositionInputs ray=GetPositionInput((float2)pixelId,_ScreenSize.zw,.5,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
     direction=-GetWorldSpaceNormalizeViewDir(ray.positionWS);
     endpoint=1e30;
     float depth=LOAD_TEXTURE2D_X(_PlanetMediaOpaqueDepth,pixelId).x;
     if(depth!=UNITY_RAW_FAR_CLIP_VALUE)
     {
-        PositionInputs geometry=GetPositionInput(pixel,_ScreenSize.zw,depth,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
+        PositionInputs geometry=GetPositionInput((float2)pixelId,_ScreenSize.zw,depth,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
         endpoint=length(geometry.positionWS-GetCurrentViewPosition());
     }
     if(_PlanetMediaHasLayerDepth!=0)

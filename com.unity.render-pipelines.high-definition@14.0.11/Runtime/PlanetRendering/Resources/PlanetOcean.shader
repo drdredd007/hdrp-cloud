@@ -14,8 +14,11 @@ Shader "Hidden/SpaceRunner/Planet Static Ocean"
    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Sky/PhysicallyBasedSky/PhysicallyBasedSkyCommon.hlsl"
    #include "../PlanetMediaBody.hlsl"
    #include "../PlanetCelestialLights.hlsl"
+   #include "../PlanetSurfaceCanonicalHeight.hlsl"
    float3 _OceanOriginHigh,_OceanOriginLow;
-   float2 _OceanDimensionsHigh,_OceanDimensionsLow;
+   float3 _OceanDimensionsHigh,_OceanDimensionsLow;
+   int _OceanShorelineEnabled;
+   float4 _OceanWorldToLocal;
    float3 _OceanAlbedo,_OceanLightDirection,_OceanLightColor;
    float _OceanSmoothness,_OceanLightLux,_OceanOwnAir;
    int _OceanUseSceneLights;
@@ -57,6 +60,13 @@ Shader "Hidden/SpaceRunner/Planet Static Ocean"
     double b=OceanDot(origin,ray),c=altitude*(2.0L*radius+altitude),disc=b*b-c;
     if(altitude<=0||b>=0||disc<0)return 0;
     double distance=c/(-b+OceanSqrt(disc));if(distance<=0)return 0;
+    if(_OceanShorelineEnabled!=0)
+    {
+     double3 seaPosition=origin+ray*distance,q=(double3)_OceanWorldToLocal.xyz;
+     seaPosition+=2*SurfaceCross(q,SurfaceCross(q,seaPosition)+(double)_OceanWorldToLocal.w*seaPosition);
+     double3 unit;int face;double u,v,height;
+     if(!SurfaceCanonicalHeight(seaPosition,unit,face,u,v,height)||height>(double)_OceanDimensionsHigh.z+(double)_OceanDimensionsLow.z)return 0;
+    }
     float3 position=(float3)(origin+ray*distance),N=normalize(position),V=(float3)(-ray),radiance=0;
     uint count=_PlanetCelestialLightDataReady!=0?_PlanetCelestialLightCount:_DirectionalLightCount;
     if(_OceanUseSceneLights!=0&&count>0)
@@ -83,16 +93,46 @@ Shader "Hidden/SpaceRunner/Planet Static Ocean"
   {
    ZWrite Off ZTest Always Cull Off
    HLSLPROGRAM
-   #pragma target 4.5
+   #pragma target 5.0
    #pragma vertex Vert
    #pragma fragment MergeDepth
    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
-   TEXTURE2D(_OceanBuffer);TEXTURE2D(_PlanetAccumulatedDepth);
+   #include "../PlanetSurfaceCanonicalHeight.hlsl"
+   TEXTURE2D(_OceanBuffer);TEXTURE2D(_PlanetAccumulatedDepth);TEXTURE2D(_OceanCoarseTerrainDistance);
+   int _OceanShorelineEnabled;
+   float3 _OceanOriginHigh,_OceanOriginLow,_OceanDimensionsHigh,_OceanDimensionsLow;
+   float4 _OceanWorldToLocal;
+   float DryGroundDistance(Varyings input,float coarse)
+   {
+    PositionInputs p=GetPositionInput(input.positionCS.xy,_ScreenSize.zw,.5,UNITY_MATRIX_I_VP,UNITY_MATRIX_V);
+    double3 ray=SurfaceUnit((double3)(-GetWorldSpaceNormalizeViewDir(p.positionWS)));
+    double3 origin=(double3)_OceanOriginHigh+(double3)_OceanOriginLow,q=(double3)_OceanWorldToLocal.xyz;
+    double seaRadius=(double)_OceanDimensionsHigh.x+(double)_OceanDimensionsLow.x;
+    double seaAltitude=(double)_OceanDimensionsHigh.y+(double)_OceanDimensionsLow.y;
+    double seaLevel=(double)_OceanDimensionsHigh.z+(double)_OceanDimensionsLow.z;
+    double b=SurfaceDot(origin,ray),distance=(double)coarse;
+    // Refine the dry receiver endpoint without moving the mesh or changing source heights.
+    // This keeps the atmosphere from treating an inland chord as a submerged point.
+    [unroll]for(int i=0;i<3;i++)
+    {
+     double3 receiver=origin+ray*distance;
+     receiver+=2*SurfaceCross(q,SurfaceCross(q,receiver)+(double)_OceanWorldToLocal.w*receiver);
+     double3 unit;int face;double u,v,height;
+     if(!SurfaceCanonicalHeight(receiver,unit,face,u,v,height))break;
+     double radius=seaRadius+height-seaLevel,altitude=seaAltitude-height+seaLevel;
+     double c=altitude*(2.0L*radius+altitude),disc=b*b-c;
+     if(altitude<=0||b>=0||disc<0)break;
+     distance=c/(-b+SurfaceSqrt(disc));
+    }
+    return (float)distance;
+   }
    float4 MergeDepth(Varyings input):SV_Target
    {
     uint2 pixel=uint2(input.positionCS.xy);float distance=LOAD_TEXTURE2D(_OceanBuffer,pixel).a;
     float previous=LOAD_TEXTURE2D(_PlanetAccumulatedDepth,pixel).a;
-    if(previous>0&&(distance<=0||previous<distance))distance=previous;
+    bool ownChord=_OceanShorelineEnabled!=0&&previous>0&&previous==LOAD_TEXTURE2D(_OceanCoarseTerrainDistance,pixel).a;
+    if(ownChord&&distance<=0)previous=DryGroundDistance(input,previous);
+    if(previous>0&&(distance<=0||previous<distance&&!ownChord))distance=previous;
     return float4(0,0,0,distance);
    }
    ENDHLSL
@@ -105,11 +145,14 @@ Shader "Hidden/SpaceRunner/Planet Static Ocean"
    #pragma vertex Vert
    #pragma fragment Composite
    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
-   TEXTURE2D(_OceanBuffer);TEXTURE2D(_PlanetAccumulatedDepth);float _OceanLayerWeight;
+   TEXTURE2D(_OceanBuffer);TEXTURE2D(_PlanetAccumulatedDepth);TEXTURE2D(_OceanCoarseTerrainDistance);float _OceanLayerWeight;
+   int _OceanShorelineEnabled;
    float4 Composite(Varyings input):SV_Target
    {
     uint2 pixel=uint2(input.positionCS.xy);float4 ocean=LOAD_TEXTURE2D(_OceanBuffer,pixel);if(ocean.a<=0)return 0;
-    float previous=LOAD_TEXTURE2D(_PlanetAccumulatedDepth,pixel).a;if(previous>0&&previous<ocean.a)return 0;
+    float previous=LOAD_TEXTURE2D(_PlanetAccumulatedDepth,pixel).a;
+    bool ownChord=_OceanShorelineEnabled!=0&&previous>0&&previous==LOAD_TEXTURE2D(_OceanCoarseTerrainDistance,pixel).a;
+    if(previous>0&&previous<ocean.a&&!ownChord)return 0;
     // Native ownership suppresses coarse terrain, not sea: underwater native
     // ground must be covered, while foreground props and dry land still win.
     float depth=LoadCameraDepth(input.positionCS.xy);
