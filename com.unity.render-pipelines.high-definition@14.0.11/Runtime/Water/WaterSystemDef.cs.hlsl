@@ -21,7 +21,7 @@ struct WaterSurfaceProfile
     float smoothnessFadeStart;
     float smoothnessFadeDistance;
     float roughnessEndValue;
-    float padding;
+    float planetary;
 };
 
 // Generated from UnityEngine.Rendering.HighDefinition.ShaderVariablesWaterRendering
@@ -46,6 +46,10 @@ CBUFFER_START(ShaderVariablesWaterRendering)
     float _WaterTessellationFadeStart;
     float _WaterTessellationFadeRange;
     int _CameraInUnderwaterRegion;
+    float4 _PlanetWaterOriginHigh;
+    float4 _PlanetWaterOriginLow;
+    float4 _PlanetWaterRotation;
+    float4 _PlanetWaterOptions;
 CBUFFER_END
 
 // Generated from UnityEngine.Rendering.HighDefinition.ShaderVariablesUnderWater

@@ -121,7 +121,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public float smoothnessFadeStart;
         public float smoothnessFadeDistance;
         public float roughnessEndValue;
-        public float padding;
+        public float planetary;
     }
 
     [GenerateHLSL(needAccessors = false, generateCBuffer = true)]
@@ -268,6 +268,10 @@ namespace UnityEngine.Rendering.HighDefinition
         public float _WaterTessellationFadeRange;
         // Flag that defines if the camera is in the underwater volume of this surface
         public int _CameraInUnderwaterRegion;
+        public Vector4 _PlanetWaterOriginHigh;
+        public Vector4 _PlanetWaterOriginLow;
+        public Vector4 _PlanetWaterRotation;
+        public Vector4 _PlanetWaterOptions;
     }
 
     [GenerateHLSL(needAccessors = false, generateCBuffer = true)]

@@ -25,6 +25,17 @@ namespace UnityEngine.Rendering.HighDefinition
             {
                 // Grab the current water surface
                 WaterSurface currentWater = waterSurfaces[surfaceIdx];
+                if (currentWater.geometryType == WaterGeometryType.Planetary)
+                {
+                    if (!currentWater.IsPlanetary || !currentWater.planetaryRendering.Matches(hdCamera.camera) || !currentWater.underWater) continue;
+                    double altitude = currentWater.planetaryRendering.Altitude;
+                    if (currentWater.simulation == null) continue;
+                    float maxWaveHeight = EvaluateMaxAmplitude(currentWater.simulation.spectrum.patchSizes.x,
+                        currentWater.simulation.spectrum.patchWindSpeed.x * WaterConsts.k_MeterPerSecondToKilometerPerHour);
+                    if (altitude > -currentWater.volumeDepth && altitude < maxWaveHeight * 1.5f && currentPriority < currentWater.volumePrority)
+                    { m_UnderWaterSurfaceIndex = surfaceIdx; currentPriority = currentWater.volumePrority; }
+                    continue;
+                }
 
                 // Does this surface need underwater rendering?
                 if (!currentWater.underWater)
@@ -84,6 +95,7 @@ namespace UnityEngine.Rendering.HighDefinition
             public TextureHandle colorBuffer;
             public TextureHandle normalBuffer;
             public TextureHandle depthBuffer;
+            public TextureHandle planetaryDistance;
             public TextureHandle causticsData;
             public ComputeBufferHandle cameraHeightBuffer;
 
@@ -91,7 +103,7 @@ namespace UnityEngine.Rendering.HighDefinition
             public TextureHandle outputColorBuffer;
         }
 
-        TextureHandle RenderUnderWaterVolume(RenderGraph renderGraph, HDCamera hdCamera, TextureHandle colorBuffer, TextureHandle normalBuffer, TextureHandle depthBuffer)
+        TextureHandle RenderUnderWaterVolume(RenderGraph renderGraph, HDCamera hdCamera, TextureHandle colorBuffer, TextureHandle normalBuffer, TextureHandle depthBuffer, TextureHandle planetaryDistance)
         {
             // Are we in the volume of any surface at all?
             if (m_UnderWaterSurfaceIndex == -1)
@@ -121,6 +133,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 passData.colorBuffer = builder.ReadTexture(colorBuffer);
                 passData.normalBuffer = builder.ReadTexture(normalBuffer);
                 passData.depthBuffer = builder.UseDepthBuffer(depthBuffer, DepthAccess.Read);
+                passData.planetaryDistance = builder.ReadTexture(planetaryDistance);
                 passData.cameraHeightBuffer = builder.ReadComputeBuffer(renderGraph.ImportComputeBuffer(m_WaterCameraHeightBuffer));
 
                 // Bind the caustics buffer that may be required
@@ -154,6 +167,7 @@ namespace UnityEngine.Rendering.HighDefinition
                         ctx.cmd.SetComputeTextureParam(data.waterLightingCS, data.underWaterKernel, HDShaderIDs._NormalBufferTexture, data.normalBuffer);
                         ctx.cmd.SetComputeTextureParam(data.waterLightingCS, data.underWaterKernel, HDShaderIDs._CameraColorTexture, data.colorBuffer);
                         ctx.cmd.SetComputeTextureParam(data.waterLightingCS, data.underWaterKernel, HDShaderIDs._DepthTexture, data.depthBuffer);
+                        ctx.cmd.SetComputeTextureParam(data.waterLightingCS, data.underWaterKernel, "_WaterPlanetDistanceTexture", data.planetaryDistance);
                         ctx.cmd.SetComputeTextureParam(data.waterLightingCS, data.underWaterKernel, HDShaderIDs._StencilTexture, data.depthBuffer, 0, RenderTextureSubElement.Stencil);
                         ctx.cmd.SetComputeBufferParam(data.waterLightingCS, data.underWaterKernel, HDShaderIDs._WaterCameraHeightBuffer, data.cameraHeightBuffer);
 

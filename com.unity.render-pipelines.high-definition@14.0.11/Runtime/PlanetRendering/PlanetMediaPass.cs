@@ -311,6 +311,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 ctx.cmd.DispatchCompute(integrator, transparentKernel, ((int)transparentGrid.x + 7) / 8, ((int)transparentGrid.y + 7) / 8, 1);
                 ctx.cmd.SetGlobalTexture("_PlanetMediaTransparentScattering", transparentScattering);
                 ctx.cmd.SetGlobalTexture("_PlanetMediaTransparentTransmission", transparentTransmission);
+                PlanetMediaCameraRegistry.SetTransparentTextures(Observer,this,transparentScattering,transparentTransmission);
             }
             composite.SetTexture("_PlanetMediaScattering", scattering);
             composite.SetTexture("_PlanetMediaTransmission", transmission);

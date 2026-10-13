@@ -16,6 +16,12 @@ VaryingsMeshToDS VertMeshWater(AttributesMesh input)
     UNITY_SETUP_INSTANCE_ID(input);
     // Transfer the unprocessed instance ID to the next stage
     UNITY_TRANSFER_INSTANCE_ID(input, output);
+    if(PlanetWaterEnabled())
+    {
+        output.positionRWS=ComputeWorldSpacePosition((input.positionOS.xz+1)*.5,.5,UNITY_MATRIX_I_VP);
+        output.texCoord0=float4(input.positionOS.xz,0,0);
+        output.normalWS=float3(0,1,0);output.tessellationFactor=1;return output;
+    }
 
     // Scale the position by the size of the grid to get the position that will be used for sampling the simulation
 #ifdef UNITY_PROCEDURAL_INSTANCING_ENABLED
@@ -89,6 +95,14 @@ VaryingsMeshToPS VertMeshTesselation(VaryingsMeshToDS input)
     UNITY_SETUP_INSTANCE_ID(input);
     // Transfer the unprocessed instance ID to the next stage
     UNITY_TRANSFER_INSTANCE_ID(input, output);
+    if(PlanetWaterEnabled())
+    {
+        // Keep the carrier triangle inside the clip range at every camera rotation.
+        // Reprojecting a point exactly on the near plane can clip part or all of it in float.
+        output.positionCS=float4(input.texCoord0.xy,.5,1);
+        output.positionRWS=input.positionRWS;output.normalWS=input.normalWS;
+        output.texCoord0=0;output.texCoord1=0;return output;
+    }
 
     // Restore the pre-vertex value to apply the actual deformation
     input.positionRWS -= input.texCoord0.xyz;
@@ -128,6 +142,7 @@ PackedVaryingsToPS VertTesselation(VaryingsToDS input)
 
 float4 GetTessellationFactors(float3 p0, float3 p1, float3 p2, float3 n0, float3 n1, float3 n2, float3 inputTessellationFactors)
 {
+    if(PlanetWaterEnabled())return 1;
     // For tessellation we want to process tessellation factor always from the point of view of the camera (to be consistent and avoid Z-fight).
     // For the culling part however we want to use the current view (shadow view).
     // Thus the following code play with both.

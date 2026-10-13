@@ -104,8 +104,23 @@ struct WaterSimulationCoordinates
 #endif
 };
 
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Water/PlanetaryWaterMath.hlsl"
+
 void ComputeWaterUVs(float3 positionWS, out WaterSimulationCoordinates waterCoord)
 {
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())
+    {
+        waterCoord.uvBand0=PlanetWaterUV(positionWS,0);
+        #if defined(WATER_TWO_BANDS) || defined(WATER_THREE_BANDS)
+        waterCoord.uvBand1=PlanetWaterUV(positionWS,1);
+        #endif
+        #if defined(WATER_THREE_BANDS)
+        waterCoord.uvBand2=PlanetWaterUV(positionWS,2);
+        #endif
+        return;
+    }
+#endif
     float2 uv = positionWS.xz;
     waterCoord.uvBand0 = (uv - OrientationToDirection(_PatchCurrentOrientation[0]) * _PatchCurrentSpeed[0] * _SimulationTime) / _PatchSize.x;
 #if defined(WATER_TWO_BANDS) || defined(WATER_THREE_BANDS)
@@ -118,6 +133,9 @@ void ComputeWaterUVs(float3 positionWS, out WaterSimulationCoordinates waterCoor
 
 float2 ComputeWaterUV(float3 positionWS, int bandIndex)
 {
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())return PlanetWaterUV(positionWS,bandIndex);
+#endif
     return (positionWS.xz - OrientationToDirection(_PatchCurrentOrientation[bandIndex]) * _PatchCurrentSpeed[bandIndex] * _SimulationTime) / _PatchSize[bandIndex];
 }
 
@@ -205,6 +223,15 @@ struct WaterDisplacementData
 
 float EvaluateSSSMask(float3 positionWS, float3 cameraPositionWS)
 {
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())
+    {
+        double3 p=PlanetWaterLocalPoint(positionWS),delta=PlanetWaterOrigin()-p;
+        float distanceToCamera=(float)PlanetWaterSqrt(PlanetWaterDot(delta,delta));
+        float angleWithWaterPlane=PositivePow(saturate(dot((float3)PlanetWaterUnit(delta),(float3)PlanetWaterUnit(p))),.2);
+        return (1-exp(-distanceToCamera*_SSSMaskCoefficient))*angleWithWaterPlane;
+    }
+#endif
     float3 viewWS = normalize(cameraPositionWS - positionWS);
     float distanceToCamera = distance(cameraPositionWS, positionWS);
     float angleWithWaterPlane = PositivePow(saturate(viewWS.y), 0.2);
@@ -249,6 +276,9 @@ void EvaluateWaterDisplacement(float3 positionAWS, float4 bandsMultiplier, out W
 
     // Evaluate the distance to the camera
     float distanceToCamera = length(GetCameraRelativePositionWS(positionAWS));
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled()){double3 d=PlanetWaterLocalPoint(positionAWS)-PlanetWaterOrigin();distanceToCamera=(float)PlanetWaterSqrt(PlanetWaterDot(d,d));}
+#endif
 
     // Attenuate using the water mask
     float2 maskUV = EvaluateWaterMaskUV(positionAWS);
@@ -334,6 +364,9 @@ void EvaluateWaterAdditionalData(float3 positionAWS, float4 bandsMultiplier, out
 
     // Evaluate the distance to the camera
     float distanceToCamera = length(GetCameraRelativePositionWS(positionAWS));
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled()){double3 d=PlanetWaterLocalPoint(positionAWS)-PlanetWaterOrigin();distanceToCamera=(float)PlanetWaterSqrt(PlanetWaterDot(d,d));}
+#endif
 
     // Attenuate using the water mask
     float2 maskUV = EvaluateWaterMaskUV(positionAWS);
@@ -349,6 +382,9 @@ void EvaluateWaterAdditionalData(float3 positionAWS, float4 bandsMultiplier, out
     jacobianSurface += additionalData.z;
     jacobianDeep += additionalData.w;
     float3 band0SG = float3(additionalData.x, 0, additionalData.y) * waterMask.x * bandsMultiplier.x;
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())band0SG=PlanetWaterBandGradient(additionalData.xy,0)*waterMask.x*bandsMultiplier.x;
+#endif
     surfaceGradient += lerp(band0SG, band0SG * _PatchFadeValue[0], saturate((distanceToCamera - _PatchFadeStart[0]) / _PatchFadeDistance[0]));
 
 #if defined(WATER_TWO_BANDS) || defined(WATER_THREE_BANDS)
@@ -357,6 +393,9 @@ void EvaluateWaterAdditionalData(float3 positionAWS, float4 bandsMultiplier, out
     jacobianSurface += additionalData.z;
     jacobianDeep += additionalData.w;
     float3 band1SG = float3(additionalData.x, 0, additionalData.y) * waterMask.x * bandsMultiplier.y;
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())band1SG=PlanetWaterBandGradient(additionalData.xy,1)*waterMask.x*bandsMultiplier.y;
+#endif
     surfaceGradient += lerp(band1SG, band1SG * _PatchFadeValue[1], saturate((distanceToCamera - _PatchFadeStart[1]) / _PatchFadeDistance[1]));
 #endif
 
@@ -369,6 +408,9 @@ void EvaluateWaterAdditionalData(float3 positionAWS, float4 bandsMultiplier, out
     jacobianSurface += additionalData.z;
     jacobianDeep += additionalData.w;
     float3 band2SG = float3(additionalData.x, 0, additionalData.y) * waterMask.y * bandsMultiplier.z;
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())band2SG=PlanetWaterBandGradient(additionalData.xy,2)*waterMask.y*bandsMultiplier.z;
+#endif
     surfaceGradient += lerp(band2SG, band2SG * _PatchFadeValue[2], saturate((distanceToCamera - _PatchFadeStart[2]) / _PatchFadeDistance[2]));
 #endif
 
@@ -571,7 +613,7 @@ float EdgeBlendingFactor(float2 screenPosition, float distanceToWaterSurface)
 }
 
 void ComputeWaterRefractionParams(float3 waterPosRWS, float3 waterNormal, float3 lowFrequencyNormals,
-    float2 screenUV, float3 viewWS, bool aboveWater,
+    float2 screenUV, float3 viewWS, bool aboveWater, bool planetary,
     float maxRefractionDistance, float3 transparencyColor, float outScatteringCoeff,
     out float3 refractedWaterPosRWS, out float2 distortedWaterNDC, out float refractedWaterDistance, out float3 absorptionTint)
 {
@@ -588,7 +630,15 @@ void ComputeWaterRefractionParams(float3 waterPosRWS, float3 waterNormal, float3
     // We approach the refraction differently if we are under or above water for various reasons
     float3 refractedView;
     if (aboveWater)
-        refractedView = lerp(refractionNormal, float3(0, 1, 0), EdgeBlendingFactor(screenUV, length(waterPosRWS))) * float3(1, 0, 1);
+    {
+        if(planetary)
+        {
+            float3 radialNormal=normalize(lowFrequencyNormals);
+            refractedView=lerp(refractionNormal,radialNormal,EdgeBlendingFactor(screenUV,length(waterPosRWS)));
+            refractedView-=radialNormal*dot(refractedView,radialNormal);
+        }
+        else refractedView = lerp(refractionNormal, float3(0, 1, 0), EdgeBlendingFactor(screenUV, length(waterPosRWS))) * float3(1, 0, 1);
+    }
     else
         refractedView = refract(-viewWS, refractionNormal, WATER_IOR);
 
@@ -623,6 +673,15 @@ void ComputeWaterRefractionParams(float3 waterPosRWS, float3 waterNormal, float3
                                 || distortedWaterNDC.x > 1.0 || distortedWaterNDC.y > 1.0;
         absorptionTint = invalidSamplePoint ? 0.0 : 1;
     }
+}
+
+// Retain the Shader Graph node signature used by existing water materials.
+void ComputeWaterRefractionParams(float3 waterPosRWS,float3 waterNormal,float3 lowFrequencyNormals,
+    float2 screenUV,float3 viewWS,bool aboveWater,float maxRefractionDistance,float3 transparencyColor,float outScatteringCoeff,
+    out float3 refractedWaterPosRWS,out float2 distortedWaterNDC,out float refractedWaterDistance,out float3 absorptionTint)
+{
+    ComputeWaterRefractionParams(waterPosRWS,waterNormal,lowFrequencyNormals,screenUV,viewWS,aboveWater,PlanetWaterEnabled(),
+        maxRefractionDistance,transparencyColor,outScatteringCoeff,refractedWaterPosRWS,distortedWaterNDC,refractedWaterDistance,absorptionTint);
 }
 
 float EvaluateTipThickness(float3 viewWS, float3 lowFrequencyNormals, float lowFrequencyHeight)

@@ -41,6 +41,7 @@ namespace UnityEngine.Rendering.HighDefinition
         Material m_InternalWaterMaterial;
         const int k_WaterGBuffer = 0;
         Mesh m_TessellableMesh;
+        Mesh m_PlanetWaterMesh;
         ComputeBuffer m_WaterIndirectDispatchBuffer;
         ComputeBuffer m_WaterPatchDataBuffer;
         ComputeBuffer m_WaterCameraFrustrumBuffer;
@@ -179,6 +180,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Free the mesh
             m_TessellableMesh = null;
+            CoreUtils.Destroy(m_PlanetWaterMesh); m_PlanetWaterMesh = null;
         }
 
         void InitializeInstancingData()
@@ -354,6 +356,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Bind the decal layer data
             cb._WaterDecalLayer = hdCamera.frameSettings.IsEnabled(FrameSettingsField.DecalLayers) ? ((uint)currentWater.decalLayerMask) : ShaderVariablesGlobal.DefaultDecalLayers;
+            if (currentWater.IsPlanetary) currentWater.planetaryRendering.Fill(ref cb);
         }
 
         void UpdateGPUWaterSimulation(CommandBuffer cmd, WaterSurface currentWater, bool gpuResourcesInvalid, bool validHistory, ShaderVariablesWater shaderVariablesWater)
@@ -508,6 +511,18 @@ namespace UnityEngine.Rendering.HighDefinition
 
         void EvaluateWaterRenderingData(WaterSurface currentWater, out bool customMesh, out bool infinite, out Mesh targetMesh)
         {
+            if (currentWater.IsPlanetary)
+            {
+                if (!m_PlanetWaterMesh)
+                {
+                    m_PlanetWaterMesh = new Mesh { name = "Planetary water screen triangle", hideFlags = HideFlags.HideAndDontSave };
+                    m_PlanetWaterMesh.vertices = new[] { new Vector3(-1, 0, -1), new Vector3(-1, 0, 3), new Vector3(3, 0, -1) };
+                    m_PlanetWaterMesh.normals = new[] { Vector3.up, Vector3.up, Vector3.up };
+                    m_PlanetWaterMesh.uv = new[] { Vector2.zero, Vector2.up * 2, Vector2.right * 2 };
+                    m_PlanetWaterMesh.triangles = new[] { 0, 1, 2 };
+                }
+                infinite = false; customMesh = true; targetMesh = m_PlanetWaterMesh; return;
+            }
             if (currentWater.IsInfinite())
             {
                 infinite = true;
@@ -569,6 +584,7 @@ namespace UnityEngine.Rendering.HighDefinition
             // Material data
             public Material waterMaterial;
             public MaterialPropertyBlock mbp;
+            public PlanetaryWaterRendering planetary;
 
             // Constant buffer
             public ShaderVariablesWater waterCB;
@@ -620,6 +636,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Property bloc used for binding the textures
             parameters.mbp = m_WaterMaterialPropertyBlock;
+            parameters.planetary = currentWater.IsPlanetary ? currentWater.planetaryRendering : null;
 
             // Setup the simulation water constant buffer
             UpdateShaderVariablesWater(currentWater, surfaceIndex, ref parameters.waterCB);
@@ -711,6 +728,7 @@ namespace UnityEngine.Rendering.HighDefinition
             public TextureHandle gbuffer3;
             public ComputeBufferHandle heightBuffer;
             public ComputeBufferHandle waterSurfaceProfiles;
+            public TextureHandle planetaryDistance;
 
             // Output texture
             public TextureHandle normalBuffer;
@@ -744,6 +762,7 @@ namespace UnityEngine.Rendering.HighDefinition
             profile.smoothnessFadeStart = waterSurface.smoothnessFadeStart;
             profile.smoothnessFadeDistance = waterSurface.smoothnessFadeDistance;
             profile.roughnessEndValue = 1.0f - waterSurface.endSmoothness;
+            profile.planetary = waterSurface.IsPlanetary ? 1 : 0;
 
             // Profile has been filled, we're done
             m_WaterSurfaceProfileArray[waterSurfaceIndex] = profile;
@@ -774,8 +793,14 @@ namespace UnityEngine.Rendering.HighDefinition
             }
 
             // Prepare the material property block for the rendering
+            parameters.planetary?.BindShoreline?.Invoke(parameters.mbp);
             parameters.mbp.SetTexture(HDShaderIDs._WaterDisplacementBuffer, displacementBuffer);
             parameters.mbp.SetTexture(HDShaderIDs._WaterAdditionalDataBuffer, additionalDataBuffer);
+            if (parameters.planetary != null)
+            {
+                parameters.planetary.RenderedFrame = Time.frameCount;
+                parameters.planetary.SurfaceIndex = (int)parameters.waterCB._SurfaceIndex;
+            }
             parameters.mbp.SetTexture(HDShaderIDs._WaterCausticsDataBuffer, causticsBuffer);
 
             // Bind the global water textures
@@ -798,7 +823,7 @@ namespace UnityEngine.Rendering.HighDefinition
             // Raise the right stencil flags
             cmd.SetGlobalFloat("_StencilWaterRefGBuffer", (int)(StencilUsage.WaterSurface | StencilUsage.TraceReflectionRay));
             cmd.SetGlobalFloat("_StencilWaterWriteMaskGBuffer", (int)(StencilUsage.WaterSurface | StencilUsage.TraceReflectionRay));
-            cmd.SetGlobalFloat("_CullWaterMask", parameters.evaluateCameraPosition ? (int)CullMode.Off : (int)CullMode.Back);
+            cmd.SetGlobalFloat("_CullWaterMask", parameters.planetary != null || parameters.evaluateCameraPosition ? (int)CullMode.Off : (int)CullMode.Back);
 
             // Bind the two constant buffers
             ConstantBuffer.Push(cmd, parameters.waterCB, parameters.waterMaterial, HDShaderIDs._ShaderVariablesWater);
@@ -900,7 +925,7 @@ namespace UnityEngine.Rendering.HighDefinition
         void RenderWaterSurfaceGBuffer(RenderGraph renderGraph, HDCamera hdCamera,
                                         WaterSurface currentWater, WaterRendering settings, int surfaceIdx, bool evaluateCameraPos,
                                         TextureHandle depthBuffer, TextureHandle normalBuffer, TextureHandle depthPyramid, ComputeBufferHandle layeredOffsetsBuffer, ComputeBufferHandle logBaseBuffer,
-                                        TextureHandle WaterGbuffer0, TextureHandle WaterGbuffer1, TextureHandle WaterGbuffer2, TextureHandle WaterGbuffer3)
+                                        TextureHandle WaterGbuffer0, TextureHandle WaterGbuffer1, TextureHandle WaterGbuffer2, TextureHandle WaterGbuffer3, TextureHandle planetaryDistance = default)
         {
             using (var builder = renderGraph.AddRenderPass<WaterRenderingGBufferData>("Render Water Surface GBuffer", out var passData, ProfilingSampler.Get(HDProfileId.WaterSurfaceRenderingGBuffer)))
             {
@@ -913,6 +938,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 builder.UseColorBuffer(WaterGbuffer1, 1);
                 builder.UseColorBuffer(WaterGbuffer2, 2);
                 builder.UseColorBuffer(WaterGbuffer3, 3);
+                if (planetaryDistance.IsValid()) builder.UseColorBuffer(planetaryDistance, 4);
                 builder.UseDepthBuffer(depthBuffer, DepthAccess.ReadWrite);
                 passData.heightBuffer = builder.WriteComputeBuffer(renderGraph.ImportComputeBuffer(m_WaterCameraHeightBuffer));
 
@@ -991,6 +1017,7 @@ namespace UnityEngine.Rendering.HighDefinition
             public TextureHandle waterGBuffer1;
             public TextureHandle waterGBuffer2;
             public TextureHandle waterGBuffer3;
+            public TextureHandle planetaryDistance;
         }
 
         WaterGBuffer RenderWaterGBuffer(RenderGraph renderGraph, HDCamera hdCamera,
@@ -1005,6 +1032,7 @@ namespace UnityEngine.Rendering.HighDefinition
             outputGBuffer.waterGBuffer1 = renderGraph.defaultResources.blackTextureXR;
             outputGBuffer.waterGBuffer2 = renderGraph.defaultResources.blackTextureXR;
             outputGBuffer.waterGBuffer3 = renderGraph.defaultResources.blackTextureXR;
+            outputGBuffer.planetaryDistance = renderGraph.defaultResources.blackTextureXR;
             
             // Flag that allows us to track which surface is the one we will be using for the under water rendering
             m_UnderWaterSurfaceIndex = -1;
@@ -1029,6 +1057,8 @@ namespace UnityEngine.Rendering.HighDefinition
             { colorFormat = GraphicsFormat.R8G8B8A8_UNorm, enableRandomWrite = true, name = "Water GBuffer 2" });
             TextureHandle WaterGbuffer3 = renderGraph.CreateTexture(new TextureDesc(Vector2.one, true, true)
             { colorFormat = GraphicsFormat.R8G8B8A8_UNorm, enableRandomWrite = true, name = "Water GBuffer 3" });
+            TextureHandle planetaryDistance = renderGraph.CreateTexture(new TextureDesc(Vector2.one, true, true)
+            { colorFormat = GraphicsFormat.R32_SFloat, clearBuffer = true, clearColor = Color.clear, name = "Water metric ray distance" });
             
             // Grab all the water surfaces in the scene
             var waterSurfaces = WaterSurface.instancesAsArray;
@@ -1038,9 +1068,11 @@ namespace UnityEngine.Rendering.HighDefinition
             {
                 // Grab the current water surface
                 WaterSurface currentWater = waterSurfaces[surfaceIdx];
+                if (currentWater.geometryType == WaterGeometryType.Planetary &&
+                    (!currentWater.IsPlanetary || !currentWater.planetaryRendering.Matches(hdCamera.camera))) continue;
 
                 // If the resources are invalid, we cannot render this surface
-                if (!currentWater.simulation.ValidResources((int)m_WaterBandResolution, WaterConsts.k_WaterHighBandCount))
+                if (currentWater.simulation==null || !currentWater.simulation.ValidResources((int)m_WaterBandResolution, WaterConsts.k_WaterHighBandCount))
                     continue;
 
                 // Only render the water surface if it is included in the layers that the camera requires
@@ -1073,7 +1105,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 // Render the water surface
                 RenderWaterSurfaceGBuffer(renderGraph, hdCamera, currentWater, settings, surfaceIdx, surfaceIdx == m_UnderWaterSurfaceIndex,
                                 depthBuffer, normalBuffer, depthPyramid, lightLists.perVoxelOffset, lightLists.perTileLogBaseTweak,
-                                WaterGbuffer0, WaterGbuffer1, WaterGbuffer2, WaterGbuffer3);
+                                WaterGbuffer0, WaterGbuffer1, WaterGbuffer2, WaterGbuffer3, planetaryDistance);
             }
 
             // If no water surface was rendered here, we need to skip right away
@@ -1085,6 +1117,7 @@ namespace UnityEngine.Rendering.HighDefinition
             outputGBuffer.waterGBuffer1 = WaterGbuffer1;
             outputGBuffer.waterGBuffer2 = WaterGbuffer2;
             outputGBuffer.waterGBuffer3 = WaterGbuffer3;
+            outputGBuffer.planetaryDistance = planetaryDistance;
 
             using (var builder = renderGraph.AddRenderPass<WaterRenderingSSRData>("Prepare water for SSR", out var passData, ProfilingSampler.Get(HDProfileId.WaterSurfaceRenderingSSR)))
             {
@@ -1095,6 +1128,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 passData.prepareSSRKernel = m_WaterPrepareSSRKernel;
                 passData.gbuffer1 = builder.ReadTexture(WaterGbuffer1);
                 passData.gbuffer3 = builder.ReadTexture(WaterGbuffer3);
+                passData.planetaryDistance = builder.ReadTexture(planetaryDistance);
                 passData.depthBuffer = builder.UseDepthBuffer(depthBuffer, DepthAccess.Read);
                 passData.normalBuffer = builder.WriteTexture(normalBuffer);
                 passData.heightBuffer = builder.WriteComputeBuffer(renderGraph.ImportComputeBuffer(m_WaterCameraHeightBuffer));
@@ -1110,6 +1144,7 @@ namespace UnityEngine.Rendering.HighDefinition
                         // Bind the input gbuffer data
                         ctx.cmd.SetComputeTextureParam(data.waterLighting, data.prepareSSRKernel, HDShaderIDs._WaterGBufferTexture1, data.gbuffer1);
                         ctx.cmd.SetComputeTextureParam(data.waterLighting, data.prepareSSRKernel, HDShaderIDs._WaterGBufferTexture3, data.gbuffer3);
+                        ctx.cmd.SetComputeTextureParam(data.waterLighting, data.prepareSSRKernel, "_WaterPlanetDistanceTexture", data.planetaryDistance);
                         ctx.cmd.SetComputeBufferParam(data.waterLighting, data.prepareSSRKernel, HDShaderIDs._WaterCameraHeightBuffer, data.heightBuffer);
                         ctx.cmd.SetComputeTextureParam(data.waterLighting, data.prepareSSRKernel, HDShaderIDs._DepthTexture, data.depthBuffer);
                         ctx.cmd.SetComputeTextureParam(data.waterLighting, data.prepareSSRKernel, HDShaderIDs._StencilTexture, data.depthBuffer, 0, RenderTextureSubElement.Stencil);
@@ -1195,6 +1230,8 @@ namespace UnityEngine.Rendering.HighDefinition
             public TextureHandle gbuffer1;
             public TextureHandle gbuffer2;
             public TextureHandle gbuffer3;
+            public TextureHandle planetaryDistance;
+            public Camera observer;
             public TextureHandle depthBuffer;
             public TextureHandle depthPyramid;
             
@@ -1241,6 +1278,8 @@ namespace UnityEngine.Rendering.HighDefinition
                 passData.gbuffer1 = builder.ReadTexture(waterGBuffer.waterGBuffer1);
                 passData.gbuffer2 = builder.ReadTexture(waterGBuffer.waterGBuffer2);
                 passData.gbuffer3 = builder.ReadTexture(waterGBuffer.waterGBuffer3);
+                passData.planetaryDistance = builder.ReadTexture(waterGBuffer.planetaryDistance);
+                passData.observer = hdCamera.camera;
                 passData.depthBuffer = builder.UseDepthBuffer(depthBuffer, DepthAccess.Read);
                 passData.depthPyramid = builder.ReadTexture(depthPyramid);
                 passData.waterSurfaceProfiles = builder.ReadComputeBuffer(renderGraph.ImportComputeBuffer(m_WaterProfileArrayGPU));
@@ -1276,6 +1315,7 @@ namespace UnityEngine.Rendering.HighDefinition
                         ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._WaterGBufferTexture1, data.gbuffer1);
                         ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._WaterGBufferTexture2, data.gbuffer2);
                         ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._WaterGBufferTexture3, data.gbuffer3);
+                        ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, "_WaterPlanetDistanceTexture", data.planetaryDistance);
                         ctx.cmd.SetComputeBufferParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._WaterSurfaceProfiles, data.waterSurfaceProfiles);
                         ctx.cmd.SetComputeBufferParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._WaterCameraHeightBuffer, data.heightBuffer);
                         ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._DepthTexture, data.depthBuffer);
@@ -1285,12 +1325,20 @@ namespace UnityEngine.Rendering.HighDefinition
                         ctx.cmd.SetComputeBufferParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs.g_vLayeredOffsetsBuffer, data.perVoxelOffset);
                         ctx.cmd.SetComputeBufferParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs.g_logBaseBuffer, data.perTileLogBaseTweak);
                         ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._CameraDepthTexture, data.depthPyramid);
+                        ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting,data.parameters.waterLightingKernel,"_PlanetMediaTransparentScattering",data.scatteringFallbackTexture);
+                        ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting,data.parameters.waterLightingKernel,"_PlanetMediaTransparentTransmission",data.scatteringFallbackTexture);
+                        if(PlanetMediaCameraRegistry.TryGetTransparentTextures(data.observer,out var planetScattering,out var planetTransmission))
+                        {
+                            ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting,data.parameters.waterLightingKernel,"_PlanetMediaTransparentScattering",planetScattering);
+                            ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting,data.parameters.waterLightingKernel,"_PlanetMediaTransparentTransmission",planetTransmission);
+                        }
 
                         // Bind the output texture
                         ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._CameraColorTextureRW, data.colorBuffer);
 
                         // Run the lighting
                         ctx.cmd.DispatchCompute(data.parameters.waterLighting, data.parameters.waterLightingKernel, tileX, tileY, data.parameters.viewCount);
+                        PlanetaryWaterRendering.PublishMetricDepth(data.observer, ctx.cmd, ((RTHandle)data.planetaryDistance).rt);
                     });
             }
         }

@@ -35,6 +35,7 @@
 
 // Input textures of the kernels
 TEXTURE2D_X(_DepthTexture);
+TEXTURE2D_X(_WaterPlanetDistanceTexture);
 TEXTURE2D_X_UINT2(_StencilTexture);
 
 // Output textures of the kernels
@@ -71,7 +72,7 @@ void WaterPrepareSSR(uint3 dispatchThreadId : SV_DispatchThreadID, uint2 groupTh
 
     // Adjust the normal based on where we are w/r to the surface
     bool cameraAboveWater = CameraIsAboveWater(surfaceIndex);
-    if (cameraAboveWater)
+    if (cameraAboveWater && LOAD_TEXTURE2D_X(_WaterPlanetDistanceTexture, currentCoord).x <= 0)
         normalData.normalWS.y = abs(normalData.normalWS.y);
 
     // Encode the normal data and output it
@@ -103,6 +104,13 @@ void WaterDeferredLighting(uint3 dispatchThreadId : SV_DispatchThreadID, uint2 g
     // Compute the posInput
     uint2 tileCoord = currentCoord / GetTileSize();
     PositionInputs posInput = GetPositionInput(currentCoord, _ScreenSize.zw, depthValue, UNITY_MATRIX_I_VP, GetWorldToViewMatrix(), tileCoord);
+    float planetaryDistance = LOAD_TEXTURE2D_X(_WaterPlanetDistanceTexture, currentCoord).x;
+    if (planetaryDistance > 0)
+    {
+        float3 ray = normalize(posInput.positionWS - GetCurrentViewPosition());
+        posInput.positionWS = GetCurrentViewPosition() + ray * planetaryDistance;
+        posInput.linearDepth = dot(posInput.positionWS - GetCurrentViewPosition(), -GetViewForwardDir());
+    }
 
     // Compute the view vector
     float3 V = GetWorldSpaceNormalizeViewDir(posInput.positionWS);
@@ -185,6 +193,9 @@ void UnderWater(uint3 dispatchThreadId : SV_DispatchThreadID, uint2 groupThreadI
 
     // Evaluate the fog of the target surface
     float cameraDistance = depthValue == UNITY_RAW_FAR_CLIP_VALUE ? _ProjectionParams.z : length(posInput.positionWS);
+    // Planetary raster depth is compressed to fit the native camera. Absorption uses metres.
+    float planetaryDistance = LOAD_TEXTURE2D_X(_WaterPlanetDistanceTexture, currentCoord).x;
+    if (planetaryDistance > 0) cameraDistance = planetaryDistance;
 
     // Evaluate the monochrome absorption
     float waterAbsorption = exp(-_OutScatteringCoeff * cameraDistance / _MaxViewDistanceMultiplier);

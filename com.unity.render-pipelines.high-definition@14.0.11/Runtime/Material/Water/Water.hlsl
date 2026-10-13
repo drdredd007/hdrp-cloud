@@ -33,8 +33,7 @@ StructuredBuffer<WaterSurfaceProfile> _WaterSurfaceProfiles;
 
 float3 GetNormalForShadowBias(BSDFData bsdfData)
 {
-    // TODO change this when supporting non horizontal water
-    return float3(0, 1, 0);
+    return bsdfData.lowFrequencyNormalWS;
 }
 
 float4 GetDiffuseOrDefaultColor(BSDFData bsdfData, float replace)
@@ -440,7 +439,8 @@ PreLightData GetPreLightData(float3 V, PositionInputs posInput, inout BSDFData b
 float GetPhaseTerm(float3 lightDir, float3 V, BSDFData bsdfData, PreLightData preLightData)
 {
     float3 biasedOceanLightDirection = lightDir;
-    biasedOceanLightDirection.y -= ((1.f - WATER_INV_IOR) * 2.f);
+    float3 oceanUp = _WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary > .5 ? bsdfData.lowFrequencyNormalWS : float3(0,1,0);
+    biasedOceanLightDirection -= oceanUp * ((1.f - WATER_INV_IOR) * 2.f);
     biasedOceanLightDirection = normalize(biasedOceanLightDirection);
     float3 singleScatteringRay = refract(-V, bsdfData.lowFrequencyNormalWS, WATER_INV_IOR);
     float cos0RL = dot(singleScatteringRay, biasedOceanLightDirection);
@@ -789,7 +789,7 @@ IndirectLighting EvaluateBSDF_ScreenspaceRefraction(LightLoopContext lightLoopCo
     float refractedWaterDistance;
     float3 absorptionTint;
     ComputeWaterRefractionParams(positionWS, bsdfData.normalWS, bsdfData.lowFrequencyNormalWS,
-        posInput.positionSS * _ScreenSize.zw, V, preLightData.aboveWater,
+        posInput.positionSS * _ScreenSize.zw, V, preLightData.aboveWater, _WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary > .5,
         preLightData.maxRefractionDistance, preLightData.transparencyColor, preLightData.outScatteringCoefficient,
         refractedWaterPosRWS, distortedWaterNDC, refractedWaterDistance, absorptionTint);
 
@@ -847,12 +847,14 @@ IndirectLighting EvaluateBSDF_Env(  LightLoopContext lightLoopContext,
         // This intends to simulate indirect specular "multi bounce"
         if (preLightData.aboveWater)
         {
-            if (R.y < 0.0)
+            float3 up = _WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary > .5 ? bsdfData.lowFrequencyNormalWS : float3(0,1,0);
+            float vertical = dot(R,up);
+            if (vertical < 0.0)
             {
-                float weight = saturate(-R.y * 2.0f);
+                float weight = saturate(-vertical * 2.0f);
                 attenuation = lerp(float3(1.0, 1.0, 1.0), bsdfData.diffuseColor, weight);
             }
-	        R.y = abs(R.y) + 0.1;
+	        R += up * (abs(vertical) + 0.1 - vertical);
 	        R = normalize(R);
         }
     }

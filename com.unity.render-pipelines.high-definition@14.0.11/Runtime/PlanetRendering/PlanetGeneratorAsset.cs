@@ -34,6 +34,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
         [Tooltip("Opaque static sea for signed EarthLike recipes. SeaLevel belongs to the immutable surface recipe; this does not change seabed collision.")]
         public PlanetOceanSettings OceanSettings=PlanetOceanSettings.Default;
+        [Tooltip("Optional HDRP WaterSurface prefab. The planet renderer supplies spherical geometry, sea level and camera coordinates.")]
+        public GameObject HdrpWaterTemplate;
         [Tooltip("Optional deterministic GPU scatter. Collision interest is managed independently by the host.")]
         public PlanetScatterSettings ScatterSettings;
         public Vector3 Orientation=new Vector3(0,0,35);

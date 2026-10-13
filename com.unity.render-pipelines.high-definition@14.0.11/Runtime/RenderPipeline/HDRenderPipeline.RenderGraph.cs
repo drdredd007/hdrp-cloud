@@ -1414,7 +1414,7 @@ namespace UnityEngine.Rendering.HighDefinition
             colorBuffer = ResolveMSAAColor(renderGraph, hdCamera, colorBuffer, m_NonMSAAColorBuffer);
 
             // Render the under water if necessary
-            colorBuffer = RenderUnderWaterVolume(renderGraph, hdCamera, colorBuffer, normalBuffer, prepassOutput.depthBuffer);
+            colorBuffer = RenderUnderWaterVolume(renderGraph, hdCamera, colorBuffer, normalBuffer, prepassOutput.depthBuffer, waterGBuffer.planetaryDistance);
 
             // Render All forward error
             RenderForwardError(renderGraph, hdCamera, colorBuffer, prepassOutput.resolvedDepthBuffer, cullingResults);

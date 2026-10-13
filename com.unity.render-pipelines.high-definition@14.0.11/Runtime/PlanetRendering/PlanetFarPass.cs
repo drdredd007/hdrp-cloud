@@ -83,6 +83,9 @@ namespace UnityEngine.Rendering.HighDefinition
         {get{if(BaseMapOverride)return BaseMapOverride;return PlanetSurfaceDataRegistry.TryGetBaseColour(Definition.Surface,out var value)?value:null;}}
         public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
         public PlanetOceanSettings OceanSettings=PlanetOceanSettings.Default;
+        [NonSerialized] public GameObject HdrpWaterTemplate;
+        [NonSerialized] PlanetHdrpWaterRenderer hdrpWater;
+        public PlanetHdrpWaterRenderer HdrpWaterRenderer=>hdrpWater;
         [NonSerialized] PlanetOceanRenderer ocean;
         public PlanetOceanRenderer OceanRenderer=>ocean;
         internal RenderTexture OceanCoarseTerrainDistance=>farBuffer;
@@ -119,6 +122,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(nearGeometry==null)nearGeometry=new PlanetNearSurfaceCache(nearPatches);
             if(terrainShadows==null)terrainShadows=new PlanetPeriodicTerrainShadows();
             if(ocean==null)ocean=new PlanetOceanRenderer();
+            if(hdrpWater==null)hdrpWater=new PlanetHdrpWaterRenderer(this);
             if(nativeGeometry==null)nativeGeometry=new PlanetNativeSurfaceRenderer(this);
             if(scatter==null)scatter=new PlanetScatterRenderer(this);
             if(!liveOwners.Contains(this))liveOwners.Add(this);
@@ -204,7 +208,7 @@ namespace UnityEngine.Rendering.HighDefinition
             var shadowSun=Definition.GeneratorVersion==4?TerrainSunDirection():Vector3.up;
             terrainShadows.Prepare(Definition,Quaternion.Inverse(PlanetRotation)*shadowSun,shadowSun,PeriodicSurfaceSettings,properties);
             bool nativeCoverage=UsesNativeSurface&&nativeGeometry!=null&&nativeGeometry.DrawCoverage(ctx);
-            bool hasSea=ocean.WantsRender(this);
+            bool hasSea=!(hdrpWater?.Active??false)&&ocean.WantsRender(this);
             if((nativeCoverage||hasSea)&&LayerDepth==null)
             {if(nativeOwnedDepth==null)nativeOwnedDepth=new PlanetLayerDepth();nativeOwnedDepth.Begin(ctx);}
             var effectiveDepth=LayerDepth??((nativeCoverage||hasSea)?nativeOwnedDepth:null);
@@ -384,7 +388,7 @@ namespace UnityEngine.Rendering.HighDefinition
 
         protected override void Cleanup(){CancelSurfaceRevision();liveOwners.Remove(this);geometry?.Dispose();nearGeometry?.Dispose();nativeGeometry?.Dispose();nativeGeometry=null;scatter?.Dispose();scatter=null;nativeOwnedDepth?.Dispose();nativeOwnedDepth=null;neutralAttributes?.Dispose();neutralAttributes=null;
             activeFilter?.Dispose();activeFilter=null;retiredFilter?.Dispose();retiredFilter=null;
-            terrainShadows?.Dispose();ocean?.Dispose();ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);surface=null;CoreUtils.Destroy(composite);composite=null;
+            terrainShadows?.Dispose();ocean?.Dispose();hdrpWater?.Dispose();hdrpWater=null;ReleaseBuffer();ReleaseNearBuffer();CoreUtils.Destroy(surface);surface=null;CoreUtils.Destroy(composite);composite=null;
             properties=null;renderedThisFrame=false;renderedNear=false;AtmosphereActive=false;}
     }
 }

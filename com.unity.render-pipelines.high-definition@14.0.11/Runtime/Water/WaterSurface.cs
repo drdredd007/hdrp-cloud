@@ -48,7 +48,10 @@ namespace UnityEngine.Rendering.HighDefinition
         /// <summary>
         /// The water surface will be rendered as a infinite plane.
         /// </summary>
-        Infinite
+        Infinite,
+
+        /// <summary>Camera-owned spherical ocean supplied by the high precision planet renderer.</summary>
+        Planetary
     }
 
     /// <summary>
@@ -75,6 +78,8 @@ namespace UnityEngine.Rendering.HighDefinition
     [ExecuteInEditMode]
     public class WaterSurface : MonoBehaviour
     {
+        [NonSerialized] public PlanetaryWaterRendering planetaryRendering;
+        public bool IsPlanetary => geometryType == WaterGeometryType.Planetary && planetaryRendering != null;
         #region Instance Management
 
         // Management to avoid memory allocations at fetch time

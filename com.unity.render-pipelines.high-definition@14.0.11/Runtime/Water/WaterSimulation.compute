@@ -181,6 +181,19 @@ TapData EvaluateDisplacementData(float3 currentLocation, float3 referencePositio
 [numthreads(1, 1, 1)]
 void FindVerticalDisplacements(uint3 currentThread : SV_DispatchThreadID)
 {
+#if defined(SHADER_API_D3D11)
+    if(PlanetWaterEnabled())
+    {
+        double3 origin=PlanetWaterOrigin();double radius=PlanetWaterRadius();
+        double length=PlanetWaterSqrt(PlanetWaterDot(origin,origin));
+        planetWaterPixelPoint=PlanetWaterUnit(origin)*radius;planetWaterPixelPointValid=true;
+        WaterDisplacementData displacement;EvaluateWaterDisplacement(_WorldSpaceCameraPos.xyz,1,displacement);
+        _WaterCameraHeightBufferRW[4*currentThread.x]=(float)(length-radius)-displacement.displacement.y;
+        _WaterCameraHeightBufferRW[4*currentThread.x+1]=0;
+        _WaterCameraHeightBufferRW[4*currentThread.x+2]=3;
+        _WaterCameraHeightBufferRW[4*currentThread.x+3]=0;return;
+    }
+#endif
     // Get the index of the position to process
     uint coord = currentThread.x;
 

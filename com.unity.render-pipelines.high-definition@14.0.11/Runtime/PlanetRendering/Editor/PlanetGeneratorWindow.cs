@@ -269,6 +269,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 }
                 var definition=settings.Definition;pass.Definition=definition;pass.LodSettings=settings.Lod;pass.PlanetRotation=Quaternion.Euler(settings.Orientation);
                 pass.NativeMaterialSettings=settings.NativeMaterialSettings;pass.NativeSurfaceSettings=settings.NativeSurfaceSettings;
+                pass.HdrpWaterTemplate=settings.HdrpWaterTemplate;
                 var radial=Quaternion.Euler(orbit.y,orbit.x,0)*Vector3.back;
                 pass.CameraPosition=(double3)(float3)radial*(definition.Radius+altitude);
                 previewCamera.transform.SetPositionAndRotation(Vector3.zero,Quaternion.LookRotation(-radial,Vector3.up));

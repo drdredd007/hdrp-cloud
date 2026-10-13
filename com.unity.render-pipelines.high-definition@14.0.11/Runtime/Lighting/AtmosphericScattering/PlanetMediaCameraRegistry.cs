@@ -14,7 +14,7 @@ namespace UnityEngine.Rendering.HighDefinition
             public readonly Dictionary<object, Transport> Transports = new Dictionary<object, Transport>();
             public readonly Dictionary<object, WeatherLighting> Lights = new Dictionary<object, WeatherLighting>();
         }
-        struct Transport { public Vector4 Distance, Grid; public long Revision; }
+        struct Transport { public Vector4 Distance, Grid; public long Revision; public Texture Scattering, Transmission; }
         public struct WeatherLighting
         {
             public bool UseSceneLights, HasAtmosphere;
@@ -93,7 +93,25 @@ namespace UnityEngine.Rendering.HighDefinition
                 Register(camera, owner);
             var entry = entries[camera.GetInstanceID()];
             if (distance.w <= 0) entry.Transports.Remove(owner);
-            else entry.Transports[owner] = new Transport { Distance = distance, Grid = grid, Revision = ++revision };
+            else
+            {
+                entry.Transports.TryGetValue(owner,out var previous);
+                entry.Transports[owner] = new Transport { Distance = distance, Grid = grid, Revision = ++revision, Scattering=previous.Scattering,Transmission=previous.Transmission };
+            }
+        }
+        public static void SetTransparentTextures(Camera camera,object owner,Texture scattering,Texture transmission)
+        {
+            if(!camera||!entries.TryGetValue(camera.GetInstanceID(),out var entry)||entry.Camera!=camera||!entry.Transports.TryGetValue(owner,out var value))return;
+            value.Scattering=scattering;value.Transmission=transmission;entry.Transports[owner]=value;
+        }
+        internal static bool TryGetTransparentTextures(Camera camera,out Texture scattering,out Texture transmission)
+        {
+            scattering=transmission=null;
+            if(!camera||!entries.TryGetValue(camera.GetInstanceID(),out var entry)||entry.Camera!=camera)return false;
+            long newest=-1;
+            foreach(var value in entry.Transports.Values)
+                if(value.Revision>newest&&value.Scattering&&value.Transmission){newest=value.Revision;scattering=value.Scattering;transmission=value.Transmission;}
+            return newest>=0;
         }
         internal static bool TryGetTransparentTransport(Camera camera, out Vector4 distance, out Vector4 grid)
         {
