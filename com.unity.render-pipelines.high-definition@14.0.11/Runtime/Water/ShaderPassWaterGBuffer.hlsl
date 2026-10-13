@@ -126,7 +126,9 @@ void Frag(PackedVaryingsToPS packedInput,
             if(length(scenePoint-GetCurrentViewPosition())<(float)distance-.001)discard;
         }
         outPlanetaryDistance=(float)distance;
-        input.positionRWS=GetCurrentViewPosition()+ray*(float)distance*_PlanetWaterOptions.y;
+        // SSR and the pre-refraction depth pyramid consume this native depth before
+        // the late planet composition pass. A compressed carrier appears camera-bound.
+        input.positionRWS=GetCurrentViewPosition()+ray*(float)distance;
         float4 clipPosition=TransformWorldToHClip(input.positionRWS);
         outputDepth=max(1e-7,saturate(clipPosition.z/clipPosition.w));
         input.positionSS.z=outputDepth;input.positionSS.w=rcp(clipPosition.w);

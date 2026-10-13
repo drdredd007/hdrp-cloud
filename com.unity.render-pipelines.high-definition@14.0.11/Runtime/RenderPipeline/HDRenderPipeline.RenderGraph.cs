@@ -211,13 +211,15 @@ namespace UnityEngine.Rendering.HighDefinition
                     // Coordinate cameras own the visible background and all finite volume transport.
                     // Sky lighting/reflection updates still run through the ordinary HDRP sky manager.
                     bool planetMedia = PlanetMediaCameraRegistry.IsActive(hdCamera.camera);
+                    bool deferPlanetWaterWeather=planetMedia&&PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera)&&
+                        PlanetaryWaterRendering.HasSurface(hdCamera.camera)&&ShouldRenderWater(hdCamera,hdCamera.volumeStack.GetComponent<WaterRendering>());
                     if (!planetMedia)
                         RenderSky(m_RenderGraph, hdCamera, colorBuffer, volumetricLighting, prepassOutput.depthBuffer, depthTexture);
 
                     RenderCustomPass(m_RenderGraph, hdCamera, colorBuffer, prepassOutput, customPassCullingResults, cullingResults, CustomPassInjectionPoint.AfterOpaqueAndSky, aovRequest, aovCustomPassBuffers);
                     DoUserAfterOpaqueAndSky(m_RenderGraph, hdCamera, colorBuffer, prepassOutput.resolvedDepthBuffer, prepassOutput.resolvedNormalBuffer, prepassOutput.resolvedMotionVectorsBuffer);
 
-                    if (!planetMedia || PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera))
+                    if (!deferPlanetWaterWeather&&(!planetMedia || PlanetMediaCameraRegistry.UsesNativeWeather(hdCamera.camera)))
                     {
                         m_SkyManager.RenderOpaqueAtmosphericScattering(m_RenderGraph, hdCamera, colorBuffer, depthTexture, volumetricLighting, prepassOutput.depthBuffer);
                         sunOcclusionTexture = RenderVolumetricClouds(m_RenderGraph, hdCamera, colorBuffer, prepassOutput.depthPyramidTexture, prepassOutput.motionVectorsBuffer, volumetricLighting, maxZMask);
@@ -231,7 +233,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     ClearStencilBuffer(m_RenderGraph, hdCamera, prepassOutput.depthBuffer);
 
                     colorBuffer = RenderTransparency(m_RenderGraph, hdCamera, colorBuffer, prepassOutput.resolvedNormalBuffer, vtFeedbackBuffer, currentColorPyramid, volumetricLighting, rayCountTexture, m_SkyManager.GetSkyReflection(hdCamera), gpuLightListOutput, ref prepassOutput,
-                        shadowResult, cullingResults, customPassCullingResults, aovRequest, aovCustomPassBuffers);
+                        shadowResult, cullingResults, customPassCullingResults, aovRequest, aovCustomPassBuffers,deferPlanetWaterWeather,maxZMask,ref sunOcclusionTexture);
 
                     uiBuffer = RenderTransparentUI(m_RenderGraph, hdCamera);
 
@@ -1362,7 +1364,7 @@ namespace UnityEngine.Rendering.HighDefinition
             CullingResults cullingResults,
             CullingResults customPassCullingResults,
             AOVRequestData aovRequest,
-            List<RTHandle> aovCustomPassBuffers)
+            List<RTHandle> aovCustomPassBuffers,bool deferPlanetWaterWeather,TextureHandle maxZMask,ref TextureHandle sunOcclusionTexture)
         {
             // Transparent (non recursive) objects that are rendered in front of transparent (recursive) require the recursive rendering to be executed for that pixel.
             // This means our flagging process needs to happen before the transparent depth prepass as we use the depth to discriminate pixels that do not need recursive rendering.
@@ -1402,6 +1404,11 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // We don't have access to the color pyramid with transparent if rough refraction is disabled
             RenderCustomPass(m_RenderGraph, hdCamera, colorBuffer, prepassOutput, customPassCullingResults, cullingResults, CustomPassInjectionPoint.BeforeTransparent, aovRequest, aovCustomPassBuffers);
+            if(deferPlanetWaterWeather)
+            {
+                m_SkyManager.RenderOpaqueAtmosphericScattering(m_RenderGraph,hdCamera,colorBuffer,prepassOutput.depthPyramidTexture,volumetricLighting,prepassOutput.depthBuffer);
+                sunOcclusionTexture=RenderVolumetricClouds(m_RenderGraph,hdCamera,colorBuffer,prepassOutput.depthPyramidTexture,prepassOutput.motionVectorsBuffer,volumetricLighting,maxZMask);
+            }
 
             // Depth-tested against opaque, composited before transparents/post-process so bloom picks up the glow.
             RenderLightImposters(m_RenderGraph, hdCamera, colorBuffer, prepassOutput.depthBuffer);

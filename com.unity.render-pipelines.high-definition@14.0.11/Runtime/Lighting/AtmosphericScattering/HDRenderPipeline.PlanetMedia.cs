@@ -21,7 +21,7 @@ namespace UnityEngine.Rendering.HighDefinition
         int planetCelestialLightCapacity;
         public bool BindPlanetCelestialLights(CommandBuffer cmd, Camera camera)
         {
-            bool active = PlanetMediaCameraRegistry.IsActive(camera);
+            bool active = PlanetMediaCameraRegistry.IsActive(camera)||PlanetaryWaterRendering.HasSurface(camera);
             cmd.SetGlobalInt("_PlanetCelestialLightDataReady", active ? 1 : 0);
             cmd.SetGlobalInt("_PlanetCelestialLightCount", active ? m_GpuLightsBuilder.directionalLightCount : 0);
             int count = Mathf.Max(1, active ? m_GpuLightsBuilder.directionalLightCount : 0);

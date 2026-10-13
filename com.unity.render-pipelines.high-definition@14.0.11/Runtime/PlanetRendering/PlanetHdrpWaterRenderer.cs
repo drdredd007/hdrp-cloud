@@ -19,6 +19,13 @@ namespace UnityEngine.Rendering.HighDefinition
         Material opaqueDepthMaterial;
         MaterialPropertyBlock opaqueDepthProperties;
         PlanetLayerDepth opaqueDepth;
+        struct ReflectionBody {public Vector4 Sphere,Rotation,Albedo,Metadata;}
+        struct ReflectionSource {public Texture2D Map;public uint Version;public Color Fallback;public bool Written;}
+        readonly System.Collections.Generic.List<PlanetFarPass> reflectionSources=new System.Collections.Generic.List<PlanetFarPass>();
+        ReflectionBody[] reflectionData;
+        ReflectionSource[] reflectionContents;
+        ComputeBuffer reflectionBodies;
+        RenderTexture reflectionAtlas,reflectionScratch;
         public bool Active => surface && surface.enabled && state.Matches(owner.Observer);
         public WaterSurface Surface => surface;
         public RenderTexture MetricDepth => state.RenderedFrame >= 0 ? metricDepth : null;
@@ -90,8 +97,56 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         void BindOpaqueDepth(Camera camera,CommandBuffer cmd,ComputeShader shader,int kernel)
         {
-            if(!disposed&&camera==owner.Observer&&Active&&opaqueDepth?.Current)
-                cmd.SetComputeTextureParam(shader,kernel,"_WaterPlanetOpaqueDepth",opaqueDepth.Current);
+            if(disposed||camera!=owner.Observer||!Active)return;
+            if(opaqueDepth?.Current)cmd.SetComputeTextureParam(shader,kernel,"_WaterPlanetOpaqueDepth",opaqueDepth.Current);
+            BindCelestialReflections(cmd,shader,kernel);
+        }
+        void BindCelestialReflections(CommandBuffer cmd,ComputeShader shader,int kernel)
+        {
+            var sources=reflectionSources;sources.Clear();
+            foreach(var body in PlanetFarPass.LiveOwners)
+                if(body.Enabled&&body.Observer==owner.Observer&&body.Definition.IsValid&&sources.Count<16)sources.Add(body);
+            if(sources.Count<2)return;
+            if(reflectionBodies==null||reflectionBodies.count!=sources.Count)
+            {
+                CoreUtils.SafeRelease(reflectionBodies);CoreUtils.Destroy(reflectionAtlas);CoreUtils.Destroy(reflectionScratch);
+                reflectionBodies=new ComputeBuffer(sources.Count,64);
+                reflectionData=new ReflectionBody[sources.Count];reflectionContents=new ReflectionSource[sources.Count];
+                reflectionAtlas=new RenderTexture(512,256,0,RenderTextureFormat.ARGBHalf,RenderTextureReadWrite.Linear)
+                {dimension=UnityEngine.Rendering.TextureDimension.Tex2DArray,volumeDepth=sources.Count,useMipMap=true,autoGenerateMips=false,filterMode=FilterMode.Trilinear,name="Planet reflection albedo atlas",hideFlags=HideFlags.HideAndDontSave};
+                reflectionAtlas.Create();
+                reflectionScratch=new RenderTexture(512,256,0,RenderTextureFormat.ARGBHalf,RenderTextureReadWrite.Linear)
+                {name="Planet reflection albedo staging",hideFlags=HideFlags.HideAndDontSave};reflectionScratch.Create();
+            }
+            var data=reflectionData;bool changed=false;
+            for(int i=0;i<sources.Count;i++)
+            {
+                var body=sources[i];var center=(float3)(body.Definition.Center-body.CameraPosition);var q=Quaternion.Inverse(body.PlanetRotation);
+                var colours=body.GlobalColorSettings;
+                var map=colours?colours.ColorMap:null;
+                var fallback=colours?(colours.ReferenceIsLinear?colours.LocalReferenceColor:colours.LocalReferenceColor.linear):new Color(.35f,.32f,.28f);
+                int surfaceIndex=body.HdrpWaterRenderer?.Surface?body.HdrpWaterRenderer.Surface.planetaryRendering.SurfaceIndex:-1;
+                data[i]=new ReflectionBody{Sphere=new Vector4(center.x,center.y,center.z,(float)body.Definition.Radius),Rotation=new Vector4(q.x,q.y,q.z,q.w),
+                    Albedo=new Vector4(fallback.r,fallback.g,fallback.b,i),Metadata=new Vector4(surfaceIndex,0,0,0)};
+                var content=reflectionContents[i];uint version=map?map.updateCount:0;
+                if(!content.Written||content.Map!=map||content.Version!=version||content.Fallback!=fallback)
+                {
+                    // Blit to a 2D target, then copy the complete image to its array slice.
+                    // The built-in blit does not write a selected texture-array slice reliably.
+                    if(map)cmd.Blit(map,reflectionScratch);
+                    else{cmd.SetRenderTarget(reflectionScratch);cmd.ClearRenderTarget(false,true,fallback);}
+                    cmd.CopyTexture(reflectionScratch,0,0,reflectionAtlas,i,0);changed=true;
+                    reflectionContents[i]=new ReflectionSource{Map=map,Version=version,Fallback=fallback,Written=true};
+                }
+            }
+            cmd.SetBufferData(reflectionBodies,data);if(changed)cmd.GenerateMips(reflectionAtlas);
+            // A texture must leave the raster target slots before compute samples it.
+            cmd.SetRenderTarget(BuiltinRenderTextureType.None);
+            cmd.SetComputeIntParam(shader,"_WaterPlanetCelestialCount",sources.Count);
+            var lightRotation=owner.CelestialLightRotation;
+            cmd.SetComputeVectorParam(shader,"_WaterPlanetCelestialLightRotation",new Vector4(lightRotation.x,lightRotation.y,lightRotation.z,lightRotation.w));
+            cmd.SetComputeBufferParam(shader,kernel,"_WaterPlanetCelestialBodies",reflectionBodies);
+            cmd.SetComputeTextureParam(shader,kernel,"_WaterPlanetCelestialAlbedo",reflectionAtlas);
         }
         internal void PrepareOpaqueDepth(CustomPassContext ctx,PlanetLayerDepth depth)
         {
@@ -135,6 +190,8 @@ namespace UnityEngine.Rendering.HighDefinition
             host = null; surface = null; template = null; templateJson = null;
             PlanetSurfaceGpuData.Release(shoreline); shoreline = null;
             CoreUtils.Destroy(metricDepth); metricDepth = null;
+            CoreUtils.SafeRelease(reflectionBodies);reflectionBodies=null;CoreUtils.Destroy(reflectionAtlas);reflectionAtlas=null;
+            CoreUtils.Destroy(reflectionScratch);reflectionScratch=null;reflectionData=null;reflectionContents=null;reflectionSources.Clear();
             state.ResetHistory();
         }
         public void Dispose()

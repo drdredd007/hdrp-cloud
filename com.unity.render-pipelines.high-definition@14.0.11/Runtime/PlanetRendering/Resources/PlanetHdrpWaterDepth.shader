@@ -15,7 +15,8 @@ Shader "Hidden/SpaceRunner/HDRP Water Metric Depth"
             int2 pixel=(int2)input.positionCS.xy;
             float4 previous=LOAD_TEXTURE2D(_PlanetAccumulatedDepth,pixel);
             float water=LOAD_TEXTURE2D(_HdrpWaterMetricDepth,pixel).x;
-            if(water>0&&(previous.a<=0||water<previous.a))previous.a=water;
+            if(water>0&&(previous.a<=0||water<=previous.a))
+            {previous.a=water;previous.r=water;previous.g=1;}
             return previous;
         }
         float PhysicalDepth(Varyings input):SV_Depth

@@ -776,7 +776,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 lights = m_Lights,
                 directionalLights = m_DirectionalLights,
                 celestialDirectionalLights = m_CelestialDirectionalLights,
-                recordCelestialLights = PlanetMediaCameraRegistry.IsActive(hdCamera.camera),
+                recordCelestialLights = PlanetMediaCameraRegistry.IsActive(hdCamera.camera) || PlanetaryWaterRendering.HasSurface(hdCamera.camera),
                 lightsPerView = m_LightsPerView,
                 lightBounds = m_LightBounds,
                 lightVolumes = m_LightVolumes

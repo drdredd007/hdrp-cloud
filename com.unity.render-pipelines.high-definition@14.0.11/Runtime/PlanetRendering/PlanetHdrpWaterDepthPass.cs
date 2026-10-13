@@ -22,11 +22,12 @@ namespace UnityEngine.Rendering.HighDefinition
                 if(owner.Observer!=Observer||!owner.Enabled||water==null||!water.Active||!water.MetricDepth)continue;
                 properties.SetTexture("_HdrpWaterMetricDepth",water.MetricDepth);
                 Depth.Merge(ctx,material,properties);
-                // Deferred water has finished using compressed depth. Native transparents need metres again.
+                // Publish the final physical endpoint before native transparent objects.
                 CoreUtils.SetRenderTarget(ctx.cmd,ctx.cameraColorBuffer,ctx.cameraDepthBuffer);
                 CoreUtils.DrawFullScreen(ctx.cmd,material,properties,shaderPassId:2);break;
             }
             Depth.Publish(ctx.cmd);
+            PlanetMediaPass.CompositeAfterWater(ctx);
         }
         protected override void Cleanup(){CoreUtils.Destroy(material);material=null;properties=null;}
     }

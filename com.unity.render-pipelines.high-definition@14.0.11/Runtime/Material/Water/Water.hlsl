@@ -737,6 +737,58 @@ DirectLighting EvaluateBSDF_Area(LightLoopContext lightLoopContext,
 // EvaluateBSDF_SSLighting for screen space lighting
 // ----------------------------------------------------------------------------
 
+struct WaterCelestialBody {float4 sphere,rotation,albedo,metadata;};
+StructuredBuffer<WaterCelestialBody> _WaterPlanetCelestialBodies;
+TEXTURE2D_ARRAY(_WaterPlanetCelestialAlbedo);
+int _WaterPlanetCelestialCount;
+float4 _WaterPlanetCelestialLightRotation;
+bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float roughness,out float3 radiance)
+{
+    radiance=0;float nearest=1e30;int selected=-1;float3 hit=0;
+    float3 origin=positionWS-GetCurrentViewPosition();ray=normalize(ray);
+    for(int i=0;i<_WaterPlanetCelestialCount;i++)
+    {
+        WaterCelestialBody body=_WaterPlanetCelestialBodies[i];
+        if(body.metadata.x==(float)ownSurface)continue;
+        float3 offset=origin-body.sphere.xyz;float b=dot(offset,ray);
+        float c=dot(offset,offset)-body.sphere.w*body.sphere.w,discriminant=b*b-c;
+        if(discriminant<0)continue;float t=-b-sqrt(discriminant);
+        if(t>0&&t<nearest){nearest=t;selected=i;hit=origin+ray*t;}
+    }
+    if(selected<0)return false;
+    WaterCelestialBody body=_WaterPlanetCelestialBodies[selected];
+    float3 normal=normalize(hit-body.sphere.xyz);
+    float4 projected=TransformWorldToHClip(GetCurrentViewPosition()+hit);
+    float2 uv=ComputeNormalizedDeviceCoordinates(GetCurrentViewPosition()+hit,UNITY_MATRIX_VP);
+    // Use the actual rendered planet when its reflected point is visible to this camera.
+    // The global albedo/lighting fallback also works when that planet leaves the viewport.
+    if(projected.w>0&&all(uv>0)&&all(uv<1)&&dot(normal,-normalize(hit))>0)
+    {
+        float visibleDistance=LOAD_TEXTURE2D(_WaterPlanetOpaqueDepth,(int2)(uv*_ScreenSize.xy)).a;
+        if(abs(visibleDistance-length(hit))<body.sphere.w*.05)
+        {radiance=LoadCameraColor(uv*_ScreenSize.xy)*GetInverseCurrentExposureMultiplier();return true;}
+    }
+    float3 q=body.rotation.xyz;
+    float3 local=normal+2*cross(q,cross(q,normal)+body.rotation.w*normal);
+    float2 mapUV=float2(atan2(local.z,local.x)*(.5/PI)+.5,asin(clamp(local.y,-1,1))/PI+.5);
+    float3 albedo=SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterPlanetCelestialAlbedo,s_linear_repeat_sampler,mapUV,body.albedo.w,roughness*5).rgb;
+    float3 illumination=0;
+    if(_PlanetCelestialLightDataReady!=0)
+    for(int lightIndex=0;lightIndex<_PlanetCelestialLightCount;lightIndex++)
+    {
+        PlanetCelestialLightData light=_PlanetCelestialLightDatas[lightIndex];
+        float3 direction=light.Direction.xyz,qLight=_WaterPlanetCelestialLightRotation.xyz;
+        direction+=2*cross(qLight,cross(qLight,direction)+_WaterPlanetCelestialLightRotation.w*direction);
+        illumination+=light.Color.rgb*light.Dimmers.x*(max(0,dot(normal,direction))+.015)*INV_PI;
+    }
+    else for(uint nativeLightIndex=0;nativeLightIndex<_DirectionalLightCount;nativeLightIndex++)
+    {
+        DirectionalLightData light=_DirectionalLightDatas[nativeLightIndex];
+        illumination+=light.color*(max(0,dot(normal,-light.forward))+.015)*INV_PI;
+    }
+    radiance=albedo*illumination;return true;
+}
+
 IndirectLighting EvaluateBSDF_ScreenSpaceReflection(PositionInputs posInput,
                                                     PreLightData   preLightData,
                                                     BSDFData       bsdfData,
@@ -755,6 +807,16 @@ IndirectLighting EvaluateBSDF_ScreenSpaceReflection(PositionInputs posInput,
     // Set the default weight value
     reflectionHierarchyWeight = ssrLighting.a;
     lighting.specularReflected = ssrLighting.rgb * preLightData.specularFGD;
+
+    // Celestial bodies also exist outside the screen and ambient sky cubemap.
+    // Fill only the remaining reflection weight, preserving native local SSR hits.
+    float3 celestial;
+    if(preLightData.aboveWater&&_WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary>.5&&
+        WaterCelestialReflection(posInput.positionWS,preLightData.iblR,bsdfData.surfaceIndex,preLightData.iblPerceptualRoughness,celestial))
+    {
+        lighting.specularReflected+=(1-ssrLighting.a)*celestial*preLightData.specularFGD;
+        reflectionHierarchyWeight=1;
+    }
 
     // If we are underwater, we don't want to use the fallback hierarchy
     if (!preLightData.aboveWater)
@@ -819,7 +881,6 @@ IndirectLighting EvaluateBSDF_ScreenspaceRefraction(LightLoopContext lightLoopCo
 // ----------------------------------------------------------------------------
 
 // _preIntegratedFGD and _CubemapLD are unique for each BRDF
-
 IndirectLighting EvaluateBSDF_Env(  LightLoopContext lightLoopContext,
                                     float3 V, PositionInputs posInput,
                                     PreLightData preLightData, EnvLightData lightData, BSDFData bsdfData,
@@ -865,6 +926,7 @@ IndirectLighting EvaluateBSDF_Env(  LightLoopContext lightLoopContext,
     float3 F = preLightData.specularFGD;
 
     float4 preLD = SampleEnv(lightLoopContext, lightData.envIndex, R, PerceptualRoughnessToMipmapLevel(preLightData.iblPerceptualRoughness), lightData.rangeCompressionFactorCompensation, posInput.positionNDC);
+
     weight *= preLD.a; // Used by planar reflection to discard pixel
 
     envLighting = F * preLD.rgb * attenuation;

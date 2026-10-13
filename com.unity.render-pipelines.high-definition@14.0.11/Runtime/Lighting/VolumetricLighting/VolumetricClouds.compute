@@ -157,6 +157,8 @@ CloudRay BuildRay(uint2 intermediateCoord, float integrationNoise)
         float limit=length(_PlanetWeatherCenterRadius.xyz)+2*(_EarthRadius+_HighestCloudAltitude);
         ray.maxRayLength=isOccluded?ray.maxRayLength:limit;
         if(planetDistance>0)ray.maxRayLength=min(ray.maxRayLength,planetDistance);
+        float waterDistance=PlanetWeatherWaterDistance(uint2((intermediateCoord+.5)*_FinalScreenSize.xy/_IntermediateScreenSize.xy));
+        if(waterDistance>0)ray.maxRayLength=waterDistance;
     }
     ray.toEarthCenter = length(CloudPlanetPosition(ray.originWS));
 

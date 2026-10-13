@@ -10,6 +10,7 @@ namespace UnityEngine.Rendering.HighDefinition
     // after raw opaque planet layers and integrates only the medium before each endpoint.
     public sealed class PlanetMediaPass : CustomPass
     {
+        static readonly HashSet<PlanetMediaPass> activePasses=new HashSet<PlanetMediaPass>();
         public Camera Observer;
         public PlanetLayerDepth LayerDepth;
         public readonly List<PlanetMediaBody> Bodies = new List<PlanetMediaBody>();
@@ -69,12 +70,14 @@ namespace UnityEngine.Rendering.HighDefinition
         RenderTexture transparentScattering, transparentTransmission;
         Vector4 transparentDistance, transparentGrid;
         int capacity;
+        int preparedFrame=-1;
 
         public void Activate()
         {
             if (registeredCamera != Observer) Deactivate();
             if (!Enabled || !Observer) { Deactivate(); return; }
             registeredCamera = Observer;
+            activePasses.Add(this);
             PlanetMediaCameraRegistry.Register(registeredCamera, this, NativeWeather);
             if(NativeWeather)PlanetMediaCameraRegistry.SetNativeWeatherLighting(registeredCamera,this,UseSceneLights,
                 NativeWeatherAtmosphere,CelestialLightRotation,LightDirection,LightColor,LightLux);
@@ -88,6 +91,15 @@ namespace UnityEngine.Rendering.HighDefinition
                 float tanY = (1 + Mathf.Abs(projection.m12)) / Mathf.Max(.001f, Mathf.Abs(projection.m11));
                 float near = Mathf.Max(.01f, Observer.nearClipPlane * .25f);
                 float far = Mathf.Max(near * 2, Observer.farClipPlane * Mathf.Sqrt(1 + tanX * tanX + tanY * tanY));
+                if(NativeWeather)foreach(var body in Bodies)
+                {
+                    if(!body.Definition.IsValid||!math.all(math.isfinite(body.CameraPosition)))continue;
+                    double extent=math.length(body.Definition.Center-body.CameraPosition)+body.Definition.Radius+
+                        Math.Max(body.Atmosphere.AirMaximumAltitude,body.Atmosphere.AerosolMaximumAltitude);
+                    // Orbital clouds lie beyond the native camera far plane. Their AIR
+                    // transport must cover the visible celestial layer as well.
+                    if(math.isfinite(extent)&&extent<=1e18)far=Mathf.Max(far,(float)extent);
+                }
                 transparentDistance = new Vector4(near, 1 / Mathf.Log(far / near, 2), Mathf.Clamp(TransparentDepthSlices, 8, 64), NativeWeather?(TransportTransparents?2:3):1);
                 transparentGrid = new Vector4(width, height, 1f / width, 1f / height);
                 if (!math.all(math.isfinite((float4)transparentDistance)) || transparentDistance.y <= 0)
@@ -97,6 +109,7 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public void Deactivate()
         {
+            activePasses.Remove(this);
             PlanetMediaCameraRegistry.Unregister(registeredCamera, this);
             registeredCamera = null;
         }
@@ -173,6 +186,15 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         void BindMediaCompute(CommandBuffer cmd, HDRenderPipeline pipeline, int targetKernel)
         {
+            cmd.SetComputeIntParam(integrator, "_PlanetMediaBodyCount", UploadedBodyCount);
+            cmd.SetComputeIntParam(integrator, "_PlanetMediaRaySteps", Mathf.Clamp(RaySteps, 8, 256));
+            cmd.SetComputeIntParam(integrator, "_PlanetMediaLightSteps", Mathf.Clamp(LightSteps, 1, 16));
+            cmd.SetComputeIntParam(integrator, "_PlanetMediaUseSceneLights", UseSceneLights ? 1 : 0);
+            cmd.SetComputeVectorParam(integrator, "_PlanetMediaLightRotation", new Vector4(CelestialLightRotation.x, CelestialLightRotation.y, CelestialLightRotation.z, CelestialLightRotation.w));
+            cmd.SetComputeVectorParam(integrator, "_PlanetMediaFallbackDirection", new Vector4(LightDirection.normalized.x,
+                LightDirection.normalized.y, LightDirection.normalized.z, Mathf.Max(0, LightLux)));
+            cmd.SetComputeVectorParam(integrator, "_PlanetMediaFallbackColor", LightColor.linear);
+
             cmd.SetComputeBufferParam(integrator, targetKernel, "_PlanetMediaBodies", bodyBuffer);
             cmd.SetComputeBufferParam(integrator, targetKernel, "_PlanetMediaCurves", curveBuffer);
             cmd.SetComputeBufferParam(integrator, targetKernel, "_PlanetMediaAmbient", ambientBuffer);
@@ -202,6 +224,31 @@ namespace UnityEngine.Rendering.HighDefinition
             cmd.SetGlobalTexture("_PlanetMediaShapeNoise", pipeline.PlanetMediaShapeNoise);
             cmd.SetGlobalTexture("_PlanetMediaWorleyNoise", pipeline.PlanetMediaWorleyErosion);
             cmd.SetGlobalTexture("_PlanetMediaPerlinNoise", pipeline.PlanetMediaPerlinErosion);
+        }
+        void IntegrateToEndpoints(CustomPassContext ctx,HDRenderPipeline pipeline,int divisor)
+        {
+            BindMediaCompute(ctx.cmd, pipeline, kernel);
+            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaOpaqueDepth", ctx.cameraDepthBuffer);
+            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaLayerDepth", LayerDepth?.Current ? (Texture)LayerDepth.Current : Texture2D.blackTexture);
+            ctx.cmd.SetComputeIntParam(integrator, "_PlanetMediaHasLayerDepth", LayerDepth?.Current ? 1 : 0);
+            var integrationL = divisor == 1 ? scattering : lowScattering;
+            var integrationT = divisor == 1 ? transmission : lowTransmission;
+            var outputSize = new Vector4(integrationL.width, integrationL.height, 1f / integrationL.width, 1f / integrationL.height);
+            ctx.cmd.SetComputeVectorParam(integrator, "_PlanetMediaOutputSize", outputSize);
+            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaScatteringRW", integrationL);
+            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaTransmissionRW", integrationT);
+            ctx.cmd.DispatchCompute(integrator, kernel, (integrationL.width + 7) / 8, (integrationL.height + 7) / 8, 1);
+            if (divisor != 1)
+            {
+                BindMediaCompute(ctx.cmd, pipeline, reconstructKernel);
+                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaOpaqueDepth", ctx.cameraDepthBuffer);
+                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaLayerDepth", LayerDepth?.Current ? (Texture)LayerDepth.Current : Texture2D.blackTexture);
+                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaLowScattering", lowScattering);
+                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaLowTransmission", lowTransmission);
+                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaScatteringRW", scattering);
+                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaTransmissionRW", transmission);
+                ctx.cmd.DispatchCompute(integrator, reconstructKernel, (scattering.width + 7) / 8, (scattering.height + 7) / 8, 1);
+            }
         }
         protected override void Execute(CustomPassContext ctx)
         {
@@ -271,36 +318,8 @@ namespace UnityEngine.Rendering.HighDefinition
             Publish(ctx.cmd, pipeline);
             int divisor = Mathf.Clamp(ResolutionDivisor, 1, 4);
             EnsureTargets(ctx.hdCamera.actualWidth, ctx.hdCamera.actualHeight, divisor);
-            ctx.cmd.SetComputeIntParam(integrator, "_PlanetMediaBodyCount", UploadedBodyCount);
-            ctx.cmd.SetComputeIntParam(integrator, "_PlanetMediaRaySteps", Mathf.Clamp(RaySteps, 8, 256));
-            ctx.cmd.SetComputeIntParam(integrator, "_PlanetMediaLightSteps", Mathf.Clamp(LightSteps, 1, 16));
-            ctx.cmd.SetComputeIntParam(integrator, "_PlanetMediaUseSceneLights", UseSceneLights ? 1 : 0);
-            ctx.cmd.SetComputeVectorParam(integrator, "_PlanetMediaLightRotation", new Vector4(CelestialLightRotation.x, CelestialLightRotation.y, CelestialLightRotation.z, CelestialLightRotation.w));
-            ctx.cmd.SetComputeVectorParam(integrator, "_PlanetMediaFallbackDirection", new Vector4(LightDirection.normalized.x,
-                LightDirection.normalized.y, LightDirection.normalized.z, Mathf.Max(0, LightLux)));
-            ctx.cmd.SetComputeVectorParam(integrator, "_PlanetMediaFallbackColor", LightColor.linear);
-            BindMediaCompute(ctx.cmd, pipeline, kernel);
-            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaOpaqueDepth", ctx.cameraDepthBuffer);
-            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaLayerDepth", LayerDepth?.Current ? (Texture)LayerDepth.Current : Texture2D.blackTexture);
-            ctx.cmd.SetComputeIntParam(integrator, "_PlanetMediaHasLayerDepth", LayerDepth?.Current ? 1 : 0);
-            var integrationL = divisor == 1 ? scattering : lowScattering;
-            var integrationT = divisor == 1 ? transmission : lowTransmission;
-            var outputSize = new Vector4(integrationL.width, integrationL.height, 1f / integrationL.width, 1f / integrationL.height);
-            ctx.cmd.SetComputeVectorParam(integrator, "_PlanetMediaOutputSize", outputSize);
-            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaScatteringRW", integrationL);
-            ctx.cmd.SetComputeTextureParam(integrator, kernel, "_PlanetMediaTransmissionRW", integrationT);
-            ctx.cmd.DispatchCompute(integrator, kernel, (integrationL.width + 7) / 8, (integrationL.height + 7) / 8, 1);
-            if (divisor != 1)
-            {
-                BindMediaCompute(ctx.cmd, pipeline, reconstructKernel);
-                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaOpaqueDepth", ctx.cameraDepthBuffer);
-                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaLayerDepth", LayerDepth?.Current ? (Texture)LayerDepth.Current : Texture2D.blackTexture);
-                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaLowScattering", lowScattering);
-                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaLowTransmission", lowTransmission);
-                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaScatteringRW", scattering);
-                ctx.cmd.SetComputeTextureParam(integrator, reconstructKernel, "_PlanetMediaTransmissionRW", transmission);
-                ctx.cmd.DispatchCompute(integrator, reconstructKernel, (scattering.width + 7) / 8, (scattering.height + 7) / 8, 1);
-            }
+            preparedFrame=Time.frameCount;
+            if(!DeferForWater(ctx.hdCamera))IntegrateToEndpoints(ctx,pipeline,divisor);
             EnsureTransparentTargets();
             if (transparentDistance.w > 0)
             {
@@ -313,12 +332,33 @@ namespace UnityEngine.Rendering.HighDefinition
                 ctx.cmd.SetGlobalTexture("_PlanetMediaTransparentTransmission", transparentTransmission);
                 PlanetMediaCameraRegistry.SetTransparentTextures(Observer,this,transparentScattering,transparentTransmission);
             }
+            if(DeferForWater(ctx.hdCamera))return;
             composite.SetTexture("_PlanetMediaScattering", scattering);
             composite.SetTexture("_PlanetMediaTransmission", transmission);
             CoreUtils.SetRenderTarget(ctx.cmd, ctx.cameraColorBuffer);
             ctx.cmd.SetViewport(new Rect(0, 0, scattering.width, scattering.height));
             CoreUtils.DrawFullScreen(ctx.cmd, composite, shaderPassId: 0);
             CoreUtils.DrawFullScreen(ctx.cmd, composite, shaderPassId: 1);
+            imposters?.DrawWithMedia(ctx);
+        }
+        static bool DeferForWater(HDCamera camera)=>PlanetaryWaterRendering.HasSurface(camera.camera)&&
+            camera.frameSettings.IsEnabled(FrameSettingsField.Water)&&camera.volumeStack.GetComponent<WaterRendering>().enable.value;
+        internal static void CompositeAfterWater(CustomPassContext ctx)
+        {
+            foreach(var pass in activePasses)
+                if(pass.registeredCamera==ctx.hdCamera.camera&&pass.Enabled&&pass.preparedFrame==Time.frameCount&&DeferForWater(ctx.hdCamera))
+                    pass.CompositeAtCurrentEndpoints(ctx);
+        }
+        void CompositeAtCurrentEndpoints(CustomPassContext ctx)
+        {
+            var pipeline=RenderPipelineManager.currentPipeline as HDRenderPipeline;
+            if(pipeline==null||!integrator||!scattering)return;
+            // Water is an opaque lighting endpoint. Reintegrate the whole medium to
+            // the final metric endpoint instead of sampling a near-camera transparent prefix.
+            IntegrateToEndpoints(ctx,pipeline,Mathf.Clamp(ResolutionDivisor,1,4));
+            composite.SetTexture("_PlanetMediaScattering",scattering);composite.SetTexture("_PlanetMediaTransmission",transmission);
+            CoreUtils.SetRenderTarget(ctx.cmd,ctx.cameraColorBuffer);
+            CoreUtils.DrawFullScreen(ctx.cmd,composite,shaderPassId:0);CoreUtils.DrawFullScreen(ctx.cmd,composite,shaderPassId:1);
             imposters?.DrawWithMedia(ctx);
         }
         protected override void Cleanup()

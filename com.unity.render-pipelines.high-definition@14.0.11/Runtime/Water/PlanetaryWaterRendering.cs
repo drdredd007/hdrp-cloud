@@ -6,6 +6,13 @@ namespace UnityEngine.Rendering.HighDefinition
     /// <summary>Camera-owned spherical water input. Subtract high precision coordinates before publishing it.</summary>
     public sealed class PlanetaryWaterRendering
     {
+        public static bool HasSurface(Camera camera)
+        {
+            var surfaces=WaterSurface.instancesAsArray;if(surfaces==null)return false;
+            foreach(var surface in surfaces)
+                if(surface&&surface.enabled&&surface.IsPlanetary&&surface.planetaryRendering.Matches(camera))return true;
+            return false;
+        }
         public static event Action<Camera, CommandBuffer, RenderTexture> MetricDepthReady;
         public static event Action<Camera, CommandBuffer, ComputeShader, int> BindOpaqueDepth;
         internal static void BindPlanetOpaqueDepth(Camera camera,CommandBuffer cmd,ComputeShader shader,int kernel)

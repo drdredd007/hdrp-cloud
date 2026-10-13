@@ -21,6 +21,12 @@ TEXTURE2D(_PlanetWeatherFarDistance);
 TEXTURE2D(_PlanetWeatherNearDistance);
 int _PlanetWeatherDepthReady;
 int _PlanetWeatherHasNear;
+float PlanetWeatherWaterDistance(uint2 pixel)
+{
+    if(!PlanetWeatherActive()||!_PlanetWeatherDepthReady)return 0;
+    float4 layer=LOAD_TEXTURE2D(_PlanetWeatherFarDistance,pixel);
+    return layer.g==1?layer.r:0;
+}
 float PlanetWeatherDistance(uint2 pixel)
 {
     if(!PlanetWeatherActive() || !_PlanetWeatherDepthReady)return 0;
