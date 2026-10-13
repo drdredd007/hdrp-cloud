@@ -9,9 +9,9 @@ double PlanetWaterRadius(){return (double)_PlanetWaterOriginHigh.w+(double)_Plan
 double PlanetWaterDot(double3 a,double3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 double PlanetWaterSqrt(double x){if(x<=0)return 0;double y=(double)sqrt((float)x);y=(y+x/y)*.5;y=(y+x/y)*.5;y=(y+x/y)*.5;return y;}
 double3 PlanetWaterUnit(double3 p){return p/PlanetWaterSqrt(PlanetWaterDot(p,p));}
-static double3 planetWaterPixelPoint;
+static double3 planetWaterPixelPoint=double3(0,0,0);
 static bool planetWaterPixelPointValid=false;
-static float3 planetWaterTangentU,planetWaterTangentV;
+static float3 planetWaterTangentU=float3(0,0,0),planetWaterTangentV=float3(0,0,0);
 double3 PlanetWaterLocalPoint(float3 positionAWS)
 {
     if(planetWaterPixelPointValid)return planetWaterPixelPoint;

@@ -108,6 +108,7 @@ struct WaterSimulationCoordinates
 
 void ComputeWaterUVs(float3 positionWS, out WaterSimulationCoordinates waterCoord)
 {
+    ZERO_INITIALIZE(WaterSimulationCoordinates,waterCoord);
 #if defined(SHADER_API_D3D11)
     if(PlanetWaterEnabled())
     {
