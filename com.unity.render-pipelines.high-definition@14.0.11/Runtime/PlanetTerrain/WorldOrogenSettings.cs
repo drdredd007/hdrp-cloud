@@ -2,6 +2,8 @@
 // Upstream commit cc2662b4edd52231c4f65d8765f3ef12cd82d9b7. GPL-3.0-only;
 // see Runtime/PlanetRendering/WorldOrogen/LICENSE.txt and THIRD_PARTY_NOTICES.txt.
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using Unity.Mathematics;
 
 namespace SpaceRunner.PlanetTerrain
@@ -38,25 +40,36 @@ namespace SpaceRunner.PlanetTerrain
         }
         public bool Validate(out string error)
         {
-            error = null;
-            if (Seed < 0 || Seed >= 16777216) error = "World Orogen seed must be in [0, 16777215].";
-            else if (Detail < MinimumDetail || Detail > MaximumDetail) error = "Detail must be in [5000, 2560000].";
-            else if (Plates < 4 || Plates > 120 || Continents < 1 || Continents > 10)
-                error = "World Orogen requires 4–120 plates and 1–10 requested continents.";
-            else if (!Unit(Irregularity) || !Unit(ContinentSizeVariety) || !Unit(LandCoverage) ||
-                !Unit(TerrainWarp) || !Unit(Smoothing) || !Unit(GlacialErosion) || !Unit(HydraulicErosion) ||
-                !Unit(ThermalErosion) || !Unit(RidgeSharpening) || !Unit(CodeSoilCreep) ||
-                !math.isfinite(Roughness) || Roughness < 0 || Roughness > .5)
-                error = "Terrain controls must remain within the upstream slider ranges.";
-            else if (!math.isfinite(TemperatureOffset) || TemperatureOffset < -15 || TemperatureOffset > 15 ||
-                !math.isfinite(PrecipitationOffset) || PrecipitationOffset < -1 || PrecipitationOffset > 1)
-                error = "Climate offsets require temperature [-15,15] °C and precipitation [-1,1].";
-            else if (ToggledPlateIndices != null)
-                foreach (int index in ToggledPlateIndices)
-                    if (index < 0 || index >= Plates) { error = "A reshaped plate index is outside the current plate count."; break; }
-            return error == null;
+            var errors = GetValidationErrors();
+            error = errors.Count == 0 ? null : string.Join("\n", errors);
+            return errors.Count == 0;
         }
-        static bool Unit(double value) => math.isfinite(value) && value >= 0 && value <= 1;
+        public List<string> GetValidationErrors()
+        {
+            var errors = new List<string>();
+            void Range(string label, double value, double minimum, double maximum) => PlanetParameterValidation.Range(errors, label, value, minimum, maximum);
+            Range("Seed", Seed, 0, 16777215);
+            Range("Detail", Detail, MinimumDetail, MaximumDetail);
+            Range("Plate Count", Plates, 4, 120);
+            Range("Requested Continents", Continents, 1, 10);
+            Range("Irregularity", Irregularity, 0, 1);
+            Range("Continent Size Variety", ContinentSizeVariety, 0, 1);
+            Range("Target Land Coverage", LandCoverage, 0, 1);
+            Range("Terrain Warp", TerrainWarp, 0, 1);
+            Range("Smoothing", Smoothing, 0, 1);
+            Range("Glacial Erosion", GlacialErosion, 0, 1);
+            Range("Hydraulic Erosion", HydraulicErosion, 0, 1);
+            Range("Thermal Erosion", ThermalErosion, 0, 1);
+            Range("Ridge Sharpening", RidgeSharpening, 0, 1);
+            Range("Code Soil Creep", CodeSoilCreep, 0, 1);
+            Range("Roughness", Roughness, 0, .5);
+            Range("Temperature Offset (°C)", TemperatureOffset, -15, 15);
+            Range("Precipitation Offset", PrecipitationOffset, -1, 1);
+            if (ToggledPlateIndices != null && Plates >= 4 && Plates <= 120)
+                for (int i = 0; i < ToggledPlateIndices.Length; i++)
+                    Range("Toggle Land / Ocean Plates[" + i + "]", ToggledPlateIndices[i], 0, Plates - 1);
+            return errors;
+        }
 
         public SurfaceContentHash ConfigurationDigest() => SurfaceHashing.Compute(writer =>
         {
@@ -83,6 +96,27 @@ namespace SpaceRunner.PlanetTerrain
             if (elevation <= 0) return elevation * 10000;
             double t = math.min(elevation, 1), t2 = t * t;
             return 6000 * t2 * t2 * (5 - 4 * t);
+        }
+    }
+
+    // Shared authoring diagnostics. Keep values culture-independent and never modify inputs.
+    public static class PlanetParameterValidation
+    {
+        public static string Number(double value) => value.ToString("G9", CultureInfo.InvariantCulture);
+        public static void Range(List<string> errors, string label, double value, double minimum, double maximum)
+        {
+            if (!math.isfinite(value) || value < minimum || value > maximum)
+                errors.Add(label + ": " + Number(value) + ". Allowed range: " + Number(minimum) + "–" + Number(maximum) + ".");
+        }
+        public static void NonNegative(List<string> errors, string label, double value)
+        {
+            if (!math.isfinite(value) || value < 0)
+                errors.Add(label + ": " + Number(value) + ". Must be finite and at least 0.");
+        }
+        public static void Positive(List<string> errors, string label, double value, double minimum = 0)
+        {
+            if (!math.isfinite(value) || value <= minimum)
+                errors.Add(label + ": " + Number(value) + ". Must be finite and greater than " + Number(minimum) + ".");
         }
     }
 }
