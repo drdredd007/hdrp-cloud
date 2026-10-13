@@ -12,4 +12,4 @@ The screen carrier uses direct clip-space vertices inside the depth range. Physi
 
 The qualified target is PC/Direct3D 11, one view per camera. Canonical height coverage applies to global Foundation roots; regional/detail/stamp terrain uses native opaque occlusion. Global fluid simulation, spherical CPU buoyancy queries, globalized planar masks/decals and XR remain separate work.
 
-Setup, screenshots, executable controls and failure history are documented in [SpaceRunner planetary water](https://github.com/drdredd007/SpaceRunner/blob/main/Docs/Coordinates/PLANET_HDRP_WATER_2026-10-13.md).
+Setup, screenshots, executable controls and failure history are documented in [SpaceRunner planetary water](https://github.com/drdredd007/SpaceRunner/blob/master/Docs/Coordinates/PLANET_HDRP_WATER_2026-10-13.md).
