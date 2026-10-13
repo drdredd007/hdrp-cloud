@@ -19,7 +19,7 @@ namespace UnityEngine.Rendering.HighDefinition
         Material opaqueDepthMaterial;
         MaterialPropertyBlock opaqueDepthProperties;
         PlanetLayerDepth opaqueDepth;
-        struct ReflectionBody {public Vector4 Sphere,Rotation,Albedo,Metadata;}
+        struct ReflectionBody {public Vector4 Sphere,Rotation,Albedo,Metadata,AirExtinction,AirScattering,AerosolExtinction,AerosolScattering;}
         struct ReflectionSource {public Texture2D Map;public uint Version;public Color Fallback;public bool Written;}
         readonly System.Collections.Generic.List<PlanetFarPass> reflectionSources=new System.Collections.Generic.List<PlanetFarPass>();
         ReflectionBody[] reflectionData;
@@ -106,11 +106,11 @@ namespace UnityEngine.Rendering.HighDefinition
             var sources=reflectionSources;sources.Clear();
             foreach(var body in PlanetFarPass.LiveOwners)
                 if(body.Enabled&&body.Observer==owner.Observer&&body.Definition.IsValid&&sources.Count<16)sources.Add(body);
-            if(sources.Count<2)return;
+            if(sources.Count==0)return;
             if(reflectionBodies==null||reflectionBodies.count!=sources.Count)
             {
                 CoreUtils.SafeRelease(reflectionBodies);CoreUtils.Destroy(reflectionAtlas);CoreUtils.Destroy(reflectionScratch);
-                reflectionBodies=new ComputeBuffer(sources.Count,64);
+                reflectionBodies=new ComputeBuffer(sources.Count,128);
                 reflectionData=new ReflectionBody[sources.Count];reflectionContents=new ReflectionSource[sources.Count];
                 reflectionAtlas=new RenderTexture(512,256,0,RenderTextureFormat.ARGBHalf,RenderTextureReadWrite.Linear)
                 {dimension=UnityEngine.Rendering.TextureDimension.Tex2DArray,volumeDepth=sources.Count,useMipMap=true,autoGenerateMips=false,filterMode=FilterMode.Trilinear,name="Planet reflection albedo atlas",hideFlags=HideFlags.HideAndDontSave};
@@ -128,6 +128,18 @@ namespace UnityEngine.Rendering.HighDefinition
                 int surfaceIndex=body.HdrpWaterRenderer?.Surface?body.HdrpWaterRenderer.Surface.planetaryRendering.SurfaceIndex:-1;
                 data[i]=new ReflectionBody{Sphere=new Vector4(center.x,center.y,center.z,(float)body.Definition.Radius),Rotation=new Vector4(q.x,q.y,q.z,q.w),
                     Albedo=new Vector4(fallback.r,fallback.g,fallback.b,i),Metadata=new Vector4(surfaceIndex,0,0,0)};
+                var air=body.Atmosphere;
+                if(air.IsValid)
+                {
+                    float h=PlanetMediaMath.ScaleHeight(air.AirMaximumAltitude),ah=PlanetMediaMath.ScaleHeight(air.AerosolMaximumAltitude);
+                    var extinction=new Vector3(PlanetMediaMath.Extinction(air.AirOpacity.r,h),PlanetMediaMath.Extinction(air.AirOpacity.g,h),PlanetMediaMath.Extinction(air.AirOpacity.b,h));
+                    float ae=PlanetMediaMath.Extinction(air.AerosolOpacity,ah);
+                    data[i].Metadata.y=Mathf.Max(air.AirMaximumAltitude,air.AerosolMaximumAltitude);
+                    data[i].AirExtinction=new Vector4(extinction.x,extinction.y,extinction.z,h);
+                    data[i].AirScattering=new Vector4(extinction.x*air.AirTint.r,extinction.y*air.AirTint.g,extinction.z*air.AirTint.b,ah);
+                    data[i].AerosolExtinction=new Vector4(ae,air.AerosolAnisotropy,0,0);
+                    data[i].AerosolScattering=new Vector4(ae*air.AerosolTint.r,ae*air.AerosolTint.g,ae*air.AerosolTint.b,0);
+                }
                 var content=reflectionContents[i];uint version=map?map.updateCount:0;
                 if(!content.Written||content.Map!=map||content.Version!=version||content.Fallback!=fallback)
                 {

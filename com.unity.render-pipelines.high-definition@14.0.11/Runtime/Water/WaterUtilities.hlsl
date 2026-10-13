@@ -376,7 +376,7 @@ void SampleWaterAdditionalBand(float3 positionAWS,float2 uv,int band,float4 texS
         float3 weights=PlanetWaterProjectionWeights(positionAWS);data=0;gradient=0;
         [unroll]for(int plane=0;plane<3;plane++)
         {
-            float4 sampleData=SampleTexture2DArrayBicubic(TEXTURE2D_ARRAY_ARGS(_WaterAdditionalDataBuffer,s_linear_repeat_sampler),PlanetWaterProjectionUV(positionAWS,band,plane),band,texSize);
+            float4 sampleData=PlanetWaterSampleBicubic(TEXTURE2D_ARRAY_ARGS(_WaterAdditionalDataBuffer,s_linear_repeat_sampler),positionAWS,band,plane,texSize);
             data+=weights[plane]*sampleData;
             gradient+=weights[plane]*PlanetWaterBandGradient(sampleData.xy,plane);
         }

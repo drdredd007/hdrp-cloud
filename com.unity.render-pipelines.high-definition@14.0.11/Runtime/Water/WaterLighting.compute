@@ -28,6 +28,13 @@
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/Lighting.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Material/Material.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/LightLoop/LightLoopDef.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/GeometricTools.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Sky/PhysicallyBasedSky/PhysicallyBasedSkyCommon.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/Raytracing/Shaders/RaytracingSampling.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/Raytracing/Shaders/RayTracingCommon.hlsl"
+#define LOCAL_VOLUMETRIC_CLOUDS
+#define PLANET_WATER_REFLECTION_CLOUDS
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/VolumetricClouds/VolumetricCloudsUtilities.hlsl"
 #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/NormalSurfaceGradient.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Material/Water/Water.hlsl"
 #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/LightLoop/LightLoop.hlsl"

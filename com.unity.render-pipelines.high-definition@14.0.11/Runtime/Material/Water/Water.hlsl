@@ -737,11 +737,93 @@ DirectLighting EvaluateBSDF_Area(LightLoopContext lightLoopContext,
 // EvaluateBSDF_SSLighting for screen space lighting
 // ----------------------------------------------------------------------------
 
-struct WaterCelestialBody {float4 sphere,rotation,albedo,metadata;};
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/PlanetRendering/PlanetMediaBody.hlsl"
+struct WaterCelestialBody {float4 sphere,rotation,albedo,metadata,airExtinction,airScattering,aerosolExtinction,aerosolScattering;};
 StructuredBuffer<WaterCelestialBody> _WaterPlanetCelestialBodies;
 TEXTURE2D_ARRAY(_WaterPlanetCelestialAlbedo);
 int _WaterPlanetCelestialCount;
 float4 _WaterPlanetCelestialLightRotation;
+PlanetMediaBody WaterReflectionAirBody(WaterCelestialBody body)
+{
+    PlanetMediaBody air=(PlanetMediaBody)0;air.CenterRadius=body.sphere;air.Limits.x=body.metadata.y;
+    air.AirExtinction=body.airExtinction;air.AirScattering=body.airScattering;
+    air.AerosolExtinction=body.aerosolExtinction;air.AerosolScattering=body.aerosolScattering;return air;
+}
+void WaterReflectionAirTransport(float3 origin,float3 ray,float endpoint,out float3 radiance,out float3 transmission)
+{
+    radiance=0;transmission=1;float cursor=0;
+    [loop]for(int eventIndex=0;eventIndex<2*_WaterPlanetCelestialCount+1&&cursor<endpoint;eventIndex++)
+    {
+        float next=endpoint;bool active=false;
+        [loop]for(int bodyIndex=0;bodyIndex<_WaterPlanetCelestialCount;bodyIndex++)
+        {
+            WaterCelestialBody body=_WaterPlanetCelestialBodies[bodyIndex];if(body.metadata.y<=0)continue;
+            float2 range;if(!MediaSphereRange(body.sphere.xyz-origin,body.sphere.w+body.metadata.y,ray,range))continue;
+            if(range.x>cursor&&range.x<next)next=range.x;if(range.y>cursor&&range.y<next)next=range.y;
+        }
+        float3 midpoint=origin+ray*(cursor+next)*.5;
+        [loop]for(int activeIndex=0;activeIndex<_WaterPlanetCelestialCount;activeIndex++)
+        {WaterCelestialBody body=_WaterPlanetCelestialBodies[activeIndex];if(body.metadata.y>0&&length(midpoint-body.sphere.xyz)<body.sphere.w+body.metadata.y){active=true;break;}}
+        if(active)
+        {
+            float stepLength=(next-cursor)/32;
+            [loop]for(int sampleIndex=0;sampleIndex<32;sampleIndex++)
+            {
+                float3 samplePosition=origin+ray*(cursor+(sampleIndex+.5)*stepLength),extinction=0,source=0;
+                [loop]for(int sampleBody=0;sampleBody<_WaterPlanetCelestialCount;sampleBody++)
+                {
+                    PlanetMediaBody air=WaterReflectionAirBody(_WaterPlanetCelestialBodies[sampleBody]);
+                    float3 p=samplePosition-air.CenterRadius.xyz;float height=length(p)-air.CenterRadius.w;
+                    if(air.Limits.x<=0||height>air.Limits.x)continue;
+                    extinction+=MediaAirExtinction(air,height);
+                    [loop]for(int lightIndex=0;lightIndex<_PlanetCelestialLightCount;lightIndex++)
+                    {
+                        PlanetCelestialLightData light=_PlanetCelestialLightDatas[lightIndex];if(light.Color.w<=0)continue;
+                        float3 L=MediaRotate(_WaterPlanetCelestialLightRotation,light.Direction.xyz);
+                        source+=light.Color.rgb*light.Direction.w*MediaAirTransmissionToSun(air,p,L)*MediaAirSource(air,height,dot(ray,L));
+                    }
+                }
+                float3 tau=max(0,extinction*stepLength),stepT=exp(-tau),absorbed=1-stepT;
+                absorbed=lerp(absorbed,tau*(1-tau*.5),step(tau,.001));
+                radiance+=transmission*source*absorbed/max(extinction,1e-20);transmission*=stepT;
+            }
+        }
+        cursor=next;
+    }
+}
+int _WaterReflectionClouds;
+bool WaterReflectionCloudTransport(float3 origin,float3 ray,float endpoint,out float3 radiance,out float transmission,out float distance)
+{
+    radiance=0;transmission=1;distance=0;bool valid=false;
+#if defined(PLANET_WATER_REFLECTION_CLOUDS)
+    if(_WaterReflectionClouds!=0&&PlanetWeatherActive())
+    {
+        CloudRay cloudRay=(CloudRay)0;cloudRay.originWS=GetAbsolutePositionWS(GetCurrentViewPosition()+origin);
+        cloudRay.direction=ray;cloudRay.maxRayLength=endpoint;cloudRay.integrationNoise=.5;
+        cloudRay.toEarthCenter=length(CloudPlanetPosition(cloudRay.originWS));
+        // Native HDRP classifies points below ground, below clouds, inside and above.
+        cloudRay.insideClouds=cloudRay.toEarthCenter<_EarthRadius?-2:cloudRay.toEarthCenter<=_EarthRadius+_LowestCloudAltitude?-1:cloudRay.toEarthCenter>_EarthRadius+_HighestCloudAltitude?1:0;
+        VolumetricRayResult clouds=TraceVolumetricRay(cloudRay);
+        if(!clouds.invalidRay&&clouds.transmittance<1)
+        {
+            radiance=clouds.inScattering*GetInverseCurrentExposureMultiplier();transmission=clouds.transmittance;distance=clouds.meanDistance;
+            valid=true;
+        }
+    }
+#endif
+    return valid;
+}
+float3 WaterReflectionTransport(float3 origin,float3 ray,float endpoint,float3 incident)
+{
+    float3 airL=0,airT=1;WaterReflectionAirTransport(origin,ray,endpoint,airL,airT);
+    float3 radiance=airL+airT*incident,cloudL=0;float cloudT=1,cloudDistance=0;
+    if(WaterReflectionCloudTransport(origin,ray,endpoint,cloudL,cloudT,cloudDistance))
+    {
+        float3 frontL=0,frontT=1;WaterReflectionAirTransport(origin,ray,min(endpoint,cloudDistance),frontL,frontT);
+        radiance=frontL+frontT*cloudL+cloudT*(radiance-frontL);
+    }
+    return radiance;
+}
 bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float roughness,out float3 radiance)
 {
     radiance=0;float nearest=1e30;int selected=-1;float3 hit=0;
@@ -766,7 +848,7 @@ bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float
     {
         float visibleDistance=LOAD_TEXTURE2D(_WaterPlanetOpaqueDepth,(int2)(uv*_ScreenSize.xy)).a;
         if(abs(visibleDistance-length(hit))<body.sphere.w*.05)
-        {radiance=LoadCameraColor(uv*_ScreenSize.xy)*GetInverseCurrentExposureMultiplier();return true;}
+        {radiance=WaterReflectionTransport(origin,ray,nearest,LoadCameraColor(uv*_ScreenSize.xy)*GetInverseCurrentExposureMultiplier());return true;}
     }
     float3 q=body.rotation.xyz;
     float3 local=normal+2*cross(q,cross(q,normal)+body.rotation.w*normal);
@@ -786,7 +868,7 @@ bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float
         DirectionalLightData light=_DirectionalLightDatas[nativeLightIndex];
         illumination+=light.color*(max(0,dot(normal,-light.forward))+.015)*INV_PI;
     }
-    radiance=albedo*illumination;return true;
+    radiance=WaterReflectionTransport(origin,ray,nearest,albedo*illumination);return true;
 }
 
 IndirectLighting EvaluateBSDF_ScreenSpaceReflection(PositionInputs posInput,
@@ -926,6 +1008,20 @@ IndirectLighting EvaluateBSDF_Env(  LightLoopContext lightLoopContext,
     float3 F = preLightData.specularFGD;
 
     float4 preLD = SampleEnv(lightLoopContext, lightData.envIndex, R, PerceptualRoughnessToMipmapLevel(preLightData.iblPerceptualRoughness), lightData.rangeCompressionFactorCompensation, posInput.positionNDC);
+
+#if defined(PLANET_WATER_REFLECTION_CLOUDS)
+    if(_WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary>.5&&lightLoopContext.sampleReflection==SINGLE_PASS_CONTEXT_SAMPLE_SKY)
+    {
+        // Sky IBL already contains AIR. Replace only the cloud-occluded part,
+        // with the same reflected ray and cloud radiance as a celestial hit.
+        float3 origin=positionWS-GetCurrentViewPosition(),cloudL=0;float cloudT=1,cloudDistance=0;
+        if(WaterReflectionCloudTransport(origin,preLightData.iblR,_MaxRayMarchingDistance,cloudL,cloudT,cloudDistance))
+        {
+            float3 frontL=0,frontT=1;WaterReflectionAirTransport(origin,preLightData.iblR,cloudDistance,frontL,frontT);
+            preLD.rgb=frontL+frontT*cloudL+cloudT*max(0,preLD.rgb-frontL);
+        }
+    }
+#endif
 
     weight *= preLD.a; // Used by planar reflection to discard pixel
 

@@ -624,6 +624,25 @@ namespace UnityEngine.Rendering.HighDefinition
             commonData.regionsCount = UpdateVolumetricCloudsRegionBuffer();
         }
 
+        void BindWaterReflectionClouds(HDCamera camera,CommandBuffer cmd,ComputeShader shader,int kernel)
+        {
+            var settings=camera.volumeStack.GetComponent<VolumetricClouds>();
+            bool active=m_ActiveVolumetricClouds&&PlanetaryWeather.IsActive(camera)&&camera.frameSettings.IsEnabled(FrameSettingsField.VolumetricClouds)&&settings.enable.value;
+            cmd.SetComputeIntParam(shader,"_WaterReflectionClouds",active?1:0);
+            var common=new VolumetricCloudCommonData();
+            if(active)common=PrepareVolumetricCloudsParameters_FullResolution(camera,camera.actualWidth,camera.actualHeight,camera.viewCount,camera.exposureControlFS,settings,GetCameraType(camera)).commonData;
+            ConstantBuffer.Push(cmd,common.cloudsCB,shader,HDShaderIDs._ShaderVariablesClouds);
+            cmd.SetComputeTextureParam(shader,kernel,HDShaderIDs._Worley128RGBA,active?common.worley128RGBA:m_Asset.renderPipelineResources.textures.worleyNoise128RGBA);
+            cmd.SetComputeTextureParam(shader,kernel,HDShaderIDs._ErosionNoise,active?common.erosionNoise:m_Asset.renderPipelineResources.textures.worleyNoise32RGB);
+            cmd.SetComputeTextureParam(shader,kernel,HDShaderIDs._CloudMapTexture,active?common.cloudMapTexture:Texture2D.whiteTexture);
+            cmd.SetComputeTextureParam(shader,kernel,HDShaderIDs._CloudLutTexture,active?common.cloudLutTexture:Texture2D.blackTexture);
+            cmd.SetComputeTextureParam(shader,kernel,_PlanetCloudMapId,active?common.planetCloudMap:CoreUtils.blackCubeTexture);
+            cmd.SetComputeIntParam(shader,_PlanetCloudMapActiveId,active?common.planetCloudMapActive:0);
+            cmd.SetComputeBufferParam(shader,kernel,HDShaderIDs._VolumetricCloudsAmbientProbeBuffer,active?m_CloudsDynamicProbeBuffer:m_WaterCloudProbeFallback);
+            cmd.SetComputeBufferParam(shader,kernel,HDShaderIDs._VolumetricCloudsRegions,active?common.regionsBuffer:m_WaterCloudRegionsFallback);
+            cmd.SetComputeIntParam(shader,HDShaderIDs._VolumetricCloudsRegionCount,active?common.regionsCount:0);
+            if(active&&common.planetRegions!=null&&common.planetRegions.Length>0)cmd.SetBufferData(common.regionsBuffer,common.planetRegions);
+        }
         void UpdateVolumetricClouds(HDCamera hdCamera, in VolumetricClouds settings)
         {
             // don't update cloud animation for anything but the main camera

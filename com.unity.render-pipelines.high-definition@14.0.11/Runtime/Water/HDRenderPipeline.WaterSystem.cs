@@ -66,6 +66,7 @@ namespace UnityEngine.Rendering.HighDefinition
         // Water line and under water
         ComputeBuffer m_WaterCameraHeightBuffer;
         ComputeBuffer m_WaterCelestialFallback;
+        ComputeBuffer m_WaterCloudProbeFallback,m_WaterCloudRegionsFallback;
         Texture2DArray m_WaterCelestialFallbackAtlas;
 
         void InitializeWaterSystem()
@@ -122,7 +123,9 @@ namespace UnityEngine.Rendering.HighDefinition
 
             // Waterline / Underwater
             m_WaterCameraHeightBuffer = new ComputeBuffer(1 * 4, sizeof(float));
-            m_WaterCelestialFallback=new ComputeBuffer(1,64);
+            m_WaterCelestialFallback=new ComputeBuffer(1,128);
+            m_WaterCloudProbeFallback=new ComputeBuffer(7,16);m_WaterCloudProbeFallback.SetData(new Vector4[7]);
+            m_WaterCloudRegionsFallback=new ComputeBuffer(1,48);
             m_WaterCelestialFallbackAtlas=new Texture2DArray(1,1,1,TextureFormat.RGBAHalf,false,true);
             m_WaterCelestialFallbackAtlas.SetPixels(new[]{Color.black},0);m_WaterCelestialFallbackAtlas.Apply();
 
@@ -163,6 +166,7 @@ namespace UnityEngine.Rendering.HighDefinition
             // Release the waterline underwater data
             CoreUtils.SafeRelease(m_WaterCameraHeightBuffer);
             CoreUtils.SafeRelease(m_WaterCelestialFallback);CoreUtils.Destroy(m_WaterCelestialFallbackAtlas);
+            CoreUtils.SafeRelease(m_WaterCloudProbeFallback);CoreUtils.SafeRelease(m_WaterCloudRegionsFallback);
 
             // Release the caustics geometry
             CoreUtils.Destroy(m_CausticsMaterial);
@@ -1298,6 +1302,10 @@ namespace UnityEngine.Rendering.HighDefinition
                 passData.perVoxelOffset = builder.ReadComputeBuffer(lightLists.perVoxelOffset);
                 passData.perTileLogBaseTweak = builder.ReadComputeBuffer(lightLists.perTileLogBaseTweak);
 
+                // The reflected ray consumes the native cloud probe before cloud composition.
+                if(m_CloudsDynamicProbeBuffer!=null)
+                    builder.ReadComputeBuffer(renderGraph.ImportComputeBuffer(m_CloudsDynamicProbeBuffer));
+
                 // Request the output textures
                 passData.colorBuffer = builder.WriteTexture(colorBuffer);
 
@@ -1328,6 +1336,7 @@ namespace UnityEngine.Rendering.HighDefinition
                         ctx.cmd.SetComputeBufferParam(data.parameters.waterLighting,data.parameters.waterLightingKernel,"_WaterPlanetCelestialBodies",m_WaterCelestialFallback);
                         ctx.cmd.SetComputeTextureParam(data.parameters.waterLighting,data.parameters.waterLightingKernel,"_WaterPlanetCelestialAlbedo",m_WaterCelestialFallbackAtlas);
                         BindPlanetMediaLights(ctx.cmd,data.parameters.waterLighting,data.parameters.waterLightingKernel);
+                        BindWaterReflectionClouds(HDCamera.GetOrCreate(data.observer),ctx.cmd,data.parameters.waterLighting,data.parameters.waterLightingKernel);
                         PlanetaryWaterRendering.BindPlanetOpaqueDepth(data.observer,ctx.cmd,data.parameters.waterLighting,data.parameters.waterLightingKernel);
                         ctx.cmd.SetComputeIntParam(data.parameters.waterLighting,"_WaterPlanetDeferMedia",PlanetMediaCameraRegistry.IsActive(data.observer)&&PlanetaryWaterRendering.HasSurface(data.observer)?1:0);
                         ctx.cmd.SetComputeBufferParam(data.parameters.waterLighting, data.parameters.waterLightingKernel, HDShaderIDs._WaterSurfaceProfiles, data.waterSurfaceProfiles);

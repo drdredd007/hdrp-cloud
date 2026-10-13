@@ -34,6 +34,24 @@ float2 PlanetWaterProjectionUV(float3 positionAWS,int band,int plane)
     return PlanetWaterWrappedProjection(positionAWS,plane,1.0L/(double)_PatchSize[band],OrientationToDirection(_PatchCurrentOrientation[band])*_PatchCurrentSpeed[band]*_SimulationTime);
 }
 float2 PlanetWaterUV(float3 positionAWS,int band){return PlanetWaterProjectionUV(positionAWS,band,band);}
+#if !defined(WATER_SIMULATION)
+float4 PlanetWaterSampleBicubic(TEXTURE2D_ARRAY_PARAM(tex,smp),float3 positionAWS,int band,int plane,float4 texSize)
+{
+    float2 uv=PlanetWaterProjectionUV(positionAWS,band,plane);
+    float3 relative=(float3)(PlanetWaterLocalPoint(positionAWS)-PlanetWaterOrigin());
+    float3 dx=ddx(relative)/_PatchSize[band],dy=ddy(relative)/_PatchSize[band];
+    float2 uvDx=plane==0?dx.xy:plane==1?dx.yz:dx.xz;
+    float2 uvDy=plane==0?dy.xy:plane==1?dy.yz:dy.xz;
+    float2 xy=uv*texSize.xy+.5,ic=floor(xy),fc=frac(xy),weights[2],offsets[2];
+    BicubicFilter(fc,weights,offsets);
+    // Wrapped UV derivatives jump at a repeat boundary. Keep the physical
+    // footprint for all four taps so the mip choice stays continuous.
+    return weights[0].y*(weights[0].x*SAMPLE_TEXTURE2D_ARRAY_GRAD(tex,smp,(ic+float2(offsets[0].x,offsets[0].y)-.5)*texSize.zw,band,uvDx,uvDy)+
+                            weights[1].x*SAMPLE_TEXTURE2D_ARRAY_GRAD(tex,smp,(ic+float2(offsets[1].x,offsets[0].y)-.5)*texSize.zw,band,uvDx,uvDy))+
+           weights[1].y*(weights[0].x*SAMPLE_TEXTURE2D_ARRAY_GRAD(tex,smp,(ic+float2(offsets[0].x,offsets[1].y)-.5)*texSize.zw,band,uvDx,uvDy)+
+                            weights[1].x*SAMPLE_TEXTURE2D_ARRAY_GRAD(tex,smp,(ic+float2(offsets[1].x,offsets[1].y)-.5)*texSize.zw,band,uvDx,uvDy));
+}
+#endif
 float3 PlanetWaterProjectionWeights(float3 positionAWS)
 {
     float3 n=(float3)PlanetWaterUnit(PlanetWaterLocalPoint(positionAWS));
