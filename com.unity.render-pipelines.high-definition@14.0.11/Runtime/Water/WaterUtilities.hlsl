@@ -266,16 +266,18 @@ float UnpackLowFrequencyHeight(float normalizedDisplacement)
 
 float3 SampleWaterDisplacementBand(float3 positionAWS,float2 uv,int band)
 {
+    float3 value=float3(0,0,0);
 #if defined(SHADER_API_D3D11)
     if(PlanetWaterEnabled())
     {
-        float3 weights=PlanetWaterProjectionWeights(positionAWS),value=0;
+        float3 weights=PlanetWaterProjectionWeights(positionAWS);
         [unroll]for(int plane=0;plane<3;plane++)
             value+=weights[plane]*SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer,s_linear_repeat_sampler,PlanetWaterProjectionUV(positionAWS,band,plane),band,0).xyz;
-        return value;
     }
+    else
 #endif
-    return SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer,s_linear_repeat_sampler,uv,band,0).xyz;
+    {value=SAMPLE_TEXTURE2D_ARRAY_LOD(_WaterDisplacementBuffer,s_linear_repeat_sampler,uv,band,0).xyz;}
+    return value;
 }
 
 void EvaluateWaterDisplacement(float3 positionAWS, float4 bandsMultiplier, out WaterDisplacementData displacementData)
