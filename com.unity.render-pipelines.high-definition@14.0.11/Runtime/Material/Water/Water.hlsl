@@ -743,43 +743,53 @@ StructuredBuffer<WaterCelestialBody> _WaterPlanetCelestialBodies;
 TEXTURE2D_ARRAY(_WaterPlanetCelestialAlbedo);
 int _WaterPlanetCelestialCount;
 float4 _WaterPlanetCelestialLightRotation;
+TEXTURECUBE(_WaterReflectionSpace);
+float4 _WaterReflectionSpaceRotation;
+float _WaterReflectionSpaceMultiplier;
 PlanetMediaBody WaterReflectionAirBody(WaterCelestialBody body)
 {
     PlanetMediaBody air=(PlanetMediaBody)0;air.CenterRadius=body.sphere;air.Limits.x=body.metadata.y;
     air.AirExtinction=body.airExtinction;air.AirScattering=body.airScattering;
     air.AerosolExtinction=body.aerosolExtinction;air.AerosolScattering=body.aerosolScattering;return air;
 }
-void WaterReflectionAirTransport(float3 origin,float3 ray,float endpoint,out float3 radiance,out float3 transmission)
+int WaterReflectionPbrSkyBody()
 {
-    radiance=0;transmission=1;float cursor=0;
-    int skyBody=-1;
-    // The selected atmosphere uses the same single + multiple scattering LUTs
-    // as HDRP's sky. A separate single-scattering approximation leaves a disk
-    // on the night hemisphere even when the incident surface radiance is zero.
-    if(_PBRFogEnabled!=0)
     for(int skyIndex=0;skyIndex<_WaterPlanetCelestialCount;skyIndex++)
     {
         WaterCelestialBody body=_WaterPlanetCelestialBodies[skyIndex];
-        float3 center=GetAbsolutePositionWS(GetCurrentViewPosition()+body.sphere.xyz);
-        if(body.metadata.y>0&&abs(body.sphere.w-_PlanetaryRadius)<1&&length(center-_PlanetCenterPosition.xyz)<1&&
-            all(abs(body.airExtinction.rgb-_AirSeaLevelExtinction.rgb)<max(1e-10,_AirSeaLevelExtinction.rgb*.001)))
-        {skyBody=skyIndex;break;}
+        // Explicit camera/sky compatibility is independent of native fog.
+        // PlanetMedia disables _PBRFogEnabled to prevent duplicate view AIR.
+        if(body.metadata.z>.5)
+        return skyIndex;
     }
-    [loop]for(int eventIndex=0;eventIndex<2*_WaterPlanetCelestialCount+1&&cursor<endpoint;eventIndex++)
+    return -1;
+}
+void WaterReflectionAirTransport(float3 origin,float3 ray,float endpoint,float split,
+    out float3 radiance,out float3 transmission,out float3 frontL,out float3 frontT)
+{
+    radiance=frontL=0;transmission=frontT=1;float cursor=0;
+    int skyBody=WaterReflectionPbrSkyBody();
+    [loop]for(int eventIndex=0;eventIndex<2*_WaterPlanetCelestialCount+2&&cursor<endpoint;eventIndex++)
     {
-        float next=endpoint;bool active=false;
+        float next=endpoint;bool active=false,customActive=false;
+        if(split>cursor&&split<next)next=split;
         [loop]for(int bodyIndex=0;bodyIndex<_WaterPlanetCelestialCount;bodyIndex++)
         {
-            WaterCelestialBody body=_WaterPlanetCelestialBodies[bodyIndex];if(body.metadata.y<=0||bodyIndex==skyBody)continue;
+            WaterCelestialBody body=_WaterPlanetCelestialBodies[bodyIndex];if(body.metadata.y<=0)continue;
             float2 range;if(!MediaSphereRange(body.sphere.xyz-origin,body.sphere.w+body.metadata.y,ray,range))continue;
             if(range.x>cursor&&range.x<next)next=range.x;if(range.y>cursor&&range.y<next)next=range.y;
         }
         float3 midpoint=origin+ray*(cursor+next)*.5;
         [loop]for(int activeIndex=0;activeIndex<_WaterPlanetCelestialCount;activeIndex++)
-        {WaterCelestialBody body=_WaterPlanetCelestialBodies[activeIndex];if(activeIndex!=skyBody&&body.metadata.y>0&&length(midpoint-body.sphere.xyz)<body.sphere.w+body.metadata.y){active=true;break;}}
+        {WaterCelestialBody body=_WaterPlanetCelestialBodies[activeIndex];if(body.metadata.y>0&&length(midpoint-body.sphere.xyz)<body.sphere.w+body.metadata.y){active=true;customActive=customActive||activeIndex!=skyBody;}}
         if(active)
         {
+            float3 segmentL=0,segmentT=1;
             float stepLength=(next-cursor)/32;
+            // The usual single selected atmosphere is handled entirely by PBS.
+            // March only when another independent atmosphere occupies this interval.
+            if(customActive)
+            {
             [loop]for(int sampleIndex=0;sampleIndex<32;sampleIndex++)
             {
                 float3 samplePosition=origin+ray*(cursor+(sampleIndex+.5)*stepLength),extinction=0,source=0;
@@ -799,17 +809,20 @@ void WaterReflectionAirTransport(float3 origin,float3 ray,float endpoint,out flo
                 }
                 float3 tau=max(0,extinction*stepLength),stepT=exp(-tau),absorbed=1-stepT;
                 absorbed=lerp(absorbed,tau*(1-tau*.5),step(tau,.001));
-                radiance+=transmission*source*absorbed/max(extinction,1e-20);transmission*=stepT;
+                segmentL+=segmentT*source*absorbed/max(extinction,1e-20);segmentT*=stepT;
             }
+            }
+            if(skyBody>=0)
+            {
+                float3 nativeL=0,nativeOpacity=0;
+                EvaluatePbrAtmosphere(GetAbsolutePositionWS(GetCurrentViewPosition()+origin+ray*cursor),-ray,next-cursor,false,nativeL,nativeOpacity);
+                float3 nativeT=saturate(1-nativeOpacity);
+                segmentL=nativeL*_IntensityMultiplier+nativeT*segmentL;segmentT*=nativeT;
+            }
+            radiance+=transmission*segmentL;transmission*=segmentT;
         }
         cursor=next;
-    }
-    if(skyBody>=0)
-    {
-        float3 nativeL=0,nativeOpacity=0;
-        EvaluatePbrAtmosphere(GetAbsolutePositionWS(GetCurrentViewPosition()+origin),-ray,endpoint,false,nativeL,nativeOpacity);
-        float3 nativeT=saturate(1-nativeOpacity);
-        radiance=nativeL*_IntensityMultiplier+nativeT*radiance;transmission*=nativeT;
+        if(cursor<=split){frontL=radiance;frontT=transmission;}
     }
 }
 int _WaterReflectionClouds;
@@ -834,20 +847,27 @@ bool WaterReflectionCloudTransport(float3 origin,float3 ray,float endpoint,out f
 #endif
     return valid;
 }
-float3 WaterReflectionTransport(float3 origin,float3 ray,float endpoint,float3 incident)
+float3 WaterReflectionTransport(float3 origin,float3 ray,float endpoint,float3 incident,bool incidentContainsAir)
 {
-    float3 airL=0,airT=1;WaterReflectionAirTransport(origin,ray,endpoint,airL,airT);
-    float3 radiance=airL+airT*incident,cloudL=0;float cloudT=1,cloudDistance=0;
-    if(WaterReflectionCloudTransport(origin,ray,endpoint,cloudL,cloudT,cloudDistance))
+    float3 cloudL=0;float cloudT=1,cloudDistance=0;
+    float cloudEndpoint=endpoint;
+#if defined(PLANET_WATER_REFLECTION_CLOUDS)
+    cloudEndpoint=min(endpoint,_MaxRayMarchingDistance);
+#endif
+    bool cloud=WaterReflectionCloudTransport(origin,ray,cloudEndpoint,cloudL,cloudT,cloudDistance);
+    float3 airL=0,airT=1,frontL=0,frontT=1;
+    WaterReflectionAirTransport(origin,ray,incidentContainsAir?cloudDistance:endpoint,min(endpoint,cloudDistance),airL,airT,frontL,frontT);
+    float3 radiance=incidentContainsAir?incident:airL+airT*incident;
+    if(cloud)
     {
-        float3 frontL=0,frontT=1;WaterReflectionAirTransport(origin,ray,min(endpoint,cloudDistance),frontL,frontT);
-        radiance=frontL+frontT*cloudL+cloudT*(radiance-frontL);
+        float3 behind=radiance-frontL;
+        radiance=frontL+frontT*cloudL+cloudT*(incidentContainsAir?max(0,behind):behind);
     }
     return radiance;
 }
-bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float roughness,out float3 radiance)
+bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float roughness,out float3 radiance,out float endpoint)
 {
-    radiance=0;float nearest=1e30;int selected=-1;float3 hit=0;
+    radiance=0;endpoint=1e20;float nearest=1e30;int selected=-1;float3 hit=0;
     float3 origin=positionWS-GetCurrentViewPosition();ray=normalize(ray);
     for(int i=0;i<_WaterPlanetCelestialCount;i++)
     {
@@ -859,6 +879,7 @@ bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float
         if(t>0&&t<nearest){nearest=t;selected=i;hit=origin+ray*t;}
     }
     if(selected<0)return false;
+    endpoint=nearest;
     WaterCelestialBody body=_WaterPlanetCelestialBodies[selected];
     float3 normal=normalize(hit-body.sphere.xyz);
     float4 projected=TransformWorldToHClip(GetCurrentViewPosition()+hit);
@@ -869,7 +890,7 @@ bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float
     {
         float visibleDistance=LOAD_TEXTURE2D(_WaterPlanetOpaqueDepth,(int2)(uv*_ScreenSize.xy)).a;
         if(abs(visibleDistance-length(hit))<body.sphere.w*.05)
-        {radiance=WaterReflectionTransport(origin,ray,nearest,LoadCameraColor(uv*_ScreenSize.xy)*GetInverseCurrentExposureMultiplier());return true;}
+        {radiance=LoadCameraColor(uv*_ScreenSize.xy)*GetInverseCurrentExposureMultiplier();return true;}
     }
     float3 q=body.rotation.xyz;
     float3 local=normal+2*cross(q,cross(q,normal)+body.rotation.w*normal);
@@ -889,7 +910,7 @@ bool WaterCelestialReflection(float3 positionWS,float3 ray,uint ownSurface,float
         DirectionalLightData light=_DirectionalLightDatas[nativeLightIndex];
         illumination+=light.color*max(0,dot(normal,-light.forward))*INV_PI;
     }
-    radiance=WaterReflectionTransport(origin,ray,nearest,albedo*illumination);return true;
+    radiance=albedo*illumination;return true;
 }
 
 IndirectLighting EvaluateBSDF_ScreenSpaceReflection(PositionInputs posInput,
@@ -910,16 +931,6 @@ IndirectLighting EvaluateBSDF_ScreenSpaceReflection(PositionInputs posInput,
     // Set the default weight value
     reflectionHierarchyWeight = ssrLighting.a;
     lighting.specularReflected = ssrLighting.rgb * preLightData.specularFGD;
-
-    // Celestial bodies also exist outside the screen and ambient sky cubemap.
-    // Fill only the remaining reflection weight, preserving native local SSR hits.
-    float3 celestial;
-    if(preLightData.aboveWater&&_WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary>.5&&
-        WaterCelestialReflection(posInput.positionWS,preLightData.iblR,bsdfData.surfaceIndex,preLightData.iblPerceptualRoughness,celestial))
-    {
-        lighting.specularReflected+=(1-ssrLighting.a)*celestial*preLightData.specularFGD;
-        reflectionHierarchyWeight=1;
-    }
 
     // If we are underwater, we don't want to use the fallback hierarchy
     if (!preLightData.aboveWater)
@@ -1032,16 +1043,20 @@ IndirectLighting EvaluateBSDF_Env(  LightLoopContext lightLoopContext,
     float4 preLD = SampleEnv(lightLoopContext, lightData.envIndex, R, PerceptualRoughnessToMipmapLevel(preLightData.iblPerceptualRoughness), lightData.rangeCompressionFactorCompensation, posInput.positionNDC);
 
 #if defined(PLANET_WATER_REFLECTION_CLOUDS)
-    if(_WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary>.5&&lightLoopContext.sampleReflection==SINGLE_PASS_CONTEXT_SAMPLE_SKY)
+    if(preLightData.aboveWater&&_WaterSurfaceProfiles[bsdfData.surfaceIndex].planetary>.5&&lightLoopContext.sampleReflection==SINGLE_PASS_CONTEXT_SAMPLE_SKY)
     {
-        // Sky IBL already contains AIR. Replace only the cloud-occluded part,
-        // with the same reflected ray and cloud radiance as a celestial hit.
-        float3 origin=positionWS-GetCurrentViewPosition(),cloudL=0;float cloudT=1,cloudDistance=0;
-        if(WaterReflectionCloudTransport(origin,preLightData.iblR,_MaxRayMarchingDistance,cloudL,cloudT,cloudDistance))
+        // Transport both a celestial surface and the adjacent visual sky through
+        // one medium. An ambient cubemap can have different/stale sky lighting;
+        // replacing it with an independently shaded sphere leaves a dark disk.
+        float3 origin=positionWS-GetCurrentViewPosition(),incident=0;float endpoint=1e20;
+        bool celestial=WaterCelestialReflection(positionWS,preLightData.iblR,bsdfData.surfaceIndex,preLightData.iblPerceptualRoughness,incident,endpoint);
+        bool nativeSky=WaterReflectionPbrSkyBody()>=0;
+        if(!celestial)
         {
-            float3 frontL=0,frontT=1;WaterReflectionAirTransport(origin,preLightData.iblR,cloudDistance,frontL,frontT);
-            preLD.rgb=frontL+frontT*cloudL+cloudT*max(0,preLD.rgb-frontL);
+            float3 spaceRay=MediaRotate(_WaterReflectionSpaceRotation,preLightData.iblR);
+            incident=nativeSky?SAMPLE_TEXTURECUBE_LOD(_WaterReflectionSpace,s_trilinear_clamp_sampler,spaceRay,PerceptualRoughnessToMipmapLevel(preLightData.iblPerceptualRoughness)).rgb*_WaterReflectionSpaceMultiplier*_IntensityMultiplier:preLD.rgb;
         }
+        preLD.rgb=WaterReflectionTransport(origin,preLightData.iblR,endpoint,incident,!celestial&&!nativeSky);
     }
 #endif
 

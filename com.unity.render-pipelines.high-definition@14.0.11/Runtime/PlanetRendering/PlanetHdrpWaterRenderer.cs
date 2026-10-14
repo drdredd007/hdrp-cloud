@@ -103,6 +103,12 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         void BindCelestialReflections(CommandBuffer cmd,ComputeShader shader,int kernel)
         {
+            var camera=HDCamera.GetOrCreate(owner.Observer);
+            var sky=camera.volumeStack.GetComponent<PhysicallyBasedSky>();
+            cmd.SetComputeTextureParam(shader,kernel,"_WaterReflectionSpace",sky.spaceEmissionTexture.value?sky.spaceEmissionTexture.value:CoreUtils.blackCubeTexture);
+            var spaceRotation=Quaternion.Inverse(Quaternion.Euler(sky.spaceRotation.value));
+            cmd.SetComputeVectorParam(shader,"_WaterReflectionSpaceRotation",new Vector4(spaceRotation.x,spaceRotation.y,spaceRotation.z,spaceRotation.w));
+            cmd.SetComputeFloatParam(shader,"_WaterReflectionSpaceMultiplier",sky.spaceEmissionMultiplier.value);
             var sources=reflectionSources;sources.Clear();
             foreach(var body in PlanetFarPass.LiveOwners)
                 if(body.Enabled&&body.Observer==owner.Observer&&body.Definition.IsValid&&sources.Count<16)sources.Add(body);
@@ -135,6 +141,10 @@ namespace UnityEngine.Rendering.HighDefinition
                     var extinction=new Vector3(PlanetMediaMath.Extinction(air.AirOpacity.r,h),PlanetMediaMath.Extinction(air.AirOpacity.g,h),PlanetMediaMath.Extinction(air.AirOpacity.b,h));
                     float ae=PlanetMediaMath.Extinction(air.AerosolOpacity,ah);
                     data[i].Metadata.y=Mathf.Max(air.AirMaximumAltitude,air.AerosolMaximumAltitude);
+                    // The stock fog gate is off while independent planetary media
+                    // owns view composition. The same PBS LUTs remain valid for
+                    // this reflected segment when the resolved sky matches a body.
+                    data[i].Metadata.z=PlanetAtmosphere.Matches(camera,body.Definition,body.CameraPosition)?1:0;
                     data[i].AirExtinction=new Vector4(extinction.x,extinction.y,extinction.z,h);
                     data[i].AirScattering=new Vector4(extinction.x*air.AirTint.r,extinction.y*air.AirTint.g,extinction.z*air.AirTint.b,ah);
                     data[i].AerosolExtinction=new Vector4(ae,air.AerosolAnisotropy,0,0);
