@@ -82,6 +82,9 @@ namespace UnityEngine.Rendering.HighDefinition
         public Texture2DArray BaseMapColour
         {get{if(BaseMapOverride)return BaseMapOverride;return PlanetSurfaceDataRegistry.TryGetBaseColour(Definition.Surface,out var value)?value:null;}}
         public PlanetNativeSurfaceSettings NativeSurfaceSettings=PlanetNativeSurfaceSettings.Default;
+        [NonSerialized] public IPlanetNativeMeshSource NativeMeshSource;
+        [NonSerialized] public IPlanetPreparedSurfaceBinding PreparedSurfaceBinding;
+        [NonSerialized] public int NativeLayer;
         public PlanetOceanSettings OceanSettings=PlanetOceanSettings.Default;
         [NonSerialized] public GameObject HdrpWaterTemplate;
         [NonSerialized] PlanetHdrpWaterRenderer hdrpWater;
@@ -179,13 +182,22 @@ namespace UnityEngine.Rendering.HighDefinition
 
         protected override void Setup(ScriptableRenderContext context,CommandBuffer cmd)
         {
-            if(!PlanetShader || !CompositeShader)throw new InvalidOperationException("Planet shaders must be serialized in the sample scene.");
             EnsureRuntimeResources();
-            surface=CoreUtils.CreateEngineMaterial(PlanetShader);composite=CoreUtils.CreateEngineMaterial(CompositeShader);
-            properties=new MaterialPropertyBlock();
+            EnsureDrawMaterials();
+        }
+        void EnsureDrawMaterials()
+        {
+            // CustomPass setup state may survive deserialization while these
+            // nonserialized native fields do not. Restore on the render thread
+            // entry point too; construction/deserialization stays managed-only.
+            if(!PlanetShader || !CompositeShader)throw new InvalidOperationException("Planet shaders must be serialized in the sample scene.");
+            if(!surface)surface=CoreUtils.CreateEngineMaterial(PlanetShader);
+            if(!composite)composite=CoreUtils.CreateEngineMaterial(CompositeShader);
+            if(properties==null)properties=new MaterialPropertyBlock();
         }
         protected override void Execute(CustomPassContext ctx)
         {
+            EnsureRuntimeResources();EnsureDrawMaterials();
             renderedThisFrame=false;renderedNear=false;
             if(!EnableLocalSurface||UsesNativeSurface){nearGeometry.Dispose();ReleaseNearBuffer();}
             if(ctx.hdCamera.camera==Observer)AtmosphereActive=false;
@@ -257,6 +269,7 @@ namespace UnityEngine.Rendering.HighDefinition
             projection.SetRow(1,ctx.hdCamera.mainViewConstants.projMatrix.GetRow(1));
             var view=Matrix4x4.Scale(new Vector3(1,1,-1))*Matrix4x4.Rotate(Quaternion.Inverse(Observer.transform.rotation));
             surface.SetMatrix("_FarViewProjection",projection*view);surface.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
+            PlanetPreparedSurfaceBinding.ConfigureMaterial(surface,PreparedSurfaceBinding);
             surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor.linear);surface.SetFloat("_PlanetLightLux",LightLux);
             properties.SetFloat("_PeriodicNormalsEnabled",Definition.GeneratorVersion==4&&PeriodicNormalSlopes?1:0);
             PlanetPeriodicSurfaceSettings.Bind(properties,PeriodicSurfaceSettings,Definition.GeneratorVersion==4,(float)Altitude);
@@ -270,6 +283,7 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             properties.SetVector("_PlanetCenterRelative",(Vector3)centerRelative);
             WorldOrogenBaseMapBinding.Bind(properties,BaseMapColour,PlanetRotation,double3.zero,Definition.Radius);
+            PlanetPreparedSurfaceBinding.Bind(properties,PreparedSurfaceBinding,double3.zero,PlanetRotation);
             properties.SetFloat("_PlanetAtmosphere",AtmosphereActive?1:0);
             // Camera orchestration enables local surface only for its nearest body.
             // Do not give that environment's SH to other planets, nor gate it on
@@ -312,6 +326,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetVector("_DetailOrigin",(Vector3)(float3)(detailOrigin-math.floor(detailOrigin/4096)*4096));
                 if(NativeMaterialSettings&&NativeMaterialSettings.IsValid)
                 {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,detailOrigin,PlanetRotation,Definition.Surface);properties.SetVector("_DetailOrigin",Vector4.zero);}
+                PlanetPreparedSurfaceBinding.Bind(properties,PreparedSurfaceBinding,detailOrigin,PlanetRotation);
                 var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(q,PlanetSurfaceCache.Pivot(Definition,key)));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
                 properties.SetInteger("_PlanetBaseVertex",geometry.Slot(key)*farPatches.SlotVertexCount);
@@ -335,6 +350,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetVector("_DetailOrigin",(Vector3)(float3)(frame.Position-math.floor(frame.Position/4096)*4096));
                 if(NativeMaterialSettings&&NativeMaterialSettings.IsValid)
                 {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,frame.Position,PlanetRotation,Definition.Surface);properties.SetVector("_DetailOrigin",Vector4.zero);}
+                PlanetPreparedSurfaceBinding.Bind(properties,PreparedSurfaceBinding,frame.Position,PlanetRotation);
                 var relative=(Definition.Center-CameraPosition)+PlanetField.Rotate(q,frame.Position);
                 var localRotation=PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation);
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));

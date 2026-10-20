@@ -85,11 +85,10 @@ PlanetTerrainLayerSample PlanetTerrainReadLayer(Texture2D albedoMap,Texture2D no
     }
     return result;
 }
-PlanetTerrainMaterialSample PlanetTerrainEvaluate(float3 offset,float3 normalPlanet,float4 masks,float normalStrength)
+// Callers that already sampled the independent geological normal reuse it.
+PlanetTerrainMaterialSample PlanetTerrainEvaluateFromGeological(float3 offset,float3 normalPlanet,float geologicalVariance,float4 masks,float normalStrength)
 {
     PlanetTerrainMaterialSample result=(PlanetTerrainMaterialSample)0;
-    float geologicalVariance;
-    normalPlanet=PlanetGeologicalNormal(offset,normalPlanet,geologicalVariance);
     float paintNoise=0,paintGrain=0;
     if(_PlanetPaintEnabled>0) {
         uint seed=(uint)_PlanetPaintSeed.x|((uint)_PlanetPaintSeed.y<<16);
@@ -121,5 +120,10 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluate(float3 offset,float3 normalPla
     float3 gradient=a.gradient*weights.x+b.gradient*weights.y+c.gradient*weights.z+d.gradient*weights.w;
     gradient-=normalPlanet*dot(normalPlanet,gradient);
     result.normal=normalize(normalPlanet-gradient);return result;
+}
+PlanetTerrainMaterialSample PlanetTerrainEvaluate(float3 offset,float3 normalPlanet,float4 masks,float normalStrength)
+{
+    float geologicalVariance;normalPlanet=PlanetGeologicalNormal(offset,normalPlanet,geologicalVariance);
+    return PlanetTerrainEvaluateFromGeological(offset,normalPlanet,geologicalVariance,masks,normalStrength);
 }
 #endif

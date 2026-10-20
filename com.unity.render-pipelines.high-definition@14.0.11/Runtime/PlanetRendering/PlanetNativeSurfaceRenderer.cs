@@ -65,19 +65,23 @@ namespace UnityEngine.Rendering.HighDefinition
         sealed class Bank
         {
             public PlanetDefinition Definition;public PlanetSurfaceFrame Frame;public PlanetNativeSurfaceSettings Settings;public bool RequiredMasks;
+            public IPlanetNativeMeshSource MeshSource;public string GeometryIdentity;
             public int2 Centre;public int Reused;
             public readonly List<Cell> Cells=new List<Cell>();
             public readonly Dictionary<int2,Cell> ByKey=new Dictionary<int2,Cell>();
             public void Add(int2 key,Cell cell){ByKey.Add(key,cell);cell.Retain();Cells.Add(cell);}
+            public void Remove(int2 key){if(ByKey.TryGetValue(key,out var cell)){ByKey.Remove(key);Cells.Remove(cell);cell.Release();}}
             public void Dispose(){foreach(var cell in Cells)cell.Release();Cells.Clear();ByKey.Clear();}
         }
         sealed class Pending
         {
             public Bank Bank;public List<PlanetRenderPatchRequest> Requests=new List<PlanetRenderPatchRequest>();
             public readonly List<int2> Missing=new List<int2>();
+            public readonly Dictionary<int2,IPlanetNativeMeshRequest> GpuRequests=new Dictionary<int2,IPlanetNativeMeshRequest>();
             public int Next,Side,Built;public bool Failed,Ready;
-            public bool Completed {get{for(int i=Built;i<Requests.Count;i++)if(!Requests[i].IsCompleted)return false;return true;}}
-            public void Dispose(){foreach(var request in Requests)request.Dispose();Requests.Clear();Bank.Dispose();}
+            public bool Completed {get{for(int i=Built;i<Requests.Count;i++)if(!Requests[i].IsCompleted)return false;foreach(var request in GpuRequests.Values)if(!request.IsCompleted)return false;return true;}}
+            public void CancelGpu(){foreach(var request in GpuRequests.Values)request.Dispose();}
+            public void Dispose(){foreach(var request in Requests)request.Dispose();Requests.Clear();foreach(var request in GpuRequests.Values)request.Dispose();GpuRequests.Clear();Bank.Dispose();}
         }
         readonly PlanetFarPass owner;
         MaterialPropertyBlock sharedProperties;
@@ -93,6 +97,7 @@ namespace UnityEngine.Rendering.HighDefinition
         /// <summary>Meshes retained from the preceding bank in the currently published bank.</summary>
         public int ReusedPatchCount=>active?.Reused??0;
         public long MeshBuildCount {get;private set;}
+        public long GpuMeshBuildCount{get;private set;}
         public bool IsReady=>active!=null;
         public bool IsRefining=>pending!=null;
         public int ReservedPatchCount
@@ -118,9 +123,26 @@ namespace UnityEngine.Rendering.HighDefinition
         bool RequiresMaterialWeights(PlanetDefinition definition)=>owner.NativeMaterialSettings&&owner.NativeMaterialSettings.RequireMaterialWeights&&!HasBaseMap(definition);
         public bool Covers(PlanetDefinition definition,double3 planetLocalPosition,double margin=0)
         {
+            if(!math.all(math.isfinite(planetLocalPosition)))return false;
             if(active==null||!SameSurface(active.Definition,definition)||RequiresMaterialWeights(definition)&&!active.RequiredMasks)return false;
+            if(!ReferenceEquals(owner.NativeMeshSource,active.MeshSource)||active.GeometryIdentity!=owner.NativeMeshSource?.GeometryIdentity)return false;
             if(math.dot(planetLocalPosition,active.Frame.Up)<=0)return false;
             var p=active.Frame.ToLocal(planetLocalPosition);
+            if(active.MeshSource!=null){
+                if(!ReferenceEquals(owner.NativeMeshSource,active.MeshSource)||active.GeometryIdentity!=active.MeshSource.GeometryIdentity)return false;
+                if(margin<0||!math.isfinite(margin))return false;
+                double denominator=math.dot(planetLocalPosition,active.Frame.Up),plane=math.dot(active.Frame.Position,active.Frame.Up);
+                if(!math.isfinite(denominator)||denominator<=0||!math.isfinite(plane)||plane<=0)return false;
+                p=active.Frame.ToLocal(planetLocalPosition*(plane/denominator));
+                // Progressive publication must not advertise a rectangular bank
+                // whose missing cells have not yet been generated.
+                double size=active.Settings.PatchSize;
+                if(math.abs(p.x)+margin>8192||math.abs(p.z)+margin>8192)return false;
+                int2 low=(int2)math.floor((new double2(p.x,p.z)-margin)/size),high=(int2)math.floor((new double2(p.x,p.z)+margin)/size);
+                if(math.any(high-low>16))return false;
+                for(int z=low.y;z<=high.y;z++)for(int x=low.x;x<=high.x;x++)if(!active.ByKey.ContainsKey(new int2(x,z)))return false;
+                return true;
+            }
             return math.abs(p.x-active.Centre.x*active.Settings.PatchSize)<=active.Settings.ReceiverHalfSize-margin&&
                 math.abs(p.z-active.Centre.y*active.Settings.PatchSize)<=active.Settings.ReceiverHalfSize-margin;
         }
@@ -150,6 +172,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(!shader||!shader.isSupported){Status="Native terrain shader is unavailable";return;}
             if(!material||materialShader!=shader)
             {CoreUtils.Destroy(material);material=CoreUtils.CreateEngineMaterial(shader);materialShader=shader;material.enableInstancing=true;}
+            PlanetPreparedSurfaceBinding.ConfigureMaterial(material,owner.PreparedSurfaceBinding);
             var frame=active.Frame;
             // Parent supplies a coherent floating, Universe-oriented render basis. Subtract doubles before float conversion.
             var translation=owner.Definition.Center-owner.CameraPosition+PlanetField.Rotate(q,frame.Position);
@@ -163,6 +186,7 @@ namespace UnityEngine.Rendering.HighDefinition
             {
                 if(sharedProperties==null)sharedProperties=new MaterialPropertyBlock();
                 sharedProperties.Clear();PlanetTerrainMaterialBinding.Bind(sharedProperties,owner.NativeMaterialSettings,frame.Position,owner.PlanetRotation,active.Definition.Surface);
+                PlanetPreparedSurfaceBinding.Bind(sharedProperties,owner.PreparedSurfaceBinding,frame.Position,owner.PlanetRotation);
                 WorldOrogenBaseMapBinding.Bind(sharedProperties,owner.BaseMapColour,owner.PlanetRotation,frame.Position,owner.Definition.Radius);
                 PlanetGlobalColorSettings.Bind(sharedProperties,owner.EffectiveGlobalColor,(float)owner.Altitude,owner.PlanetRotation);
                 sharedProperties.SetVector("_PlanetGlobalColorAnchor",(Vector3)(float3)(frame.Position/owner.Definition.Radius));
@@ -176,7 +200,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     camera=camera,matProps=sharedProperties,worldBounds=WorldBounds(cell.Mesh.bounds,matrix),
                     shadowCastingMode=ShadowCastingMode.On,receiveShadows=true,
                     motionVectorMode=objectHistory?MotionVectorGenerationMode.Object:MotionVectorGenerationMode.Camera,
-                    lightProbeUsage=LightProbeUsage.BlendProbes,renderingLayerMask=uint.MaxValue,layer=0
+                    lightProbeUsage=LightProbeUsage.BlendProbes,renderingLayerMask=uint.MaxValue,layer=Mathf.Clamp(owner.NativeLayer,0,31)
                 };
                 Graphics.RenderMesh(parameters,cell.Mesh,0,matrix,objectHistory?cell.Previous:matrix);
                 cell.Previous=matrix;cell.HasPrevious=true;
@@ -188,8 +212,8 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             if(disposed||context.hdCamera.camera!=owner.Observer)return false;
             // Explicit coverage draws must obey the ordinary native renderer's visibility gates.
-            // Its submissions use layer 0; a custom DrawMesh does not apply Camera.cullingMask.
-            if(!submittedThisRendering||active==null||(owner.Observer.cullingMask&1)==0||
+            // A custom DrawMesh does not apply Camera.cullingMask itself.
+            if(!submittedThisRendering||active==null||(owner.Observer.cullingMask&(1<<Mathf.Clamp(owner.NativeLayer,0,31)))==0||
                 !context.hdCamera.frameSettings.IsEnabled(FrameSettingsField.OpaqueObjects))
             {ReleaseCoverage();return false;}
             int width=context.hdCamera.actualWidth,height=context.hdCamera.actualHeight;
@@ -226,12 +250,12 @@ namespace UnityEngine.Rendering.HighDefinition
         {
             if(disposed||!candidate.IsValid||candidate.GeneratorVersion!=3)return false;
             if(stagedRevision.HasValue&&!SameSurface(stagedRevision.Value,candidate))CancelRevision();
-            if(!stagedRevision.HasValue&&pending!=null){abandoned.Add(pending);pending=null;}
+            if(!stagedRevision.HasValue&&pending!=null){pending.CancelGpu();abandoned.Add(pending);pending=null;}
             stagedRevision=candidate;
             // Reserve publication bookkeeping before the fixed-tick commit.
             if(active!=null&&retired.Capacity==retired.Count)retired.Capacity=retired.Count+8;
             if(!NeedsRevisionBank(candidate,out var localTarget))
-            {if(pending!=null){abandoned.Add(pending);pending=null;}stagedEmpty=true;return true;}
+            {if(pending!=null){pending.CancelGpu();abandoned.Add(pending);pending=null;}stagedEmpty=true;return true;}
             stagedEmpty=false;
             if(!owner.NativeMaterialSettings.IsValid||!owner.NativeSurfaceSettings.IsValid){Status="Invalid staged native terrain settings";return false;}
             if(stagedPreparationFrame!=Time.frameCount)
@@ -263,7 +287,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public void CancelRevision()
         {
             if(!stagedRevision.HasValue)return;
-            if(pending!=null){abandoned.Add(pending);pending=null;}
+            if(pending!=null){pending.CancelGpu();abandoned.Add(pending);pending=null;}
             stagedRevision=null;stagedEmpty=false;
         }
         public void Prepare(PlanetDefinition definition,double3 localCamera,PlanetNativeSurfaceSettings settings,bool requireMasks,bool publish=true)
@@ -272,15 +296,39 @@ namespace UnityEngine.Rendering.HighDefinition
             if(!definition.IsValid||!settings.IsValid||!math.all(math.isfinite(localCamera))||math.lengthsq(localCamera)<=0)return;
             // Source-colour maps replace the layered palette; their height-only tiles do not carry GRSS masks.
             requireMasks=requireMasks&&!HasBaseMap(definition);
+            var meshSource=owner.NativeMeshSource;
             PollAbandoned();
-            if(pending!=null&&(!SameSurface(pending.Bank.Definition,definition)||!SameSettings(pending.Bank.Settings,settings)||pending.Bank.RequiredMasks!=requireMasks))
-            {abandoned.Add(pending);pending=null;}
-            bool changed=active==null||!SameSurface(active.Definition,definition)||!SameSettings(active.Settings,settings)||active.RequiredMasks!=requireMasks;
+            if(pending!=null&&(!SameSurface(pending.Bank.Definition,definition)||!SameSettings(pending.Bank.Settings,settings)||pending.Bank.RequiredMasks!=requireMasks||
+                !ReferenceEquals(pending.Bank.MeshSource,meshSource)||pending.Bank.GeometryIdentity!=meshSource?.GeometryIdentity))
+            {pending.CancelGpu();abandoned.Add(pending);pending=null;}
+            if(meshSource!=null&&!meshSource.Supports(definition,settings,requireMasks,out var sourceFailure))
+            {if(pending!=null){pending.CancelGpu();abandoned.Add(pending);pending=null;}Status="GPU native terrain refused: "+sourceFailure;return;}
+            // A prepared residency change does not change already completed
+            // vertices. Pending requests above still retire against their exact
+            // original owner; only the completed independent mesh bank migrates.
+            if(active!=null&&active.Definition.Id==definition.Id&&active.Definition.Seed==definition.Seed&&
+                active.Definition.GeneratorVersion==definition.GeneratorVersion&&active.Definition.Radius==definition.Radius&&
+                SameSettings(active.Settings,settings)&&active.RequiredMasks==requireMasks&&
+                !string.IsNullOrEmpty(active.GeometryIdentity)&&active.GeometryIdentity==meshSource?.GeometryIdentity&&
+                meshSource is IPlanetReadyGeometrySource readyGeometry&&readyGeometry.CanReuseCompletedGeometry(active.MeshSource))
+            {active.MeshSource=meshSource;active.Definition=definition;}
+            if(meshSource!=null&&pending!=null){
+                double denominator=math.dot(localCamera,pending.Bank.Frame.Up),plane=math.dot(pending.Bank.Frame.Position,pending.Bank.Frame.Up);
+                var projected=denominator>0?pending.Bank.Frame.ToLocal(localCamera*(plane/denominator)):new double3(double.PositiveInfinity);
+                int half=pending.Side/2;
+                if(denominator<=0||!TryChartCentre(projected,settings.PatchSize,half,out var desiredCentre)){
+                    pending.CancelGpu();abandoned.Add(pending);pending=null;
+                }else if(math.abs(projected.x-pending.Bank.Centre.x*settings.PatchSize)>settings.RecenterDistance||math.abs(projected.z-pending.Bank.Centre.y*settings.PatchSize)>settings.RecenterDistance)
+                    ReconcileGpuPending(desiredCentre);
+            }
+            bool changed=active==null||!SameSurface(active.Definition,definition)||!SameSettings(active.Settings,settings)||active.RequiredMasks!=requireMasks||
+                !ReferenceEquals(active.MeshSource,meshSource)||active.GeometryIdentity!=meshSource?.GeometryIdentity;
             var delta=active==null?default:active.Frame.ToLocal(localCamera);
+            if(meshSource!=null&&active!=null){double denominator=math.dot(localCamera,active.Frame.Up);delta=denominator>0?active.Frame.ToLocal(localCamera*(math.dot(active.Frame.Position,active.Frame.Up)/denominator)):new double3(double.PositiveInfinity);}
             bool needsBank=pending==null&&(changed||math.dot(localCamera,active.Frame.Up)<=0||
                 math.abs(delta.x-active.Centre.x*settings.PatchSize)>settings.RecenterDistance||
                 math.abs(delta.z-active.Centre.y*settings.PatchSize)>settings.RecenterDistance);
-            if(definition.GeneratorVersion==3&&(needsBank||pending!=null&&!pending.Ready)&&
+            if(meshSource==null&&definition.GeneratorVersion==3&&(needsBank||pending!=null&&!pending.Ready)&&
                 !PlanetSurfaceDataRegistry.TryPrepareForRendering(definition.Surface,out var preparation))
             {Status="Native terrain waits for render filtering: "+preparation;return;}
             if(needsBank)
@@ -307,7 +355,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     if(!PlanetSurfaceCoordinates.TryResolve(definition,address,out frame)){Status="Native terrain surface is not ready";return;}
                     centre=int2.zero;
                 }
-                pending=new Pending {Bank=new Bank {Definition=definition,Frame=frame,Settings=settings,RequiredMasks=requireMasks,Centre=centre},Side=side};
+                pending=new Pending {Bank=new Bank {Definition=definition,Frame=frame,Settings=settings,RequiredMasks=requireMasks,Centre=centre,MeshSource=meshSource,GeometryIdentity=meshSource?.GeometryIdentity},Side=side};
                 for(int z=-half;z<half;z++)for(int x=-half;x<half;x++)
                 {
                     var key=centre+new int2(x,z);
@@ -315,10 +363,17 @@ namespace UnityEngine.Rendering.HighDefinition
                     {pending.Bank.Add(key,cell);pending.Bank.Reused++;}
                     else pending.Missing.Add(key);
                 }
+                if(meshSource!=null){
+                    // Prioritise the receiver, then complete the surrounding
+                    // shadow region. Tie-breaks retain deterministic key order.
+                    pending.Missing.Sort((a,b)=>{double da=math.lengthsq((double2)a+.5-(double2)centre),db=math.lengthsq((double2)b+.5-(double2)centre);
+                        int c=da.CompareTo(db);if(c!=0)return c;c=a.y.CompareTo(b.y);return c!=0?c:a.x.CompareTo(b.x);});
+                }
             }
             if(pending==null)return;
             if(pending.Ready)return;
             int total=pending.Side*pending.Side;
+            if(meshSource!=null){PrepareGpu(definition,settings,publish,total);return;}
             using(ScheduleMarker.Auto())for(int i=0;i<settings.PatchesPerFrame&&pending.Next<pending.Missing.Count;i++)
             {
                 int id=pending.Next++;
@@ -333,18 +388,85 @@ namespace UnityEngine.Rendering.HighDefinition
                 using(var patch=request.Complete())
                 {
                     pending.Built++;
-                    if(patch.GeometryStatus!=SurfaceSampleStatus.Ready||patch.AttributeStatus!=SurfaceSampleStatus.Ready){pending.Failed=true;break;}
+                    if(patch.GeometryStatus!=SurfaceSampleStatus.Ready||patch.AttributeStatus!=SurfaceSampleStatus.Ready)
+                    {pending.Failed=true;Status="Native terrain bank rejected incomplete geometry or required material masks: geometry="+patch.GeometryStatus+", attributes="+patch.AttributeStatus+", requiredMasks="+requireMasks;break;}
                     pending.Bank.Add(patch.Key,new Cell {Mesh=CreateMesh(patch)});MeshBuildCount++;
                 }
             }
             if(pending.Failed)
-            {Status="Native terrain bank rejected incomplete geometry or required material masks";abandoned.Add(pending);pending=null;return;}
+            {abandoned.Add(pending);pending=null;return;}
             if(pending.Next!=pending.Missing.Count||pending.Built!=pending.Requests.Count||pending.Bank.Cells.Count!=total)
             {Status="Preparing native terrain "+pending.Bank.Cells.Count+"/"+total;return;}
             if(!publish){pending.Ready=true;pending.Requests.Clear();Status="Native terrain revision staged";return;}
             if(active!=null)retired.Add(active);
             active=pending.Bank;pending.Requests.Clear();pending=null;
             Status="Native terrain: "+active.Cells.Count+" meshes ("+active.Reused+" reused)";
+        }
+        void PrepareGpu(PlanetDefinition definition,PlanetNativeSurfaceSettings settings,bool publish,int total)
+        {
+            var source=pending.Bank.MeshSource;
+            int scheduled=0;
+            using(ScheduleMarker.Auto())foreach(var key in pending.Missing){
+                if(pending.Bank.ByKey.ContainsKey(key)||pending.GpuRequests.ContainsKey(key))continue;
+                if(scheduled++>=settings.PatchesPerFrame)break;
+                try{pending.GpuRequests.Add(key,source.Request(definition,pending.Bank.Frame,key,settings.PatchSize));}
+                catch(Exception error){pending.Failed=true;Status="GPU native terrain request refused: "+error.Message;break;}
+            }
+            int uploaded=0;
+            using(UploadMarker.Auto())foreach(var key in pending.Missing){
+                if(!pending.GpuRequests.TryGetValue(key,out var request))continue;
+                if(request is IPlanetNativeMeshPriority priority)priority.SetPriority(math.lengthsq((double2)key+.5-(double2)pending.Bank.Centre));
+                if(!request.IsCompleted)continue;
+                if(uploaded++>=settings.PatchesPerFrame)break;
+                if(!request.TryTakeMesh(out var mesh,out var failure)){pending.Failed=true;Status="GPU native terrain rejected: "+failure;break;}
+                if(!ValidateGpuMesh(mesh,settings.Resolution)){CoreUtils.Destroy(mesh);pending.Failed=true;Status="GPU native terrain rejected its complete mesh ABI or bounds";break;}
+                var cell=new Cell{Mesh=mesh};pending.GpuRequests.Remove(key);pending.Bank.Add(key,cell);request.Dispose();MeshBuildCount++;GpuMeshBuildCount++;
+                if(publish){
+                    if(active==null){
+                        active=new Bank{Definition=pending.Bank.Definition,Frame=pending.Bank.Frame,Settings=settings,RequiredMasks=pending.Bank.RequiredMasks,
+                            Centre=pending.Bank.Centre,MeshSource=source,GeometryIdentity=pending.Bank.GeometryIdentity};
+                        foreach(var pair in pending.Bank.ByKey)active.Add(pair.Key,pair.Value);
+                    }else if(SameSurface(active.Definition,pending.Bank.Definition)&&ReferenceEquals(active.MeshSource,source)&&
+                        active.GeometryIdentity==pending.Bank.GeometryIdentity&&active.Frame.Equals(pending.Bank.Frame)&&SameSettings(active.Settings,settings)&&!active.ByKey.ContainsKey(key))active.Add(key,cell);
+                    // A different authority/frame retains its complete previous
+                    // cover until the replacement bank is complete. Publishing one
+                    // new cell must not drop the other ready old cells.
+                }
+            }
+            if(pending.Failed){pending.CancelGpu();abandoned.Add(pending);pending=null;return;}
+            source.Pump(Time.frameCount);
+            if(pending.Bank.Cells.Count!=total){Status="GPU native terrain: "+(active?.Cells.Count??0)+" ready / "+total;return;}
+            if(!publish){pending.Ready=true;Status="GPU native terrain revision staged";return;}
+            if(active!=null)retired.Add(active);active=pending.Bank;pending.GpuRequests.Clear();pending=null;
+            Status="GPU native terrain: "+active.Cells.Count+" meshes";
+        }
+        void ReconcileGpuPending(int2 centre)
+        {
+            var bank=pending.Bank;int half=pending.Side/2;var wanted=new HashSet<int2>();
+            for(int z=-half;z<half;z++)for(int x=-half;x<half;x++)wanted.Add(centre+new int2(x,z));
+            var removed=new List<int2>();foreach(var pair in pending.GpuRequests)if(!wanted.Contains(pair.Key))removed.Add(pair.Key);
+            foreach(var key in removed){pending.GpuRequests[key].Dispose();pending.GpuRequests.Remove(key);}
+            removed.Clear();foreach(var key in bank.ByKey.Keys)if(!wanted.Contains(key))removed.Add(key);foreach(var key in removed)bank.Remove(key);
+            if(active!=null&&ReferenceEquals(active.MeshSource,bank.MeshSource)&&active.GeometryIdentity==bank.GeometryIdentity&&active.Frame.Equals(bank.Frame)){
+                removed.Clear();foreach(var key in active.ByKey.Keys)if(!wanted.Contains(key))removed.Add(key);
+                if(removed.Count>0){var retirement=new Bank();foreach(var key in removed){retirement.Add(key,active.ByKey[key]);active.Remove(key);}retired.Add(retirement);}
+                foreach(var key in wanted)if(!bank.ByKey.ContainsKey(key)&&active.ByKey.TryGetValue(key,out var cell)){bank.Add(key,cell);bank.Reused++;}
+            }
+            bank.Centre=centre;pending.Missing.Clear();pending.Missing.AddRange(wanted);
+            pending.Ready=false;
+            pending.Missing.Sort((a,b)=>{int c=math.lengthsq((double2)a+.5-(double2)centre).CompareTo(math.lengthsq((double2)b+.5-(double2)centre));if(c!=0)return c;c=a.y.CompareTo(b.y);return c!=0?c:a.x.CompareTo(b.x);});
+        }
+        static bool ValidateGpuMesh(Mesh mesh,int resolution)
+        {
+            if(!mesh||mesh.vertexCount!=(resolution+1)*(resolution+1)||mesh.vertexBufferCount!=1||mesh.GetVertexBufferStride(0)!=88||
+                mesh.subMeshCount!=1||mesh.GetIndexCount(0)!=(uint)(resolution*resolution*6)||mesh.GetTopology(0)!=MeshTopology.Triangles)return false;
+            var bounds=mesh.bounds;
+            if(!math.all(math.isfinite((float3)bounds.center))||!math.all(math.isfinite((float3)bounds.size))||math.any((float3)bounds.size<=0))return false;
+            var attributes=new[]{VertexAttribute.Position,VertexAttribute.Normal,VertexAttribute.Tangent,VertexAttribute.Color,VertexAttribute.TexCoord0,VertexAttribute.TexCoord1,VertexAttribute.TexCoord2,VertexAttribute.TexCoord3};
+            int[] offsets={0,12,24,40,56,64,72,80},dimensions={3,3,4,4,2,2,2,2};
+            for(int i=0;i<attributes.Length;i++)if(!mesh.HasVertexAttribute(attributes[i])||mesh.GetVertexAttributeOffset(attributes[i])!=offsets[i]||
+                mesh.GetVertexAttributeFormat(attributes[i])!=VertexAttributeFormat.Float32||mesh.GetVertexAttributeDimension(attributes[i])!=dimensions[i]||mesh.GetVertexAttributeStream(attributes[i])!=0)return false;
+            return true;
         }
         static bool TryChartCentre(double3 local,double size,int half,out int2 centre)
         {

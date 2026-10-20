@@ -234,7 +234,11 @@ Shader "SpaceRunner/Planet Terrain Lit"
 
     HLSLINCLUDE
 
-    #pragma target 4.5
+    #pragma target 5.0
+    // Material-local ready-data backends preserve runtime-created material variants in Player.
+    #pragma multi_compile_local _ _PREPARED_COLOUR
+        #pragma multi_compile_local _ _PREPARED_BACKEND_REFERENCE _PREPARED_BACKEND_WHOLE_FLOAT _PREPARED_BACKEND_NATIVE _PREPARED_BACKEND_MIXED
+    #pragma multi_compile_local _ _PREPARED_TEXTURES_1 _PREPARED_TEXTURES_2 _PREPARED_TEXTURES_4 _PREPARED_TEXTURES_8
     //#pragma enable_d3d11_debug_symbols
 
     //-------------------------------------------------------------------------------------

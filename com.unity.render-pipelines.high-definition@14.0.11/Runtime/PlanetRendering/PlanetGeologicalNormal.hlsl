@@ -1,5 +1,12 @@
 #ifndef SPACERUNNER_GEOLOGICAL_NORMAL_INCLUDED
 #define SPACERUNNER_GEOLOGICAL_NORMAL_INCLUDED
+#if defined(SPACERUNNER_PREPARED_PLANET_NORMALS) && (defined(_PREPARED_BACKEND_REFERENCE) || defined(_PREPARED_BACKEND_WHOLE_FLOAT) || defined(_PREPARED_BACKEND_NATIVE) || defined(_PREPARED_BACKEND_MIXED))
+#define SPACERUNNER_PREPARED_GRAPHICS_ACTIVE
+#include "PlanetPreparedSampling.hlsl"
+#else
+// The far surface also reads this enable value for its normal frame choice.
+float _PreparedPlanetEnabled;
+#endif
 struct PlanetGeologicalNormalRegion {float4 anchor,right,forward,domain;};
 StructuredBuffer<PlanetGeologicalNormalRegion> _PlanetGeologicalNormalRegions;
 TEXTURE2D_ARRAY(_PlanetGeologicalNormalMaps);
@@ -10,6 +17,10 @@ float4 _PlanetGeologicalNormalControls,_PlanetGeologicalNormalTexels;
 float3 PlanetGeologicalNormal(float3 offset,float3 meshNormal,out float variance)
 {
     variance=0;
+#ifdef SPACERUNNER_PREPARED_GRAPHICS_ACTIVE
+    float3 preparedNormal;
+    if(PreparedPlanetFragmentNormal(offset,meshNormal,preparedNormal,variance))return preparedNormal;
+#endif
     if(_PlanetGeologicalNormalCount==0)return meshNormal;
     float3 direction=_PlanetGeologicalNormalAnchor+offset*_PlanetGeologicalNormalControls.x;
     // Derivatives outside divergent region selection retain a consistent pixel footprint.

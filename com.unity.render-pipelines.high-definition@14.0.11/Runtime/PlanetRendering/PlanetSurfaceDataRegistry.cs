@@ -14,6 +14,7 @@ namespace UnityEngine.Rendering.HighDefinition
         internal sealed class Entry
         {
             internal SurfaceSnapshot Snapshot;
+            internal SurfaceRegionFilterSettings RegionFilterSettings;
             internal Texture2DArray BaseColour;
             internal NativeSurfaceSnapshot Native;
             internal SurfaceErrorHierarchy Errors;
@@ -194,8 +195,21 @@ namespace UnityEngine.Rendering.HighDefinition
             CheckMainThread();var key=PlanetSurfaceDescriptor.FromSnapshot(snapshot);int id=asset.GetInstanceID();
             if(owners.TryGetValue(id,out var old))
             {if(old.Equals(key))return key;Unregister(asset);}
-            if(!entries.TryGetValue(key,out var entry)){entry=new Entry {Snapshot=snapshot,BaseColour=asset.BaseColour};entries.Add(key,entry);}
+            if(!entries.TryGetValue(key,out var entry)){entry=new Entry {Snapshot=snapshot,BaseColour=asset.BaseColour,RegionFilterSettings=asset.RuntimeRegionFilterSettings};entries.Add(key,entry);}
+            else entry.RegionFilterSettings=MergeRegionFilterLimits(entry.RegionFilterSettings,asset.RuntimeRegionFilterSettings);
             entry.Owners++;owners.Add(id,key);return key;
+        }
+        /// <summary>Prepared parent handoff only. The immutable native copy was
+        /// built by its retained worker, so the first physics/render acquisition
+        /// does not allocate or copy an entire planet on the main thread.</summary>
+        internal static PlanetSurfaceDescriptor RegisterPrepared(PlanetSurfaceDataAsset asset,SurfaceSnapshot snapshot,ref NativeSurfaceSnapshot native)
+        {
+            CheckMainThread();var key=PlanetSurfaceDescriptor.FromSnapshot(snapshot);
+            if(native!=null&&(native.IsDisposed||!PlanetSurfaceDescriptor.FromView(native.View).Equals(key)))throw new ArgumentException("Prepared native storage must match the exact completed parent snapshot.");
+            if((!entries.TryGetValue(key,out var known)||known.Native==null)&&native==null)throw new InvalidOperationException("The prepared parent native storage is not ready.");
+            var registered=Register(asset,snapshot);var entry=entries[registered];
+            if(entry.Native==null){entry.Native=native;native=null;}
+            return registered;
         }
         internal static void Unregister(PlanetSurfaceDataAsset asset)
         {
@@ -212,6 +226,10 @@ namespace UnityEngine.Rendering.HighDefinition
             if(entry.Native==null)entry.Native=entry.Snapshot.CreateNative(Allocator.Persistent);
             entry.Leases++;lease=new PlanetSurfaceDataLease(entry);return true;
         }
+        internal static SurfaceRegionFilterSettings RegionalFilterSettingsFor(PlanetSurfaceDescriptor descriptor)
+        {CheckMainThread();return entries.TryGetValue(descriptor,out var entry)?entry.RegionFilterSettings:SurfaceRegionFilterSettings.Default;}
+        internal static SurfaceRegionFilterSettings MergeRegionFilterLimits(SurfaceRegionFilterSettings a,SurfaceRegionFilterSettings b)=>
+            new SurfaceRegionFilterSettings(Math.Max(a.MaximumSupportSamples,b.MaximumSupportSamples),Math.Max(a.MaximumBytes,b.MaximumBytes));
         /// <summary>Nonblocking render admission. Starts only derived child preparation; no canonical native or patch arrays are allocated while pending.</summary>
         public static bool TryPrepareForRendering(PlanetSurfaceDescriptor descriptor,out PlanetSurfaceLandformFilterStatus status)
         {

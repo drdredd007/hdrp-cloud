@@ -28,14 +28,15 @@ namespace UnityEngine.Rendering.HighDefinition
             internal readonly PlanetSurfaceDescriptor Descriptor;
             internal readonly PlanetSurfaceDataLease Source;
             internal readonly long Bytes;
+            internal SurfaceRegionFilterSettings Settings;
             internal NativeSurfaceRegionFilter Native;
             internal GraphicsBuffer Ranges, Mips, Samples;
             internal SurfaceRegionFilterStatus Status = SurfaceRegionFilterStatus.Pending;
             internal int References, Uploaded, LastUploadFrame = -1, Generation;
             internal float2[] Upload;
             internal bool Released,Disposed;
-            internal Entry(PlanetSurfaceDescriptor descriptor, PlanetSurfaceDataLease source, long bytes)
-            { Descriptor = descriptor; Source = source; Bytes = bytes; }
+            internal Entry(PlanetSurfaceDescriptor descriptor, PlanetSurfaceDataLease source, long bytes,SurfaceRegionFilterSettings settings)
+            { Descriptor = descriptor; Source = source; Bytes = bytes; Settings=settings; }
             internal bool Poll()
             {
                 if(Disposed)return false;
@@ -76,13 +77,16 @@ namespace UnityEngine.Rendering.HighDefinition
             try
             {
                 // Content sharing is eligible only after exact authoritative registration is verified.
+                var settings=PlanetSurfaceDataRegistry.RegionalFilterSettingsFor(descriptor);
                 if (entries.TryGetValue(key, out var entry))
-                { entry.References++; lease = new PlanetSurfaceRegionFilterLease(entry); Poll(entry); status = entry.Status; return true; }
-                if (!NativeSurfaceRegionFilter.TryEstimate(source.View, SurfaceRegionFilterSettings.Default, out var nativeBytes, out _, out status)) return false;
+                { entry.Settings=PlanetSurfaceDataRegistry.MergeRegionFilterLimits(entry.Settings,settings);entry.References++; lease = new PlanetSurfaceRegionFilterLease(entry); Poll(entry); status = entry.Status; return true; }
+                if (!NativeSurfaceRegionFilter.TryEstimate(source.View, settings, out var nativeBytes, out _, out status)) return false;
                 // Native support, GPU support, temporary packed headers and the reusable upload chunk.
                 long bytes = checked(nativeBytes * 3 + MaximumUploadSamplesPerFrame * 8L);
-                if (bytes > MaximumResidentBytes - residentBytes) { status = SurfaceRegionFilterStatus.BudgetExceeded; return false; }
-                entry = new Entry(descriptor, source, bytes) { References = 1 }; entries.Add(key, entry); residentBytes += bytes;
+                long budget=Math.Max(MaximumResidentBytes,settings.MaximumBytes);
+                foreach(var active in entries.Values)budget=Math.Max(budget,active.Settings.MaximumBytes);foreach(var active in retired)budget=Math.Max(budget,active.Settings.MaximumBytes);
+                if (bytes > budget - residentBytes) { status = SurfaceRegionFilterStatus.BudgetExceeded; return false; }
+                entry = new Entry(descriptor, source, bytes,settings) { References = 1 }; entries.Add(key, entry); residentBytes += bytes;
                 source = null; lease = new PlanetSurfaceRegionFilterLease(entry); Poll(entry); status = entry.Status; return true;
             }
             finally { source?.Dispose(); }
@@ -95,7 +99,7 @@ namespace UnityEngine.Rendering.HighDefinition
             { building.Status = SurfaceRegionFilterStatus.InvalidData; building = null; }
             if (entry.Native == null && entry.Status == SurfaceRegionFilterStatus.Pending && building == null)
             {
-                if (!NativeSurfaceRegionFilter.TrySchedule(entry.Source.View, SurfaceRegionFilterSettings.Default, Allocator.Persistent, out entry.Native, out var status)) entry.Status = status;
+                if (!NativeSurfaceRegionFilter.TrySchedule(entry.Source.View, entry.Settings, Allocator.Persistent, out entry.Native, out var status)) entry.Status = status;
                 else building = entry;
             }
             return entry.Poll();
@@ -135,7 +139,8 @@ namespace UnityEngine.Rendering.HighDefinition
         { if (entries.TryGetValue(Key(descriptor), out var entry)) { Poll(entry); return entry.Generation; } return 0; }
         internal static long EstimateGpuBytes(in NativeSurfaceView source)
         {
-            if (!NativeSurfaceRegionFilter.TryEstimate(source, SurfaceRegionFilterSettings.Default, out var bytes, out _, out _)) return 0;
+            var settings=PlanetSurfaceDataRegistry.RegionalFilterSettingsFor(PlanetSurfaceDescriptor.FromView(source));
+            if (!NativeSurfaceRegionFilter.TryEstimate(source, settings, out var bytes, out _, out _)) return 0;
             return bytes; // Conservative header allowance; reserved whether cold or ready.
         }
         internal static bool TryBorrow(PlanetSurfaceDescriptor descriptor, out Entry entry)

@@ -57,6 +57,10 @@ namespace UnityEngine.Rendering.HighDefinition
                         Relief=math.max(math.abs(blob.Value.MinimumMetres),math.abs(blob.Value.MaximumMetres)),PeriodicHeight=blob};
                 }
                 if(!SurfaceData)return new PlanetDefinition {Id=PlanetId,Seed=Seed,GeneratorVersion=(int)TerrainStyle,Radius=Radius,Relief=Relief};
+                if(Application.isPlaying&&SurfaceData.PreparedBackgroundEnabled){
+                    if(!SurfaceData.TryGetPreparedDefinitionHeader(out var prepared,out int preparedSeed,out double preparedRadius,out double preparedRelief))return default;
+                    return new PlanetDefinition{Id=PlanetId,Seed=preparedSeed,GeneratorVersion=3,Radius=preparedRadius,Relief=preparedRelief,Surface=prepared};
+                }
                 if(!SurfaceData.TryCreateSnapshot(out var snapshot,out _))return default;
                 var recipe=snapshot.Recipe;
                 return new PlanetDefinition {Id=PlanetId,Seed=recipe.Seed,GeneratorVersion=3,Radius=recipe.Radius,

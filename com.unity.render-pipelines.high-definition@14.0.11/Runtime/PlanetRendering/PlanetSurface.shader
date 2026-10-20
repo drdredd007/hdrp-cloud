@@ -9,13 +9,18 @@ Shader "SpaceRunner/Planet Far Surface"
             // Written for Unity conventions; Unity reverses depth comparison on reversed-Z platforms.
             Cull Back ZWrite On ZTest LEqual
             HLSLPROGRAM
-            #pragma target 4.5
+            #pragma target 5.0
+            // Material-local ready-data backends preserve runtime-created material variants in Player.
+            #pragma multi_compile_local _ _PREPARED_COLOUR
+            #pragma multi_compile_local _ _PREPARED_BACKEND_REFERENCE _PREPARED_BACKEND_WHOLE_FLOAT _PREPARED_BACKEND_NATIVE _PREPARED_BACKEND_MIXED
+            #pragma multi_compile_local _ _PREPARED_TEXTURES_1 _PREPARED_TEXTURES_2 _PREPARED_TEXTURES_4 _PREPARED_TEXTURES_8
             #pragma vertex PlanetVert
             #pragma fragment PlanetFrag
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Sky/PhysicallyBasedSky/PhysicallyBasedSkyCommon.hlsl"
             #include "PlanetMediaBody.hlsl"
             #include "PlanetCelestialLights.hlsl"
+            #define SPACERUNNER_PREPARED_PLANET_NORMALS
             #include "PlanetTerrainMaterialShared.hlsl"
             #include "PlanetTerrainAmbientLighting.hlsl"
             #include "WorldOrogen/WorldOrogenBaseMap.hlsl"
@@ -30,6 +35,7 @@ Shader "SpaceRunner/Planet Far Surface"
             float4x4 _PeriodicWorldToLocal,_PeriodicLocalToWorld;
             #include "PlanetPeriodicSurface.hlsl"
             #include "PlanetGlobalColor.hlsl"
+            #include "PlanetPreparedColour.hlsl"
             float _PeriodicTerrainShadowEnabled;
             float3 _PeriodicShadowSunWorld;
             float3 PeriodicPixelNormal(float3 radialWorld)
@@ -149,7 +155,7 @@ Shader "SpaceRunner/Planet Far Surface"
                 {
                     albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));metallic=0;smoothness=.4;
                     float variance;float3 geological=PlanetGeologicalNormal(input.detail,normalize(mul((float3x3)_OrogenRenderToLocal,input.normal)),variance);
-                    normal=_PlanetGeologicalNormalCount>0?normalize(mul((float3x3)_PlanetLocalToRender,geological)):normalize(input.normal);
+                    normal=(_PlanetGeologicalNormalCount>0||_PreparedPlanetEnabled>0)?normalize(mul((float3x3)_PlanetLocalToRender,geological)):normalize(input.normal);
                     smoothness=PlanetGeologicalSmoothness(smoothness,variance);
                 }
                 float regionalDetailLuminance=dot(albedo,float3(.2126,.7152,.0722));
@@ -158,6 +164,8 @@ Shader "SpaceRunner/Planet Far Surface"
                 if(_PlanetRegionalColorCount>0&&_PlanetRegionalColorControls.y>0&&_PlanetGlobalColorBlend>0)
                     regionalTone=PlanetGlobalColorRelativeTint(mul((float3x3)_PlanetGlobalColorWorldToLocal,radialUp));
                 albedo=PlanetRegionalColorApply(albedo,input.detail,regionalTone,regionalDetailLuminance);
+                albedo=PlanetPreparedColour(input.detail,albedo);
+                if(PlanetPreparedColourIsUnlit()){PlanetFragment unlit;unlit.color=float4(albedo,length(input.relative)*_LayerToMeters);unlit.solar=0;return unlit;}
                 float3 brdf=albedo*INV_PI;
                 if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)brdf*=1-metallic;
                 float3 viewDirection=normalize(-input.relative);

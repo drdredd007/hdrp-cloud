@@ -24,8 +24,8 @@ namespace UnityEngine.Rendering.HighDefinition
         public static PlanetLocalPatchRequest ScheduleCollisionInFrame(PlanetDefinition definition,PlanetSurfaceFrame frame,int2 key,double size,int resolution)
         {
             if(!definition.IsValid||!frame.IsValid||math.lengthsq(frame.Position)<1||!math.isfinite(size)||size<=0||
-                resolution<2||resolution>128||(resolution&(resolution-1))!=0||math.any(math.abs((double2)key*size)+size>8192))
-                throw new ArgumentException("Use a valid fixed surface frame, power-of-two resolution 2–128, and a local patch within 8192 metres.");
+                resolution<2||resolution>512||(resolution&(resolution-1))!=0||math.any(math.abs((double2)key*size)+size>8192))
+                throw new ArgumentException("Use a valid fixed surface frame, power-of-two collision resolution 2–512, and a local patch within 8192 metres.");
             var result=new PlanetLocalPatch();PlanetSurfaceDataLease lease=null;
             try
             {
