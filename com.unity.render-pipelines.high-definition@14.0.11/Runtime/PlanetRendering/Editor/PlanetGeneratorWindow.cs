@@ -33,7 +33,7 @@ namespace UnityEngine.Rendering.HighDefinition
         [NonSerialized] WorldOrogenGenerationController generation;
         [NonSerialized] OrogenDetailGenerationController detailGeneration;
 
-        [MenuItem("Window/Rendering/HDRP Planet Generator")]
+        [MenuItem("Tools/Planet Terrain/Legacy/Planet Generator")]
         public static void Open()=>GetWindow<PlanetGeneratorWindow>("Planet Generator");
         public static void Open(PlanetGeneratorAsset asset){var window=GetWindow<PlanetGeneratorWindow>("Planet Generator");window.settings=asset;window.Invalidate();}
         public static void OpenForSite(PlanetSiteAsset site)

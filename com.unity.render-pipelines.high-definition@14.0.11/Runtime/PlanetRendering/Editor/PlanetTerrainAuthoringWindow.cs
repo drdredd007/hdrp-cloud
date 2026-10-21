@@ -50,7 +50,7 @@ namespace UnityEngine.Rendering.HighDefinition
         string failure,information,recipeSignature,newAssetPath;
         SurfaceContentHash previousContent;
 
-        [MenuItem("Window/Rendering/Planet Terrain Authoring")]
+        [MenuItem("Tools/Planet Terrain/Legacy/Terrain Authoring")]
         public static void Open()=>GetWindow<PlanetTerrainAuthoringWindow>("Planet Terrain");
         public static void Open(PlanetGeneratorAsset target,string instanceId=null)
         {
