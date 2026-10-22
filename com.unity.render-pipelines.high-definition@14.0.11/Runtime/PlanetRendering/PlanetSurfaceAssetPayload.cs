@@ -140,15 +140,23 @@ namespace UnityEngine.Rendering.HighDefinition
             public override void SetLength(long value) { Require(value); base.SetLength(value); }
         }
 
-        // A normal GZipStream may read past its member into a buffer and hide unused trailing bytes.
-        // One-byte input preserves the exact consumed-member boundary across Unity's Mono backend.
-        // This is offline storage decoding, not frame-by-frame surface sampling.
+        // GZipStream can read ahead past the member and hide trailing bytes. Keep its
+        // final eight-byte footer outside bulk reads, then feed that tail one byte
+        // at a time. A member ending early leaves Position < count even when the
+        // bulk buffer swallowed its footer; a valid member must consume the tail.
+        // Feeding the whole multi-megabyte payload byte by byte delayed cold loads.
         sealed class SingleMemberInput : Stream
         {
             readonly byte[] bytes; readonly int start, count; int position;
             public SingleMemberInput(byte[] bytes, int start, int count) { this.bytes = bytes; this.start = start; this.count = count; }
             public override int Read(byte[] buffer, int offset, int requested)
-            { if (requested == 0 || position == count) return 0; buffer[offset] = bytes[start + position++]; return 1; }
+            {
+                if (requested == 0 || position == count) return 0;
+                int bulk = count - 8 - position;
+                int length = bulk > 0 ? Math.Min(requested, bulk) : 1;
+                Buffer.BlockCopy(bytes, start + position, buffer, offset, length);
+                position += length; return length;
+            }
             public override int ReadByte() => position == count ? -1 : bytes[start + position++];
             public override bool CanRead => true;
             public override bool CanSeek => false;
