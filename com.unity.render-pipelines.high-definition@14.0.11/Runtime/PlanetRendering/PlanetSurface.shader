@@ -151,7 +151,7 @@ Shader "SpaceRunner/Planet Far Surface"
                     metallic=material.metallic;smoothness=material.smoothness;
                     normal=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
                 }
-                if(_OrogenBaseColourEnabled>0)
+                if(_OrogenBaseColourEnabled>0 && _PlanetMaterialMaskEnabled<.5)
                 {
                     albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));metallic=0;smoothness=.4;
                     float variance;float3 geological=PlanetGeologicalNormal(input.detail,normalize(mul((float3x3)_OrogenRenderToLocal,input.normal)),variance);
@@ -159,12 +159,12 @@ Shader "SpaceRunner/Planet Far Surface"
                     smoothness=PlanetGeologicalSmoothness(smoothness,variance);
                 }
                 float regionalDetailLuminance=dot(albedo,float3(.2126,.7152,.0722));
-                albedo=PlanetApplyGlobalColorWorld(albedo,radialUp);
+                if(_PlanetMaterialMaskEnabled<.5)albedo=PlanetApplyGlobalColorWorld(albedo,radialUp);
                 float3 regionalTone=1;
                 if(_PlanetRegionalColorCount>0&&_PlanetRegionalColorControls.y>0&&_PlanetGlobalColorBlend>0)
                     regionalTone=PlanetGlobalColorRelativeTint(mul((float3x3)_PlanetGlobalColorWorldToLocal,radialUp));
-                albedo=PlanetRegionalColorApply(albedo,input.detail,regionalTone,regionalDetailLuminance);
-                albedo=PlanetPreparedColour(input.detail,albedo);
+                if(_PlanetMaterialMaskEnabled<.5)albedo=PlanetRegionalColorApply(albedo,input.detail,regionalTone,regionalDetailLuminance);
+                if(_PlanetMaterialMaskEnabled<.5)albedo=PlanetPreparedColour(input.detail,albedo);
                 if(PlanetPreparedColourIsUnlit()){PlanetFragment unlit;unlit.color=float4(albedo,length(input.relative)*_LayerToMeters);unlit.solar=0;return unlit;}
                 float3 brdf=albedo*INV_PI;
                 if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)brdf*=1-metallic;

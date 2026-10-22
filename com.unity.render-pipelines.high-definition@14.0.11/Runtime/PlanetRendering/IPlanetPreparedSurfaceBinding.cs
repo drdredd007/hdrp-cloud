@@ -53,6 +53,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public static void Bind(MaterialPropertyBlock properties,IPlanetPreparedSurfaceBinding source,
             double3 planetAnchor,Quaternion planetRotation)
         {
+            properties.SetFloat("_PlanetMaterialMaskEnabled",0);properties.SetInt("_PlanetMaterialSourceMask",0);
             properties.SetFloat("_PreparedPlanetEnabled",0);properties.SetFloat("_PreparedColourEnabled",0);properties.SetFloat("_PreparedColourUnlit",0);
             source?.Bind(properties,planetAnchor,planetRotation);
         }

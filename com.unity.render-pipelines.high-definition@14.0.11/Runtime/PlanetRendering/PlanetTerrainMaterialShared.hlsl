@@ -3,6 +3,7 @@
 #include "PlanetSurfacePaint.hlsl"
 #include "PlanetGeologicalNormal.hlsl"
 #include "PlanetRegionalColor.hlsl"
+#include "PlanetMaterialMasks.hlsl"
 TEXTURE2D(_PlanetLayerAlbedo0);TEXTURE2D(_PlanetLayerAlbedo1);TEXTURE2D(_PlanetLayerAlbedo2);TEXTURE2D(_PlanetLayerAlbedo3);
 TEXTURE2D(_PlanetLayerNormal0);TEXTURE2D(_PlanetLayerNormal1);TEXTURE2D(_PlanetLayerNormal2);TEXTURE2D(_PlanetLayerNormal3);
 TEXTURE2D(_PlanetLayerMask0);TEXTURE2D(_PlanetLayerMask1);TEXTURE2D(_PlanetLayerMask2);TEXTURE2D(_PlanetLayerMask3);
@@ -102,7 +103,7 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluateFromGeological(float3 offset,fl
     float3 warp=variation*_PlanetVariationControls.x;
     float3 axisWeight=pow(abs(normalPlanet),_PlanetMaterialControls.y);
     axisWeight/=max(dot(axisWeight,1),1e-6);
-    masks=max(masks,0);float sum=dot(masks,1);masks=sum>1e-6?masks/sum:float4(0,0,1,0);
+    masks=PlanetMaterialMaskApply(offset,masks);masks=max(masks,0);float sum=dot(masks,1);masks=sum>1e-6?masks/sum:float4(0,0,1,0);
     PlanetTerrainLayerSample a=PlanetTerrainReadLayer(_PlanetLayerAlbedo0,_PlanetLayerNormal0,_PlanetLayerMask0,_PlanetLayerTint0,_PlanetTexturePhase0,_PlanetLayerControl0,_PlanetLayerPbr0,_PlanetNormalVarianceControls.x,offset,axisWeight,normalStrength,warp);
     PlanetTerrainLayerSample b=PlanetTerrainReadLayer(_PlanetLayerAlbedo1,_PlanetLayerNormal1,_PlanetLayerMask1,_PlanetLayerTint1,_PlanetTexturePhase1,_PlanetLayerControl1,_PlanetLayerPbr1,_PlanetNormalVarianceControls.y,offset,axisWeight,normalStrength,warp);
     PlanetTerrainLayerSample c=PlanetTerrainReadLayer(_PlanetLayerAlbedo2,_PlanetLayerNormal2,_PlanetLayerMask2,_PlanetLayerTint2,_PlanetTexturePhase2,_PlanetLayerControl2,_PlanetLayerPbr2,_PlanetNormalVarianceControls.z,offset,axisWeight,normalStrength,warp);
@@ -112,7 +113,7 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluateFromGeological(float3 offset,fl
     float4 weights=masks*saturate((heights-highest+_PlanetMaterialControls.x)/max(_PlanetMaterialControls.x,1e-6));
     weights/=max(dot(weights,1),1e-6);
     result.albedo=(a.albedo*weights.x+b.albedo*weights.y+c.albedo*weights.z+d.albedo*weights.w)*(1+variation.z*_PlanetVariationControls.y);
-    if(_PlanetPaintEnabled>0)result.albedo*=PlanetPaintModulation(weights,paintNoise,paintGrain);
+    if(_PlanetPaintEnabled>0 && _PlanetMaterialMaskEnabled<.5)result.albedo*=PlanetPaintModulation(weights,paintNoise,paintGrain);
     result.metallic=dot(weights,float4(a.metallic,b.metallic,c.metallic,d.metallic));
     result.ao=dot(weights,float4(a.ao,b.ao,c.ao,d.ao));
     result.smoothness=dot(weights,float4(a.smoothness,b.smoothness,c.smoothness,d.smoothness));

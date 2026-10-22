@@ -13,7 +13,7 @@ void GetSurfaceAndBuiltinData(FragInputs input,float3 V,inout PositionInputs pos
     float3 normalPlanet=normalize(mul((float3x3)_PlanetRenderToLocal,geomNormal));
     float3 offset=float3(input.texCoord0.xy,input.texCoord1.x);
     float geologicalVariance;float3 geological=PlanetGeologicalNormal(offset,normalPlanet,geologicalVariance);
-    bool orogenColour=_OrogenBaseColourEnabled>0;
+    bool orogenColour=_OrogenBaseColourEnabled>0 && _PlanetMaterialMaskEnabled<.5;
     // Orogen replaces layered PBR and normals. Its optional regional luminance
     // still needs the original layered albedo; every other layered read can be
     // skipped, including normal textures in that luminance-only case.
@@ -25,13 +25,13 @@ void GetSurfaceAndBuiltinData(FragInputs input,float3 V,inout PositionInputs pos
     surfaceData.baseColor=material.albedo;surfaceData.metallic=material.metallic;
     if(orogenColour)
     {surfaceData.baseColor=OrogenBaseColour(normalize(_OrogenBaseAnchor+offset*_OrogenInverseRadius));surfaceData.metallic=0;}
-    if(_PlanetGlobalColorBlend>0)surfaceData.baseColor=PlanetApplyGlobalColorLocal(surfaceData.baseColor,
+    if(_PlanetMaterialMaskEnabled<.5 && _PlanetGlobalColorBlend>0)surfaceData.baseColor=PlanetApplyGlobalColorLocal(surfaceData.baseColor,
         _PlanetGlobalColorAnchor+offset*_PlanetGlobalColorInverseRadius);
     float3 regionalTone=1;
     if(_PlanetRegionalColorCount>0&&_PlanetRegionalColorControls.y>0&&_PlanetGlobalColorBlend>0)
         regionalTone=PlanetGlobalColorRelativeTint(_PlanetGlobalColorAnchor+offset*_PlanetGlobalColorInverseRadius);
-    surfaceData.baseColor=PlanetRegionalColorApply(surfaceData.baseColor,offset,regionalTone,dot(material.albedo,float3(.2126,.7152,.0722)));
-    surfaceData.baseColor=PlanetPreparedColour(offset,surfaceData.baseColor);
+    if(_PlanetMaterialMaskEnabled<.5)surfaceData.baseColor=PlanetRegionalColorApply(surfaceData.baseColor,offset,regionalTone,dot(material.albedo,float3(.2126,.7152,.0722)));
+    if(_PlanetMaterialMaskEnabled<.5)surfaceData.baseColor=PlanetPreparedColour(offset,surfaceData.baseColor);
     if(orogenColour)
     {
         surfaceData.normalWS=normalize(mul((float3x3)_PlanetLocalToRender,geological));
