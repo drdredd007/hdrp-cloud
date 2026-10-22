@@ -3,6 +3,7 @@
 #if defined(SPACERUNNER_PREPARED_PLANET_NORMALS) && (defined(_PREPARED_BACKEND_REFERENCE) || defined(_PREPARED_BACKEND_WHOLE_FLOAT) || defined(_PREPARED_BACKEND_NATIVE) || defined(_PREPARED_BACKEND_MIXED))
 #define SPACERUNNER_PREPARED_GRAPHICS_ACTIVE
 #include "PlanetPreparedSampling.hlsl"
+#include "PlanetPreparedShading.hlsl"
 #else
 // The far surface also reads this enable value for its normal frame choice.
 float _PreparedPlanetEnabled;
@@ -19,7 +20,17 @@ float3 PlanetGeologicalNormal(float3 offset,float3 meshNormal,out float variance
     variance=0;
 #ifdef SPACERUNNER_PREPARED_GRAPHICS_ACTIVE
     float3 preparedNormal;
+    #if defined(PP_NATIVE_SHADING)
+    if(_PreparedPlanetEnabled>.5) {
+        double3 anchor=(double3)_PreparedPlanetAnchorHigh.xyz+(double3)_PreparedPlanetAnchorLow.xyz;
+        float3 local=mul((float3x3)_PreparedPlanetLocalToPlanet,offset);
+        float footprint=max(length(ddx(local)),length(ddy(local)));
+        PreparedPlanetShadingResult value=PreparedPlanetShadingSample(anchor+(double3)local,(double)footprint);
+        return normalize(mul((float3x3)_PreparedPlanetPlanetToLocal,value.normal));
+    }
+    #else
     if(PreparedPlanetFragmentNormal(offset,meshNormal,preparedNormal,variance))return preparedNormal;
+    #endif
 #endif
     if(_PlanetGeologicalNormalCount==0)return meshNormal;
     float3 direction=_PlanetGeologicalNormalAnchor+offset*_PlanetGeologicalNormalControls.x;

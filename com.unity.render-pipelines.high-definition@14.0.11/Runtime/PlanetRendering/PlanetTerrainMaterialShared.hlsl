@@ -91,7 +91,13 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluateFromGeological(float3 offset,fl
 {
     PlanetTerrainMaterialSample result=(PlanetTerrainMaterialSample)0;
     float paintNoise=0,paintGrain=0;
-    if(_PlanetPaintEnabled>0) {
+    // Ready RGBA masks completely replace procedural paint weights and tint.
+    // Do not evaluate the discarded paint noises for every visible pixel.
+    bool replacesPaint=false;
+#if defined(SPACERUNNER_PREPARED_GRAPHICS_ACTIVE) && !defined(PP_REFERENCE_SHADING)
+    replacesPaint=_PlanetMaterialMaskEnabled>=.5 && _PreparedPlanetEnabled>=.5;
+#endif
+    if(_PlanetPaintEnabled>0 && !replacesPaint) {
         uint seed=(uint)_PlanetPaintSeed.x|((uint)_PlanetPaintSeed.y<<16);
         paintNoise=PlanetPaintNoise(offset,_PlanetPaintPhase,_PlanetPaintCell,seed,true);
         paintGrain=PlanetPaintNoise(offset,_PlanetPaintGrainPhase,_PlanetPaintGrainCell,seed^137u,true);

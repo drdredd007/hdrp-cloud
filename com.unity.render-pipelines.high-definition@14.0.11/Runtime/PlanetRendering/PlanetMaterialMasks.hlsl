@@ -36,8 +36,15 @@ float4 PlanetMaterialMaskApply(float3 offset,float4 original) {
  double2 pos=double2(PPDot(d,p.rightScale.xyz),PPDot(d,p.forwardAmplitude.xyz))*(radius/denominator);
  if(dot(pos,pos)>=p.centreRadius.w*p.centreRadius.w)continue;
  double2 source=p.cropReference.xy+pos*p.rightScale.w,relative=source-p.cropReference.xy,ignored;
- double w=PPPlacementSupport(p.metadata.x,relative,p.cropReference.z,p.featherHeading.x,ignored)*PPSourceBlend(p.metadata.x,source,ignored);if(w<=0)continue;
  PreparedPlanetSourceGpu s=_PreparedPlanetSources[p.metadata.x];
+ #if defined(PP_NATIVE_SHADING)
+ float2 unusedSlope;float w=PSPlacementSupport(p.metadata.x,(float2)relative,(float)p.cropReference.z,(float)p.featherHeading.x,unusedSlope);
+ if(w<=0)continue;
+ w*=s.levels.w==0?1:PSTextureBilinear(s.levels.z,0,3,s.data.x,source,unusedSlope);
+ #else
+ double w=PPPlacementSupport(p.metadata.x,relative,p.cropReference.z,p.featherHeading.x,ignored)*PPSourceBlend(p.metadata.x,source,ignored);
+ #endif
+ if(w<=0)continue;
  float lod=clamp(log2(max(1,(float)(footprint*p.rightScale.w/(denominator*denominator)*_PlanetMaterialMaskSide/s.data.x))),0,floor(log2((float)_PlanetMaterialMaskSide)));
  int l=(int)lod;float4 m=lerp(PMMSampleLevel(source,s.data.x,l),PMMSampleLevel(source,s.data.x,min(l+1,(int)floor(log2((float)_PlanetMaterialMaskSide)))),frac(lod));m=max(m,0);m/=max(dot(m,1),1e-8);
  // RGBA roles: local ground, loose ground, scree, exposed rock.
