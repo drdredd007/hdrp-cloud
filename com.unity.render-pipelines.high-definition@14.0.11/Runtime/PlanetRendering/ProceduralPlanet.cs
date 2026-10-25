@@ -96,12 +96,19 @@ namespace UnityEngine.Rendering.HighDefinition
             return math.clamp((continents+detail-.08f)*definition.Relief,-definition.Relief,definition.Relief);
         }
         public static double3 Surface(PlanetDefinition definition,double3 direction)
-            => direction*(definition.Radius+math.max(0,Height(definition,direction)));
+            => direction*(definition.Radius+RenderedHeight(definition,direction));
+        // Periodic geography is a signed dry-world surface; legacy generators
+        // retain their sea-level clamp. CPU patches must match GPU displacement.
+        public static double RenderedHeight(PlanetDefinition definition,double3 direction)
+        {
+            double height=Height(definition,direction);
+            return definition.GeneratorVersion==4?height:math.max(0,height);
+        }
         public static float3 Normal(PlanetDefinition definition,double3 direction,double renderFootprintMetres=0)
         {
             double3 tangent=math.normalize(math.cross(math.abs(direction.y)<.9?new double3(0,1,0):new double3(1,0,0),direction));
             double3 bitangent=math.cross(direction,tangent);
-            double step=definition.GeneratorVersion==4?math.max(renderFootprintMetres,definition.PeriodicHeight.Value.TileMetres/definition.PeriodicHeight.Value.Width)/definition.Radius:.0001;
+            double step=definition.GeneratorVersion==4?math.max(renderFootprintMetres,definition.PeriodicHeight.Value.TileMetres/definition.PeriodicHeight.Value.Width/(definition.PeriodicHeight.Value.DetailHeightFraction>0?definition.PeriodicHeight.Value.DetailFrequency:1))/definition.Radius:.0001;
             var a=Surface(definition,math.normalize(direction+tangent*step))-Surface(definition,math.normalize(direction-tangent*step));
             var b=Surface(definition,math.normalize(direction+bitangent*step))-Surface(definition,math.normalize(direction-bitangent*step));
             return (float3)math.normalize(math.cross(a,b));

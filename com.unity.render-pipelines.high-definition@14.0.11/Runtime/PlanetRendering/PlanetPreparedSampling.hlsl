@@ -478,6 +478,8 @@ void PPFoundation(double3 d,out double height,out double2 gradient)
     height=(a*(1-tx)+b*tx)*(1-ty)+(c*(1-tx)+e*tx)*ty;
     gradient=double2(horizontal>1e-15L?((b-a)*(1-ty)+(e-c)*ty)*nx/(2*PPPi*radius*horizontal):0,((c-a)*(1-tx)+(e-b)*tx)*ny/(PPPi*radius));
 }
+
+#include "PreparedCoverageSampling.hlsl"
 int PPCell(double3 d)
 {
     int face;double2 uv;double3 a=double3(PPAbs(d.x),PPAbs(d.y),PPAbs(d.z));
@@ -510,6 +512,7 @@ PreparedPlanetSurface PreparedPlanetSample(double3 direction,double worldFootpri
 {
     PreparedPlanetSurface result=(PreparedPlanetSurface)0;double3 d=PPNormalize(direction),east,north;PPFrame(d,east,north);
     double baseHeight;double2 baseGradient;PPFoundation(d,baseHeight,baseGradient);double sum=0,product=1,weighted=0;double2 ds=0,dp=0,dweighted=0,dnormal=0;uint ready=1;
+    if(PCCoverage())return PCSurface(d,baseHeight,baseGradient,worldFootprint);
     double radius=_PreparedPlanetParameters[0].x;int cell=PPCell(d),begin=_PreparedPlanetOffsets[cell],end=_PreparedPlanetOffsets[cell+1];
     // CSR is the complete conservative saved index. There is no contributor cap.
     [loop]for(int i=begin;i<end;i++){

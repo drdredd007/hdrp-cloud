@@ -2,6 +2,7 @@
 #define SPACERUNNER_MATERIAL_MASKS_INCLUDED
 // Shared baked material roles. Background and placements use the same planet-space materials.
 float _PlanetMaterialMaskEnabled;
+float4 _PlanetMaterialChannelOrder;
 Texture2D<float4> _PlanetMaterialWeights;
 Texture2D<float2> _PlanetMaterialClimate;
 SamplerState sampler_PlanetMaterialClimate;
@@ -23,12 +24,21 @@ float4 PMMSampleLevel(double2 source,double width,int level) {
  return lerp(lerp(_PlanetMaterialWeights.Load(int3(a,level)),_PlanetMaterialWeights.Load(int3(a+int2(1,0),level)),f.x),lerp(_PlanetMaterialWeights.Load(int3(a+int2(0,1),level)),_PlanetMaterialWeights.Load(int3(a+1,level)),f.x),f.y);
 }
 #endif
+bool PlanetCoverageKeepsMaterialColour(){
+#if defined(SPACERUNNER_PREPARED_GRAPHICS_ACTIVE)
+ return _PlanetMaterialMaskEnabled>=.5&&_PreparedPlanetEnabled>.5;
+#else
+ return false;
+#endif
+}
+// Resource masks select layers; colour always remains a planet authoring input.
+bool PlanetMaskKeepsGlobalPaint(){return true;}
 float4 PlanetMaterialMaskApply(float3 offset,float4 original) {
 #if defined(SPACERUNNER_PREPARED_GRAPHICS_ACTIVE)
  if(_PlanetMaterialMaskEnabled<.5||_PreparedPlanetEnabled<.5)return original;
  double3 anchor=(double3)_PreparedPlanetAnchorHigh.xyz+(double3)_PreparedPlanetAnchorLow.xyz;
  float3 local=mul((float3x3)_PreparedPlanetLocalToPlanet,offset);
- double3 d=PPNormalize(anchor+(double3)local);float4 bg=PMMBackground((float3)d);
+ double3 d=PPNormalize(anchor+(double3)local);if(PCCoverage())return PCMaterial(d,max(length(ddx(local)),length(ddy(local))),_PlanetPaintEnabled>0?original:_PreparedCoverageParameters[3]);float4 bg=PMMBackground((float3)d);
  double radius=_PreparedPlanetParameters[0].x;double footprint=max(length(ddx(local)),length(ddy(local)));
  int cell=PPCell(d),begin=_PreparedPlanetOffsets[cell],end=_PreparedPlanetOffsets[cell+1];double sum=0,product=1;float4 mixed=0;
  [loop]for(int i=begin;i<end;i++){
@@ -47,9 +57,8 @@ float4 PlanetMaterialMaskApply(float3 offset,float4 original) {
  if(w<=0)continue;
  float lod=clamp(log2(max(1,(float)(footprint*p.rightScale.w/(denominator*denominator)*_PlanetMaterialMaskSide/s.data.x))),0,floor(log2((float)_PlanetMaterialMaskSide)));
  int l=(int)lod;float4 m=lerp(PMMSampleLevel(source,s.data.x,l),PMMSampleLevel(source,s.data.x,min(l+1,(int)floor(log2((float)_PlanetMaterialMaskSide)))),frac(lod));m=max(m,0);m/=max(dot(m,1),1e-8);
- // RGBA roles: local ground, loose ground, scree, exposed rock.
- float4 debris=lerp(bg,float4(0,.45,.55,0),.65);
- float4 resource=m.x*bg+m.y*lerp(bg,float4(0,1,0,0),.35)+m.z*debris+m.w*float4(0,0,1,0);
+ // Direct RGBA material slots, independent of biome tint.
+ float4 resource=float4(m[(int)_PlanetMaterialChannelOrder.x],m[(int)_PlanetMaterialChannelOrder.y],m[(int)_PlanetMaterialChannelOrder.z],m[(int)_PlanetMaterialChannelOrder.w]);
  mixed+=(float)w*resource;product*=1-w;sum+=w;
  }
  return (bg*(float)product+mixed)/(float)(product+sum);

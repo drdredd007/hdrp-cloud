@@ -174,7 +174,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 ref var source=ref definition.PeriodicHeight.Value;
                 double range=source.MaximumMetres-source.MinimumMetres;
                 // Conservative Lipschitz estimate for periodic bilinear sampling and the smooth projection weights.
-                double slope=source.MaximumSlope+96*range/definition.Radius;
+                double slope=source.MaximumSlope+(source.MaximumMacroAngularSlope+96*range)/definition.Radius;
                 metres=definition.Radius*(1-math.cos(step))+math.min(range,slope*definition.Radius*step);
             }
             return metres*pixelsPerRadian/closest;

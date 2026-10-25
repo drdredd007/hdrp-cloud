@@ -8,6 +8,7 @@ namespace UnityEngine.Rendering.HighDefinition
     public sealed class PlanetGeneratorAsset : ScriptableObject
     {
         [HideInInspector] public int PlanetId=1;
+        [HideInInspector] public string AuthoringSettingsGuid;
         [Header("Surface")]
         public int Seed=7243;
         public WorldOrogenSettings Orogen=new WorldOrogenSettings();

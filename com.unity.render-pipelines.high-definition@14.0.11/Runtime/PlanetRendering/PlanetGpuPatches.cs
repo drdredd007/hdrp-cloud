@@ -209,14 +209,18 @@ namespace UnityEngine.Rendering.HighDefinition
                 ref var source=ref definition.PeriodicHeight.Value;
                 if(periodicHeights==null||!math.all(periodicIdentity==source.Identity))
                 {
-                    var values=new float[source.Samples.Length];for(int i=0;i<values.Length;i++)values[i]=source.Samples[i];
+                    var values=new float[source.Samples.Length+source.Plains.Length+source.Macro.Length*2];
+                    for(int i=0;i<source.Samples.Length;i++)values[i]=source.Samples[i];
+                    for(int i=0;i<source.Plains.Length;i++)values[source.Samples.Length+i]=source.Plains[i];
+                    for(int i=0;i<source.Macro.Length;i++){int at=source.Samples.Length+source.Plains.Length+i*2;values[at]=source.Macro[i].x;values[at+1]=source.Macro[i].y;}
                     periodicHeights?.Dispose();periodicHeights=new GraphicsBuffer(GraphicsBuffer.Target.Structured,values.Length,sizeof(float));
                     periodicHeights.name="Periodic planet source heights";periodicHeights.SetData(values);periodicIdentity=source.Identity;
                 }
                 cmd.SetComputeBufferParam(generator,kernel,"_PeriodicHeights",periodicHeights);
+                cmd.SetComputeIntParam(generator,"_PeriodicMacroSide",source.MacroSide);cmd.SetComputeIntParam(generator,"_PeriodicPlainsSide",source.PlainsSide);
                 cmd.SetComputeIntParam(generator,"_PeriodicWidth",source.Width);cmd.SetComputeIntParam(generator,"_PeriodicHeight",source.Height);
-                cmd.SetComputeVectorParam(generator,"_PeriodicParameters",new Vector4(source.TileMetres,source.HeightScaleMetres,0,0));
-                cmd.SetComputeFloatParam(generator,"_PeriodicNormalStepMetres",source.TileMetres/source.Width);
+                cmd.SetComputeVectorParam(generator,"_PeriodicParameters",new Vector4(source.TileMetres,source.HeightScaleMetres,source.DetailFrequency,source.DetailHeightFraction));
+                cmd.SetComputeFloatParam(generator,"_PeriodicNormalStepMetres",source.TileMetres/source.Width/(source.DetailHeightFraction>0?source.DetailFrequency:1));
                 SetPeriodicPair(cmd,generator,"_PeriodicRadius",definition.Radius,0);
             }
             else if(definition.GeneratorVersion==3)

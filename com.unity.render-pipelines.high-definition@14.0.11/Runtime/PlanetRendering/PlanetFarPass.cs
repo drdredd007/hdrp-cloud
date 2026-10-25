@@ -73,6 +73,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public bool IsRefining=>geometry?.IsRefining??false;
         public bool EnableLocalSurface;
         public Texture2D PeriodicNormalSlopes;
+        public PlanetPeriodicHeightAsset PeriodicHeightSource;
         public PlanetPeriodicSurfaceSettings PeriodicSurfaceSettings;
         public PlanetGlobalColorSettings GlobalColorSettings;
         public PlanetGlobalColorSettings EffectiveGlobalColor => GlobalColorSettings ? GlobalColorSettings :
@@ -110,6 +111,14 @@ namespace UnityEngine.Rendering.HighDefinition
         GraphicsBuffer neutralAttributes;
         // An assigned but invalid native palette is an explicit native error, not a silent legacy-near substitution.
         bool UsesNativeSurface=>EnableLocalSurface&&NativeMaterialSettings;
+        PlanetPeriodicMaterialSettings PeriodicMaterials=>Definition.GeneratorVersion==4&&PeriodicHeightSource&&PeriodicHeightSource.MaterialSettings&&PeriodicHeightSource.MaterialSettings.IsValid&&PeriodicHeightSource.MaterialSettings.GeometryDigest==PeriodicHeightSource.ContentDigest?PeriodicHeightSource.MaterialSettings:null;
+        PlanetTerrainMaterialSettings RenderMaterialSettings=>PeriodicMaterials?PeriodicMaterials.Palette:NativeMaterialSettings;
+        void BindRenderMaterials(double3 anchor)
+        {
+            PlanetTerrainMaterialBinding.Bind(properties,RenderMaterialSettings,anchor,PlanetRotation,Definition.Surface);
+            properties.SetVector("_DetailOrigin",Vector4.zero);
+            if(PeriodicMaterials){properties.SetFloat("_PlanetPaintEnabled",0);properties.SetInteger("_PlanetGeologicalNormalCount",0);properties.SetInteger("_PlanetRegionalColorCount",0);}
+        }
         public string NativeSurfaceStatus=>nativeGeometry?.Status??"Native terrain is released";
         public PlanetNativeSurfaceRenderer NativeRenderer=>nativeGeometry;
         public PlanetScatterRenderer ScatterRenderer=>scatter;
@@ -271,13 +280,17 @@ namespace UnityEngine.Rendering.HighDefinition
             surface.SetMatrix("_FarViewProjection",projection*view);surface.SetMatrix("_PlanetRotation",Matrix4x4.Rotate(PlanetRotation));
             PlanetPreparedSurfaceBinding.ConfigureMaterial(surface,PreparedSurfaceBinding);
             surface.SetVector("_PlanetLightDirection",LightDirection);surface.SetColor("_PlanetLightColor",LightColor.linear);surface.SetFloat("_PlanetLightLux",LightLux);
+            if(Definition.GeneratorVersion==4&&PeriodicHeightSource)PeriodicHeightSource.BindGeography(properties);else properties.SetFloat("_PeriodicMacroSide",0);
             properties.SetFloat("_PeriodicNormalsEnabled",Definition.GeneratorVersion==4&&PeriodicNormalSlopes?1:0);
             PlanetPeriodicSurfaceSettings.Bind(properties,PeriodicSurfaceSettings,Definition.GeneratorVersion==4,(float)Altitude);
+            PlanetPeriodicMaterialSettings.Bind(properties,PeriodicMaterials);
             PlanetGlobalColorSettings.Bind(properties,EffectiveGlobalColor,(float)Altitude,PlanetRotation);
             if(Definition.GeneratorVersion==4)
             {
                 if(PeriodicNormalSlopes)properties.SetTexture("_PeriodicNormalSlopes",PeriodicNormalSlopes);
                 properties.SetFloat("_PeriodicNormalCycles",(float)(Definition.Radius/Definition.PeriodicHeight.Value.TileMetres));
+                properties.SetVector("_PeriodicCoverageDetail",new Vector4(Definition.PeriodicHeight.Value.DetailFrequency,
+                    Definition.PeriodicHeight.Value.DetailHeightFraction,(float)Definition.Radius,0));
                 properties.SetMatrix("_PeriodicWorldToLocal",Matrix4x4.Rotate(Quaternion.Inverse(PlanetRotation)));
                 properties.SetMatrix("_PeriodicLocalToWorld",Matrix4x4.Rotate(PlanetRotation));
             }
@@ -313,7 +326,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(neutralAttributes==null){neutralAttributes=new GraphicsBuffer(GraphicsBuffer.Target.Structured,1,PlanetSurfaceVertexAttributes.Stride);neutralAttributes.SetData(new PlanetSurfaceVertexAttributes[1]);}
             properties.SetBuffer("_PlanetAttributes",farPatches.Attributes??neutralAttributes);
             properties.SetBuffer("_PlanetParentAttributes",farPatches.ParentAttributes??farPatches.Attributes??neutralAttributes);
-            properties.SetFloat("_PlanetTerrainPalette",NativeMaterialSettings&&NativeMaterialSettings.IsValid?1:0);
+            properties.SetFloat("_PlanetTerrainPalette",RenderMaterialSettings&&RenderMaterialSettings.IsValid?1:0);
             properties.SetInteger("_PlanetGeologicalNormalCount",0);
             properties.SetFloat("_LayerToMeters",1000);
             properties.SetMatrix("_FarViewProjection",projection*view);
@@ -324,8 +337,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 var key=geometry.Active[i];
                 var detailOrigin=PlanetSurfaceCache.Pivot(Definition,key);
                 properties.SetVector("_DetailOrigin",(Vector3)(float3)(detailOrigin-math.floor(detailOrigin/4096)*4096));
-                if(NativeMaterialSettings&&NativeMaterialSettings.IsValid)
-                {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,detailOrigin,PlanetRotation,Definition.Surface);properties.SetVector("_DetailOrigin",Vector4.zero);}
+                if(RenderMaterialSettings&&RenderMaterialSettings.IsValid)BindRenderMaterials(detailOrigin);
                 PlanetPreparedSurfaceBinding.Bind(properties,PreparedSurfaceBinding,detailOrigin,PlanetRotation);
                 var relative=PlanetField.RelativeScaled(Definition.Center,CameraPosition,PlanetField.Rotate(q,PlanetSurfaceCache.Pivot(Definition,key)));
                 properties.SetVector("_PatchOffset",new Vector4((float)relative.x,(float)relative.y,(float)relative.z,0));
@@ -348,8 +360,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 var frame=nearGeometry.Frame;
                 properties.SetMatrix("_DetailRotation",Matrix4x4.Rotate((Quaternion)new quaternion((float4)frame.Rotation)));
                 properties.SetVector("_DetailOrigin",(Vector3)(float3)(frame.Position-math.floor(frame.Position/4096)*4096));
-                if(NativeMaterialSettings&&NativeMaterialSettings.IsValid)
-                {PlanetTerrainMaterialBinding.Bind(properties,NativeMaterialSettings,frame.Position,PlanetRotation,Definition.Surface);properties.SetVector("_DetailOrigin",Vector4.zero);}
+                if(RenderMaterialSettings&&RenderMaterialSettings.IsValid)BindRenderMaterials(frame.Position);
                 PlanetPreparedSurfaceBinding.Bind(properties,PreparedSurfaceBinding,frame.Position,PlanetRotation);
                 var relative=(Definition.Center-CameraPosition)+PlanetField.Rotate(q,frame.Position);
                 var localRotation=PlanetRotation*(Quaternion)new quaternion((float4)frame.Rotation);

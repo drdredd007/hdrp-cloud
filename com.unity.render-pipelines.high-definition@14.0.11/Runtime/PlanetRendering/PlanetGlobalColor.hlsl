@@ -13,15 +13,21 @@ float4 PlanetGlobalColorSample(float3 directionLocal)
     float2 dx=ddx(uv),dy=ddy(uv);dx.x-=round(dx.x);dy.x-=round(dy.x);
     return SAMPLE_TEXTURE2D_GRAD(_PlanetGlobalColorMap,sampler_PlanetGlobalColorMap,uv,dx,dy);
 }
-float3 PlanetApplyGlobalColorLocal(float3 albedo,float3 directionLocal)
+float3 PlanetApplyGlobalColorLocal(float3 albedo,float3 directionLocal,bool keepMaterialColour)
 {
     if(_PlanetGlobalColorBlend<=0)return albedo;
     float4 map=PlanetGlobalColorSample(directionLocal);
     float3 tint=albedo*map.rgb/max(_PlanetGlobalColorReference.rgb,.01);
     float3 local=lerp(albedo,tint,_PlanetGlobalColorControls.x);
-    float3 colored=lerp(local,map.rgb,_PlanetGlobalColorDistanceBlend);
+    // A continuous atlas already filters its material roles to the pixel footprint.
+    // Replacing them with the Foundation-only map erases resource paint in orbit.
+    float3 colored=keepMaterialColour?local:lerp(local,map.rgb,_PlanetGlobalColorDistanceBlend);
     float weight=_PlanetGlobalColorBlend*lerp(1,saturate(map.a),_PlanetGlobalColorControls.y);
     return lerp(albedo,saturate(colored),weight);
+}
+float3 PlanetApplyGlobalColorLocal(float3 albedo,float3 directionLocal)
+{
+    return PlanetApplyGlobalColorLocal(albedo,directionLocal,false);
 }
 float3 PlanetGlobalColorRelativeTint(float3 directionLocal)
 {
@@ -29,6 +35,10 @@ float3 PlanetGlobalColorRelativeTint(float3 directionLocal)
     float4 map=PlanetGlobalColorSample(directionLocal);
     float weight=_PlanetGlobalColorBlend*_PlanetGlobalColorControls.x*lerp(1,saturate(map.a),_PlanetGlobalColorControls.y);
     return lerp(1,map.rgb/max(_PlanetGlobalColorReference.rgb,.01),weight);
+}
+float3 PlanetApplyGlobalColorWorld(float3 albedo,float3 radialWorld,bool keepMaterialColour)
+{
+    return PlanetApplyGlobalColorLocal(albedo,mul((float3x3)_PlanetGlobalColorWorldToLocal,radialWorld),keepMaterialColour);
 }
 float3 PlanetApplyGlobalColorWorld(float3 albedo,float3 radialWorld)
 {

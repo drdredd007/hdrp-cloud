@@ -7,6 +7,12 @@
 TEXTURE2D(_PlanetLayerAlbedo0);TEXTURE2D(_PlanetLayerAlbedo1);TEXTURE2D(_PlanetLayerAlbedo2);TEXTURE2D(_PlanetLayerAlbedo3);
 TEXTURE2D(_PlanetLayerNormal0);TEXTURE2D(_PlanetLayerNormal1);TEXTURE2D(_PlanetLayerNormal2);TEXTURE2D(_PlanetLayerNormal3);
 TEXTURE2D(_PlanetLayerMask0);TEXTURE2D(_PlanetLayerMask1);TEXTURE2D(_PlanetLayerMask2);TEXTURE2D(_PlanetLayerMask3);
+TEXTURE2D(_PlanetLayerHeight0);TEXTURE2D(_PlanetLayerHeight1);TEXTURE2D(_PlanetLayerHeight2);TEXTURE2D(_PlanetLayerHeight3);
+float4 _PlanetLayerPhaseU0,_PlanetLayerPhaseU1,_PlanetLayerPhaseU2,_PlanetLayerPhaseU3;
+float4 _PlanetLayerPhaseV0,_PlanetLayerPhaseV1,_PlanetLayerPhaseV2,_PlanetLayerPhaseV3;
+float4 _PlanetLayerUv0,_PlanetLayerUv1,_PlanetLayerUv2,_PlanetLayerUv3;
+float4 _PlanetLayerRemap0,_PlanetLayerRemap1,_PlanetLayerRemap2,_PlanetLayerRemap3;
+float4 _PlanetLayerAoHeight0,_PlanetLayerAoHeight1,_PlanetLayerAoHeight2,_PlanetLayerAoHeight3;
 SAMPLER(sampler_LinearRepeat);
 float4 _PlanetLayerTint0,_PlanetLayerTint1,_PlanetLayerTint2,_PlanetLayerTint3;
 float4 _PlanetTexturePhase0,_PlanetTexturePhase1,_PlanetTexturePhase2,_PlanetTexturePhase3;
@@ -39,12 +45,12 @@ float3 PlanetTerrainVariation(float3 offset)
     float footprint=max(length(ddx(coordinate)),length(ddy(coordinate)));
     return (value*2-1)*saturate(1-footprint*2);
 }
-float4 PlanetTriplanarSample(Texture2D textureValue,float3 uv,float3 axisWeight,float3 dx,float3 dy)
+float4 PlanetTriplanarSample(Texture2D textureValue,float3 uv,float3 axisWeight,float3 dx,float3 dy,float4 st,float3 pu,float3 pv)
 {
     // Planet-local metric coordinates retain derivatives across floating-origin changes.
-    return SAMPLE_TEXTURE2D_GRAD(textureValue,sampler_LinearRepeat,uv.zy,dx.zy,dy.zy)*axisWeight.x+
-        SAMPLE_TEXTURE2D_GRAD(textureValue,sampler_LinearRepeat,uv.xz,dx.xz,dy.xz)*axisWeight.y+
-        SAMPLE_TEXTURE2D_GRAD(textureValue,sampler_LinearRepeat,uv.xy,dx.xy,dy.xy)*axisWeight.z;
+    return SAMPLE_TEXTURE2D_GRAD(textureValue,sampler_LinearRepeat,uv.zy*st.xy+st.zw+float2(pu.z,pv.y),dx.zy*st.xy,dy.zy*st.xy)*axisWeight.x+
+        SAMPLE_TEXTURE2D_GRAD(textureValue,sampler_LinearRepeat,uv.xz*st.xy+st.zw+float2(pu.x,pv.z),dx.xz*st.xy,dy.xz*st.xy)*axisWeight.y+
+        SAMPLE_TEXTURE2D_GRAD(textureValue,sampler_LinearRepeat,uv.xy*st.xy+st.zw+float2(pu.x,pv.y),dx.xy*st.xy,dy.xy*st.xy)*axisWeight.z;
 }
 float3 PlanetNormalSlope(float4 packed)
 {
@@ -52,24 +58,25 @@ float3 PlanetNormalSlope(float4 packed)
     packed.r*=packed.a;float2 xy=packed.rg*2-1;float z=sqrt(max(1-dot(xy,xy),1e-4));
     return float3(-xy/z,0);
 }
-PlanetTerrainLayerSample PlanetTerrainReadLayer(Texture2D albedoMap,Texture2D normalMap,Texture2D maskMap,
+PlanetTerrainLayerSample PlanetTerrainReadLayer(Texture2D albedoMap,Texture2D normalMap,Texture2D maskMap,Texture2D heightMap,float4 st,float3 pu,float3 pv,float4 remap,float4 aoHeight,
     float4 tint,float4 phase,float4 control,float4 pbr,float varianceScale,float3 offset,float3 axisWeight,float normalStrength,float3 warp)
 {
     PlanetTerrainLayerSample result=(PlanetTerrainLayerSample)0;
-    float3 uv=offset*phase.w+phase.xyz+warp,dx=ddx(offset)*phase.w+ddx(warp),dy=ddy(offset)*phase.w+ddy(warp);
-    result.albedo=PlanetTriplanarSample(albedoMap,uv,axisWeight,dx,dy).rgb*tint.rgb;
-    float4 mask=PlanetTriplanarSample(maskMap,uv,axisWeight,dx,dy);
-    result.metallic=lerp(pbr.x,mask.r,control.w);result.ao=lerp(pbr.y,mask.g,control.w);
-    result.smoothness=lerp(pbr.z,mask.a,control.w);result.height=mask.b*control.y+control.z;
+    float3 uv=offset*phase.w+warp,dx=ddx(offset)*phase.w+ddx(warp),dy=ddy(offset)*phase.w+ddy(warp);
+    result.albedo=PlanetTriplanarSample(albedoMap,uv,axisWeight,dx,dy,st,pu,pv).rgb*tint.rgb;
+    float4 mask=PlanetTriplanarSample(maskMap,uv,axisWeight,dx,dy,st,pu,pv);
+    result.metallic=lerp(pbr.x,lerp(remap.x,remap.y,mask.r),control.w);result.ao=lerp(pbr.y,lerp(aoHeight.x,aoHeight.y,mask.g),control.w);
+    result.smoothness=lerp(pbr.z,lerp(remap.z,remap.w,mask.a),control.w);float height=mask.b;if(aoHeight.z>0)height=PlanetTriplanarSample(heightMap,uv,axisWeight,dx,dy,st,pu,pv).r;result.height=height*control.y+control.z;
     if(pbr.w>0&&normalStrength>0)
     {
-        float4 nx=SAMPLE_TEXTURE2D_GRAD(normalMap,sampler_LinearRepeat,uv.zy,dx.zy,dy.zy);
-        float4 ny=SAMPLE_TEXTURE2D_GRAD(normalMap,sampler_LinearRepeat,uv.xz,dx.xz,dy.xz);
-        float4 nz=SAMPLE_TEXTURE2D_GRAD(normalMap,sampler_LinearRepeat,uv.xy,dx.xy,dy.xy);
+        float4 nx=SAMPLE_TEXTURE2D_GRAD(normalMap,sampler_LinearRepeat,uv.zy*st.xy+st.zw+float2(pu.z,pv.y),dx.zy*st.xy,dy.zy*st.xy);
+        float4 ny=SAMPLE_TEXTURE2D_GRAD(normalMap,sampler_LinearRepeat,uv.xz*st.xy+st.zw+float2(pu.x,pv.z),dx.xz*st.xy,dy.xz*st.xy);
+        float4 nz=SAMPLE_TEXTURE2D_GRAD(normalMap,sampler_LinearRepeat,uv.xy*st.xy+st.zw+float2(pu.x,pv.y),dx.xy*st.xy,dy.xy*st.xy);
         bool moments=pbr.w>1.5;
         float3 sx=moments?float3(nx.rg,0):PlanetNormalSlope(nx);
         float3 sy=moments?float3(ny.rg,0):PlanetNormalSlope(ny);
         float3 sz=moments?float3(nz.rg,0):PlanetNormalSlope(nz);
+        sx.xy*=sign(st.xy);sy.xy*=sign(st.xy);sz.xy*=sign(st.xy);
         result.gradient=(float3(0,sx.y,sx.x)*axisWeight.x+float3(sy.x,0,sy.y)*axisWeight.y+
             float3(sz.x,sz.y,0)*axisWeight.z)*(control.x*normalStrength);
         if(moments && varianceScale>0)
@@ -95,7 +102,7 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluateFromGeological(float3 offset,fl
     // Do not evaluate the discarded paint noises for every visible pixel.
     bool replacesPaint=false;
 #if defined(SPACERUNNER_PREPARED_GRAPHICS_ACTIVE) && !defined(PP_REFERENCE_SHADING)
-    replacesPaint=_PlanetMaterialMaskEnabled>=.5 && _PreparedPlanetEnabled>=.5;
+    replacesPaint=_PlanetMaterialMaskEnabled>=.5 && _PreparedPlanetEnabled>=.5 && !PlanetMaskKeepsGlobalPaint();
 #endif
     if(_PlanetPaintEnabled>0 && !replacesPaint) {
         uint seed=(uint)_PlanetPaintSeed.x|((uint)_PlanetPaintSeed.y<<16);
@@ -110,16 +117,16 @@ PlanetTerrainMaterialSample PlanetTerrainEvaluateFromGeological(float3 offset,fl
     float3 axisWeight=pow(abs(normalPlanet),_PlanetMaterialControls.y);
     axisWeight/=max(dot(axisWeight,1),1e-6);
     masks=PlanetMaterialMaskApply(offset,masks);masks=max(masks,0);float sum=dot(masks,1);masks=sum>1e-6?masks/sum:float4(0,0,1,0);
-    PlanetTerrainLayerSample a=PlanetTerrainReadLayer(_PlanetLayerAlbedo0,_PlanetLayerNormal0,_PlanetLayerMask0,_PlanetLayerTint0,_PlanetTexturePhase0,_PlanetLayerControl0,_PlanetLayerPbr0,_PlanetNormalVarianceControls.x,offset,axisWeight,normalStrength,warp);
-    PlanetTerrainLayerSample b=PlanetTerrainReadLayer(_PlanetLayerAlbedo1,_PlanetLayerNormal1,_PlanetLayerMask1,_PlanetLayerTint1,_PlanetTexturePhase1,_PlanetLayerControl1,_PlanetLayerPbr1,_PlanetNormalVarianceControls.y,offset,axisWeight,normalStrength,warp);
-    PlanetTerrainLayerSample c=PlanetTerrainReadLayer(_PlanetLayerAlbedo2,_PlanetLayerNormal2,_PlanetLayerMask2,_PlanetLayerTint2,_PlanetTexturePhase2,_PlanetLayerControl2,_PlanetLayerPbr2,_PlanetNormalVarianceControls.z,offset,axisWeight,normalStrength,warp);
-    PlanetTerrainLayerSample d=PlanetTerrainReadLayer(_PlanetLayerAlbedo3,_PlanetLayerNormal3,_PlanetLayerMask3,_PlanetLayerTint3,_PlanetTexturePhase3,_PlanetLayerControl3,_PlanetLayerPbr3,_PlanetNormalVarianceControls.w,offset,axisWeight,normalStrength,warp);
+    PlanetTerrainLayerSample a=PlanetTerrainReadLayer(_PlanetLayerAlbedo0,_PlanetLayerNormal0,_PlanetLayerMask0,_PlanetLayerHeight0,_PlanetLayerUv0,_PlanetLayerPhaseU0.xyz,_PlanetLayerPhaseV0.xyz,_PlanetLayerRemap0,_PlanetLayerAoHeight0,_PlanetLayerTint0,_PlanetTexturePhase0,_PlanetLayerControl0,_PlanetLayerPbr0,_PlanetNormalVarianceControls.x,offset,axisWeight,normalStrength,warp);
+    PlanetTerrainLayerSample b=PlanetTerrainReadLayer(_PlanetLayerAlbedo1,_PlanetLayerNormal1,_PlanetLayerMask1,_PlanetLayerHeight1,_PlanetLayerUv1,_PlanetLayerPhaseU1.xyz,_PlanetLayerPhaseV1.xyz,_PlanetLayerRemap1,_PlanetLayerAoHeight1,_PlanetLayerTint1,_PlanetTexturePhase1,_PlanetLayerControl1,_PlanetLayerPbr1,_PlanetNormalVarianceControls.y,offset,axisWeight,normalStrength,warp);
+    PlanetTerrainLayerSample c=PlanetTerrainReadLayer(_PlanetLayerAlbedo2,_PlanetLayerNormal2,_PlanetLayerMask2,_PlanetLayerHeight2,_PlanetLayerUv2,_PlanetLayerPhaseU2.xyz,_PlanetLayerPhaseV2.xyz,_PlanetLayerRemap2,_PlanetLayerAoHeight2,_PlanetLayerTint2,_PlanetTexturePhase2,_PlanetLayerControl2,_PlanetLayerPbr2,_PlanetNormalVarianceControls.z,offset,axisWeight,normalStrength,warp);
+    PlanetTerrainLayerSample d=PlanetTerrainReadLayer(_PlanetLayerAlbedo3,_PlanetLayerNormal3,_PlanetLayerMask3,_PlanetLayerHeight3,_PlanetLayerUv3,_PlanetLayerPhaseU3.xyz,_PlanetLayerPhaseV3.xyz,_PlanetLayerRemap3,_PlanetLayerAoHeight3,_PlanetLayerTint3,_PlanetTexturePhase3,_PlanetLayerControl3,_PlanetLayerPbr3,_PlanetNormalVarianceControls.w,offset,axisWeight,normalStrength,warp);
     float4 heights=float4(a.height,b.height,c.height,d.height);
     float highest=max(max(masks.x>0?heights.x:-1e20,masks.y>0?heights.y:-1e20),max(masks.z>0?heights.z:-1e20,masks.w>0?heights.w:-1e20));
     float4 weights=masks*saturate((heights-highest+_PlanetMaterialControls.x)/max(_PlanetMaterialControls.x,1e-6));
     weights/=max(dot(weights,1),1e-6);
     result.albedo=(a.albedo*weights.x+b.albedo*weights.y+c.albedo*weights.z+d.albedo*weights.w)*(1+variation.z*_PlanetVariationControls.y);
-    if(_PlanetPaintEnabled>0 && _PlanetMaterialMaskEnabled<.5)result.albedo*=PlanetPaintModulation(weights,paintNoise,paintGrain);
+    if(_PlanetPaintEnabled>0 && PlanetMaskKeepsGlobalPaint())result.albedo*=PlanetPaintModulation(weights,paintNoise,paintGrain);
     result.metallic=dot(weights,float4(a.metallic,b.metallic,c.metallic,d.metallic));
     result.ao=dot(weights,float4(a.ao,b.ao,c.ao,d.ao));
     result.smoothness=dot(weights,float4(a.smoothness,b.smoothness,c.smoothness,d.smoothness));

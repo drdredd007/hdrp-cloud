@@ -8,6 +8,7 @@ struct PlanetVertex { float3 position; float3 normal; float4 color; };
 RWStructuredBuffer<PlanetVertex> _PlanetVertices;
 uint _PlanetBaseVertex,_PlanetVertexCount;
 int _PlanetResolution,_PeriodicWidth,_PeriodicHeight;
+int _PeriodicMacroSide,_PeriodicPlainsSide;
 float4 _PeriodicParameters;
 float _PeriodicNormalStepMetres;
 uint4 _PeriodicRadius,_PeriodicRightXY,_PeriodicRightZ,_PeriodicUpXY,_PeriodicUpZ,_PeriodicForwardXY,_PeriodicForwardZ,_PeriodicFrameRadiusAndHeight;
@@ -32,11 +33,37 @@ float SamplePeriodic(double u,double v)
     float bottom=lerp(_PeriodicHeights[y1*_PeriodicWidth+x0],_PeriodicHeights[y1*_PeriodicWidth+x1],tx);
     return lerp(top,bottom,ty)*_PeriodicParameters.y;
 }
+float SamplePlain(double u,double v)
+{
+    int n=_PeriodicPlainsSide;double px=(u-FloorD(u))*n-.5L,py=((1.0L-v)-FloorD(1.0L-v))*n-.5L;
+    int x=(int)FloorD(px),y=(int)FloorD(py);float tx=(float)(px-x),ty=(float)(py-y);
+    int x0=Wrap(x,n),x1=Wrap(x+1,n),y0=Wrap(y,n),y1=Wrap(y+1,n),offset=_PeriodicWidth*_PeriodicHeight;
+    return lerp(lerp(_PeriodicHeights[offset+y0*n+x0],_PeriodicHeights[offset+y0*n+x1],tx),lerp(_PeriodicHeights[offset+y1*n+x0],_PeriodicHeights[offset+y1*n+x1],tx),ty);
+}
+float2 MacroValue(int i){int at=_PeriodicWidth*_PeriodicHeight+_PeriodicPlainsSide*_PeriodicPlainsSide+i*2;return float2(_PeriodicHeights[at],_PeriodicHeights[at+1]);}
+float2 Geography(double3 d)
+{
+    double3 a=abs(d);int face;double u,v;
+    if(a.x>=a.y&&a.x>=a.z){face=d.x>=0?0:1;u=(d.x>=0?-d.z:d.z)/a.x;v=d.y/a.x;}
+    else if(a.y>=a.z){face=d.y>=0?2:3;u=d.x/a.y;v=(d.y>=0?-d.z:d.z)/a.y;}
+    else{face=d.z>=0?4:5;u=(d.z>=0?d.x:-d.x)/a.z;v=d.y/a.z;}
+    int n=_PeriodicMacroSide;double px=clamp((u*.5L+.5L)*(n-1),0.0L,(double)(n-1)),py=clamp((v*.5L+.5L)*(n-1),0.0L,(double)(n-1));
+    int x=min((int)px,n-2),y=min((int)py,n-2),at=face*n*n+y*n+x;
+    return lerp(lerp(MacroValue(at),MacroValue(at+1),(float)(px-x)),lerp(MacroValue(at+n),MacroValue(at+n+1),(float)(px-x)),(float)(py-y));
+}
 double HeightPeriodic(double3 direction)
 {
     double3 p=direction*(D(_PeriodicRadius.xy)/(double)_PeriodicParameters.x);
     double3 w=direction*direction;w*=w;w*=w;w*=w;w/=w.x+w.y+w.z;
-    return w.x*(double)SamplePeriodic(p.z,p.y)+w.y*(double)SamplePeriodic(p.x,p.z)+w.z*(double)SamplePeriodic(p.x,p.y);
+    double h=w.x*(double)SamplePeriodic(p.z,p.y)+w.y*(double)SamplePeriodic(p.x,p.z)+w.z*(double)SamplePeriodic(p.x,p.y);
+    if(_PeriodicParameters.w>0){p=p*(double)_PeriodicParameters.z+double3(.173L,.391L,.719L);
+        h+=(double)_PeriodicParameters.w*(w.x*(double)SamplePeriodic(p.z,p.y)+w.y*(double)SamplePeriodic(p.x,p.z)+w.z*(double)SamplePeriodic(p.x,p.y));}
+    if(_PeriodicMacroSide>0){
+        p=direction*(D(_PeriodicRadius.xy)/(double)_PeriodicParameters.x);
+        double plain=w.x*(double)SamplePlain(p.z,p.y)+w.y*(double)SamplePlain(p.x,p.z)+w.z*(double)SamplePlain(p.x,p.y);
+        float2 macro=Geography(direction);h=(double)macro.x+plain+(h-plain)*(double)macro.y;
+    }
+    return h;
 }
 double3 Unit(double3 v){return v/SqrtD(DotD(v,v));}
 double3 NormalPeriodic(double3 direction)
@@ -44,7 +71,8 @@ double3 NormalPeriodic(double3 direction)
     double radius=D(_PeriodicRadius.xy);
     double3 hint=abs(direction.y)<0.9L?double3(0,1,0):double3(1,0,0);
     double3 tangent=Unit(CrossD(hint,direction)),bitangent=CrossD(direction,tangent);
-    double step=max((double)_PeriodicNormalStepMetres,(double)_PeriodicParameters.x/(double)_PeriodicWidth)/radius;
+    double texel=(double)_PeriodicParameters.x/(double)_PeriodicWidth/(_PeriodicParameters.w>0?(double)_PeriodicParameters.z:1.0L);
+    double step=max((double)_PeriodicNormalStepMetres,texel)/radius;
     double3 a0=Unit(direction-tangent*step),a1=Unit(direction+tangent*step);
     double3 b0=Unit(direction-bitangent*step),b1=Unit(direction+bitangent*step);
     double3 a=radius*(a1-a0)+a1*HeightPeriodic(a1)-a0*HeightPeriodic(a0);

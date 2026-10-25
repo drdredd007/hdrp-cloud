@@ -6,8 +6,37 @@ TEXTURE2D_ARRAY(_PeriodicDetailSlopes);SAMPLER(sampler_PeriodicDetailSlopes);
 float _PeriodicSurfaceEnabled;
 float4 _PeriodicSnowColor,_PeriodicRockColor,_PeriodicSnowMean,_PeriodicRockMean;
 float4 _PeriodicDetailControls,_PeriodicSmoothness;
+TEXTURE2D(_PeriodicLandformRoles);
+TEXTURE2D(_PeriodicPlainsRoles);
+float _PeriodicMaterialEnabled,_PeriodicMaterialView;
+float4 _PeriodicBackgroundLayers;
 float3 PeriodicSurfaceWeights(float3 d)
 {float3 w=d*d;w*=w;w*=w;w*=w;return w/(w.x+w.y+w.z);}
+float4 PeriodicMaterialLayers(float3 radialWorld,out float4 roles)
+{
+    float3 d=normalize(mul((float3x3)_PeriodicWorldToLocal,radialWorld));
+    float3 p=d*_PeriodicNormalCycles,w=PeriodicSurfaceWeights(d);
+    roles=w.x*SAMPLE_TEXTURE2D(_PeriodicLandformRoles,sampler_PeriodicNormalSlopes,p.zy)+
+        w.y*SAMPLE_TEXTURE2D(_PeriodicLandformRoles,sampler_PeriodicNormalSlopes,p.xz)+
+        w.z*SAMPLE_TEXTURE2D(_PeriodicLandformRoles,sampler_PeriodicNormalSlopes,p.xy);
+    if(_PeriodicMacroSide>0){
+        float4 plains=w.x*SAMPLE_TEXTURE2D(_PeriodicPlainsRoles,sampler_PeriodicNormalSlopes,p.zy)+
+            w.y*SAMPLE_TEXTURE2D(_PeriodicPlainsRoles,sampler_PeriodicNormalSlopes,p.xz)+
+            w.z*SAMPLE_TEXTURE2D(_PeriodicPlainsRoles,sampler_PeriodicNormalSlopes,p.xy);
+        float3 a=abs(d);float2 uv;int face;
+        if(a.x>=a.y&&a.x>=a.z){face=d.x>=0?0:1;uv=float2(d.x>=0?-d.z:d.z,d.y)/a.x;}
+        else if(a.y>=a.z){face=d.y>=0?2:3;uv=float2(d.x,d.y>=0?-d.z:d.z)/a.y;}
+        else{face=d.z>=0?4:5;uv=float2(d.z>=0?d.x:-d.x,d.y)/a.z;}
+        uv=((uv*.5+.5)*(_PeriodicMacroSide-1)+.5)/_PeriodicMacroSide;
+        float weight=SAMPLE_TEXTURE2D_ARRAY_LOD(_PeriodicMacroNormals,sampler_PeriodicMacroNormals,uv,face,0).y;
+        roles=lerp(plains,roles,weight);
+    }
+    roles=max(roles,0);roles/=max(dot(roles,1),1e-8);
+    // Same physical role conversion as prepared placement masks. Alpha is exposed rock.
+    float4 bg=_PeriodicBackgroundLayers;
+    return roles.x*bg+roles.y*lerp(bg,float4(0,1,0,0),.35)+
+        roles.z*lerp(bg,float4(0,.45,.55,0),.65)+roles.w*float4(0,0,1,0);
+}
 float4 PeriodicDetailColor(float3 p,float3 w,float slice)
 {
     return w.x*SAMPLE_TEXTURE2D_ARRAY(_PeriodicDetailColor,sampler_PeriodicDetailColor,p.zy,slice)+

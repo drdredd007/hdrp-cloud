@@ -7,7 +7,22 @@ namespace UnityEngine.Rendering.HighDefinition
     [Serializable]
     public sealed class PlanetTerrainMaterialLayer
     {
-        public Texture2D Albedo,Normal,Mask;
+        public string Name;
+        public Material Source;
+        public Texture2D Albedo,Normal,Mask,HeightMap;
+        public Vector4 UvTransform=new Vector4(1,1,0,0);
+        public Vector4 MaskRemap=new Vector4(0,1,0,1);
+        public Vector2 AoRemap=new Vector2(0,1);
+        [NonSerialized] PlanetTerrainMaterialLayer resolved;
+        [NonSerialized] Material resolvedSource;
+        [NonSerialized] int resolvedCrc;
+        public PlanetTerrainMaterialLayer Resolve()
+        {
+            if(!Source)return this;
+            int crc=Source.ComputeCRC();
+            if(resolved!=null&&resolvedSource==Source&&resolvedCrc==crc)return resolved;
+            resolved=PlanetTerrainMaterialSource.Read(Source);resolvedSource=Source;resolvedCrc=crc;return resolved;
+        }
         [Tooltip("UnityNormal accepts existing RG/AG maps. MetricSlopeMoments requires linear RGBAHalf/Float: mean dh/dx, dh/dy (m/m), mean squared gradient, 1; mipmaps average moments without renormalizing.")]
         public PlanetTerrainNormalEncoding NormalEncoding;
         [Tooltip("Bounded isotropic slope-variance approximation for GGX roughness; zero disables filtering. Not an exact GGX convolution.")]
@@ -21,7 +36,8 @@ namespace UnityEngine.Rendering.HighDefinition
         [Range(0,1)] public float AmbientOcclusion=1;
         [Tooltip("Mask B is a shading blend height, never geometry or collision displacement.")]
         public float HeightAmplitudeMetres=.04f,HeightOffsetMetres;
-        public bool IsValid=>(NormalEncoding==PlanetTerrainNormalEncoding.UnityNormal ||
+        public bool IsValid=>Source?PlanetTerrainMaterialSource.Error(Source)==null:LegacyValid;
+        bool LegacyValid=>(NormalEncoding==PlanetTerrainNormalEncoding.UnityNormal ||
             (NormalEncoding==PlanetTerrainNormalEncoding.MetricSlopeMoments && Normal && !Normal.isDataSRGB &&
              (Normal.format==TextureFormat.RGBAHalf || Normal.format==TextureFormat.RGBAFloat)))&&
             math.isfinite(NormalVarianceScale)&&NormalVarianceScale>=0&&NormalVarianceScale<=1&&
@@ -67,6 +83,37 @@ namespace UnityEngine.Rendering.HighDefinition
     }
 
     /// <summary>CPU double phase reduction shared by native and scaled far materials.</summary>
+    /// <summary>Shared opaque PBR surface contract; this does not execute the source shader.</summary>
+    public static class PlanetTerrainMaterialSource
+    {
+        public static string Error(Material m)
+        {
+            if(!m||!m.shader)return "Assign a material.";
+            if(m.shader.name!="HDRP/Lit"&&m.shader.name!="SpaceRunner/Planet Terrain Lit")return "Supported layer shaders: HDRP/Lit and SpaceRunner/Planet Terrain Lit.";
+            if(m.GetFloat("_SurfaceType")!=0)return "Planet layers require an opaque material.";
+            if(m.GetFloat("_NormalMapSpace")!=0)return "Planet layers require tangent-space normals.";
+            if(m.GetFloat("_MaterialID")!=1)return "Planet layers currently support the Standard metallic material type.";
+            if(m.GetFloat("_AlphaCutoffEnable")!=0)return "Alpha clipping is not supported by a blended terrain layer.";
+            if(m.GetColor("_EmissiveColor").maxColorComponent>0)return "Emission is not supported by the terrain layer renderer.";
+            if(m.GetTexture("_DetailMap"))return "Detail Map is not supported yet; use the base normal and mask maps.";
+            return null;
+        }
+        public static PlanetTerrainMaterialLayer Read(Material m)
+        {
+            string error=Error(m);if(error!=null)throw new ArgumentException(m.name+": "+error);
+            var scale=m.GetTextureScale("_BaseColorMap");var offset=m.GetTextureOffset("_BaseColorMap");
+            var height=m.GetTexture("_HeightMap") as Texture2D;
+            return new PlanetTerrainMaterialLayer {
+                Albedo=m.GetTexture("_BaseColorMap") as Texture2D,Normal=m.GetTexture("_NormalMap") as Texture2D,Mask=m.GetTexture("_MaskMap") as Texture2D,HeightMap=height,
+                Tint=m.GetColor("_BaseColor"),NormalScale=m.GetFloat("_NormalScale"),Metallic=m.GetFloat("_Metallic"),Smoothness=m.GetFloat("_Smoothness"),
+                AmbientOcclusion=m.GetFloat("_AORemapMax"),MetresPerRepeat=1,UvTransform=new Vector4(scale.x,scale.y,offset.x,offset.y),
+                MaskRemap=new Vector4(m.GetFloat("_MetallicRemapMin"),m.GetFloat("_MetallicRemapMax"),m.GetFloat("_SmoothnessRemapMin"),m.GetFloat("_SmoothnessRemapMax")),
+                AoRemap=new Vector2(m.GetFloat("_AORemapMin"),m.GetFloat("_AORemapMax")),
+                HeightAmplitudeMetres=height?m.GetFloat("_HeightAmplitude"):0,HeightOffsetMetres=height?-m.GetFloat("_HeightCenter")*m.GetFloat("_HeightAmplitude"):0
+            };
+        }
+    }
+
     public static class PlanetTerrainMaterialBinding
     {
         public const string ShaderName="SpaceRunner/Planet Terrain Lit";
@@ -98,10 +145,18 @@ namespace UnityEngine.Rendering.HighDefinition
             if(!neutralMask)neutralMask=Solid("Planet neutral PBR mask",new Color(0,1,.5f,1));
             for(int i=0;i<4;i++)
             {
-                var layer=settings.Layer(i);var phase=TexturePhase(planetAnchor,layer.MetresPerRepeat);
+                var layer=settings.Layer(i).Resolve();var phase=TexturePhase(planetAnchor,layer.MetresPerRepeat);
+                var anchor=planetAnchor/layer.MetresPerRepeat;var st=layer.UvTransform;
+                var pu=anchor*st.x;pu-=math.floor(pu);var pv=anchor*st.y;pv-=math.floor(pv);
+                properties.SetVector("_PlanetLayerPhaseU"+i,new Vector4((float)pu.x,(float)pu.y,(float)pu.z,0));
+                properties.SetVector("_PlanetLayerPhaseV"+i,new Vector4((float)pv.x,(float)pv.y,(float)pv.z,0));
                 properties.SetTexture("_PlanetLayerAlbedo"+i,layer.Albedo?layer.Albedo:Texture2D.whiteTexture);
                 properties.SetTexture("_PlanetLayerNormal"+i,layer.Normal?layer.Normal:flatNormal);
                 properties.SetTexture("_PlanetLayerMask"+i,layer.Mask?layer.Mask:neutralMask);
+                properties.SetTexture("_PlanetLayerHeight"+i,layer.HeightMap?layer.HeightMap:Texture2D.blackTexture);
+                properties.SetVector("_PlanetLayerUv"+i,layer.UvTransform);
+                properties.SetVector("_PlanetLayerRemap"+i,layer.MaskRemap);
+                properties.SetVector("_PlanetLayerAoHeight"+i,new Vector4(layer.AoRemap.x,layer.AoRemap.y,layer.HeightMap?1:0,0));
                 // The shader consumes linear RGB; SetColor would convert this value a second time.
                 var tint=layer.Tint.linear;
                 properties.SetVector("_PlanetLayerTint"+i,new Vector4(tint.r,tint.g,tint.b,tint.a));
@@ -110,8 +165,8 @@ namespace UnityEngine.Rendering.HighDefinition
                 properties.SetVector("_PlanetLayerPbr"+i,new Vector4(layer.Metallic,layer.AmbientOcclusion,layer.Smoothness,
                     layer.Normal?(layer.NormalEncoding==PlanetTerrainNormalEncoding.MetricSlopeMoments?2:1):0));
             }
-            properties.SetVector("_PlanetNormalVarianceControls",new Vector4(settings.Grass.NormalVarianceScale,settings.Sand.NormalVarianceScale,
-                settings.Rock.NormalVarianceScale,settings.Snow.NormalVarianceScale));
+            properties.SetVector("_PlanetNormalVarianceControls",new Vector4(settings.Grass.Resolve().NormalVarianceScale,settings.Sand.Resolve().NormalVarianceScale,
+                settings.Rock.Resolve().NormalVarianceScale,settings.Snow.Resolve().NormalVarianceScale));
             properties.SetVector("_PlanetMaterialControls",new Vector4(settings.HeightBlendTransitionMetres,settings.TriplanarBlendSharpness,settings.FarNormalStrength,1));
             var variation=TexturePhase(planetAnchor,settings.VariationWavelengthMetres);var cell=VariationCell(planetAnchor,settings.VariationWavelengthMetres);
             properties.SetVector("_PlanetVariationPhase",new Vector4((float)variation.x,(float)variation.y,(float)variation.z,(float)(1/settings.VariationWavelengthMetres)));

@@ -36,11 +36,12 @@ namespace UnityEngine.Rendering.HighDefinition
             double miss=math.lengthsq(math.cross(origin,direction));
             if(!math.isfinite(miss) || miss>outer*outer)return false;
             double start=math.max(0,closest-math.sqrt(math.max(0,outer*outer-miss)));
-            double end=miss<definition.Radius*definition.Radius?closest-math.sqrt(definition.Radius*definition.Radius-miss):closest;
+            double inner=definition.Radius+(definition.GeneratorVersion==4?math.min(0,definition.PeriodicHeight.Value.MinimumMetres):0);
+            double end=miss<inner*inner?closest-math.sqrt(inner*inner-miss):closest;
             double Clearance(double t)
             {
                 var point=origin+direction*t;double radius=math.length(point);
-                return radius-definition.Radius-math.max(0,PlanetField.Height(definition,point/math.max(1e-20,radius)));
+                return radius-definition.Radius-PlanetField.RenderedHeight(definition,point/math.max(1e-20,radius));
             }
             if(Clearance(0)<0 || end<start)return false;
             double previous=start;

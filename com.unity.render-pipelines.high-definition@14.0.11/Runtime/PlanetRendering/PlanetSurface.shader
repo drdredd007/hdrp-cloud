@@ -31,7 +31,11 @@ Shader "SpaceRunner/Planet Far Surface"
             float4 _PlanetLightColor;
             float _PlanetLightLux, _LayerToMeters;
             TEXTURE2D(_PeriodicNormalSlopes);SAMPLER(sampler_PeriodicNormalSlopes);
+            TEXTURE2D(_PeriodicPlainsSlopes);SAMPLER(sampler_PeriodicPlainsSlopes);
+            TEXTURE2D_ARRAY(_PeriodicMacroNormals);SAMPLER(sampler_PeriodicMacroNormals);
+            float _PeriodicMacroSide;
             float _PeriodicNormalsEnabled,_PeriodicNormalCycles;
+            float4 _PeriodicCoverageDetail;
             float4x4 _PeriodicWorldToLocal,_PeriodicLocalToWorld;
             #include "PlanetPeriodicSurface.hlsl"
             #include "PlanetGlobalColor.hlsl"
@@ -42,6 +46,44 @@ Shader "SpaceRunner/Planet Far Surface"
             {
                 float3 d=normalize(mul((float3x3)_PeriodicWorldToLocal,radialWorld));
                 float3 p=d*_PeriodicNormalCycles,w=d*d;w*=w;w*=w;w*=w;w/=w.x+w.y+w.z;
+                if(_PeriodicCoverageDetail.y>0||_PeriodicMacroSide>0){
+                    // Prepared coverage atlas: metric slopes in RG, metric height in B.
+                    // Both scales use the same baked atlas; no placement-list traversal.
+                    float3 x=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.zy).rgb;
+                    float3 y=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.xz).rgb;
+                    float3 z=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.xy).rgb;
+                    float3 q=p*_PeriodicCoverageDetail.x+float3(.173,.391,.719);
+                    float3 dx=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,q.zy).rgb;
+                    float3 dy=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,q.xz).rgb;
+                    float3 dz=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,q.xy).rgb;
+                    float gain=_PeriodicCoverageDetail.x*_PeriodicCoverageDetail.y;
+                    x.xy+=dx.xy*gain;y.xy+=dy.xy*gain;z.xy+=dz.xy*gain;
+                    x.z+=dx.z*_PeriodicCoverageDetail.y;y.z+=dy.z*_PeriodicCoverageDetail.y;z.z+=dz.z*_PeriodicCoverageDetail.y;
+                    float h=dot(w,float3(x.z,y.z,z.z));
+                    float3 g=w.x*float3(0,x.y,x.x)+w.y*float3(y.x,0,y.y)+w.z*float3(z.x,z.y,0);
+                    // Derivative of normalized triplanar weights, including at projection transitions.
+                    float3 safe=sign(d)*max(abs(d),1e-6)+float3(d.x==0?1e-6:0,d.y==0?1e-6:0,d.z==0?1e-6:0);
+                    g+=16*w*(float3(x.z,y.z,z.z)-h)/(safe*_PeriodicCoverageDetail.z);
+                    if(_PeriodicMacroSide>0){
+                        float3 px=SAMPLE_TEXTURE2D(_PeriodicPlainsSlopes,sampler_PeriodicPlainsSlopes,p.zy).rgb;
+                        float3 py=SAMPLE_TEXTURE2D(_PeriodicPlainsSlopes,sampler_PeriodicPlainsSlopes,p.xz).rgb;
+                        float3 pz=SAMPLE_TEXTURE2D(_PeriodicPlainsSlopes,sampler_PeriodicPlainsSlopes,p.xy).rgb;
+                        float ph=dot(w,float3(px.z,py.z,pz.z));
+                        float3 pg=w.x*float3(0,px.y,px.x)+w.y*float3(py.x,0,py.y)+w.z*float3(pz.x,pz.y,0);
+                        pg+=16*w*(float3(px.z,py.z,pz.z)-ph)/(safe*_PeriodicCoverageDetail.z);
+                        float3 a=abs(d);float2 uv;int face;
+                        if(a.x>=a.y&&a.x>=a.z){face=d.x>=0?0:1;uv=float2(d.x>=0?-d.z:d.z,d.y)/a.x;}
+                        else if(a.y>=a.z){face=d.y>=0?2:3;uv=float2(d.x,d.y>=0?-d.z:d.z)/a.y;}
+                        else{face=d.z>=0?4:5;uv=float2(d.z>=0?d.x:-d.x,d.y)/a.z;}
+                        uv=((uv*.5+.5)*(_PeriodicMacroSide-1)+.5)/_PeriodicMacroSide;
+                        float4 m=SAMPLE_TEXTURE2D_ARRAY_LOD(_PeriodicMacroNormals,sampler_PeriodicMacroNormals,uv,face,0);
+                        float4 mg=SAMPLE_TEXTURE2D_ARRAY_LOD(_PeriodicMacroNormals,sampler_PeriodicMacroNormals,uv,face+6,0);
+                        g=lerp(pg,g,m.y)+(float3(m.zw,mg.x)+(h-ph)*mg.yzw)/_PeriodicCoverageDetail.z;
+                        h=m.x+lerp(ph,h,m.y);
+                    }
+                    g-=d*dot(g,d);g*=_PeriodicCoverageDetail.z/(_PeriodicCoverageDetail.z+h);
+                    return normalize(mul((float3x3)_PeriodicLocalToWorld,normalize(d-g)));
+                }
                 float2 sx=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.zy).rg;
                 float2 sy=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.xz).rg;
                 float2 sz=SAMPLE_TEXTURE2D(_PeriodicNormalSlopes,sampler_PeriodicNormalSlopes,p.xy).rg;
@@ -146,12 +188,21 @@ Shader "SpaceRunner/Planet Far Surface"
                 if(_PlanetTerrainPalette>0)
                 {
                     float3 normalPlanet=normalize(mul((float3x3)_PlanetRenderToLocal,normal));
-                    PlanetTerrainMaterialSample material=PlanetTerrainEvaluate(input.detail,normalPlanet,input.masks,_PlanetMaterialControls.z);
+                    float4 roles=0,masks=input.masks;
+                    if(_PeriodicMaterialEnabled>0)masks=PeriodicMaterialLayers(radialUp,roles);
+                    if(_PeriodicMaterialEnabled>0&&_PeriodicMaterialView>0){
+                        float4 weights=_PeriodicMaterialView<1.5?roles:masks;
+                        float3 debugColor=weights.x*float3(.12,.55,.2)+weights.y*float3(.7,.45,.1)+weights.z*float3(.35,.4,.48)+weights.w*float3(.85,.9,1);
+                        PlanetFragment debug;debug.color=float4(debugColor,length(input.relative)*_LayerToMeters);debug.solar=0;return debug;
+                    }
+                    PlanetTerrainMaterialSample material;
+                    if(_PeriodicMaterialEnabled>0)material=PlanetTerrainEvaluateFromGeological(input.detail,normalPlanet,0,masks,_PlanetMaterialControls.z);
+                    else material=PlanetTerrainEvaluate(input.detail,normalPlanet,input.masks,_PlanetMaterialControls.z);
                     albedo=material.albedo*material.ao;
                     metallic=material.metallic;smoothness=material.smoothness;
                     normal=normalize(mul((float3x3)_PlanetLocalToRender,material.normal));
                 }
-                if(_OrogenBaseColourEnabled>0 && _PlanetMaterialMaskEnabled<.5)
+                if(_OrogenBaseColourEnabled>0 && PlanetMaskKeepsGlobalPaint() && _PeriodicMaterialEnabled<.5)
                 {
                     albedo=OrogenBaseColour(mul((float3x3)_OrogenRenderToLocal,radialUp));metallic=0;smoothness=.4;
                     float variance;float3 geological=PlanetGeologicalNormal(input.detail,normalize(mul((float3x3)_OrogenRenderToLocal,input.normal)),variance);
@@ -159,12 +210,12 @@ Shader "SpaceRunner/Planet Far Surface"
                     smoothness=PlanetGeologicalSmoothness(smoothness,variance);
                 }
                 float regionalDetailLuminance=dot(albedo,float3(.2126,.7152,.0722));
-                if(_PlanetMaterialMaskEnabled<.5)albedo=PlanetApplyGlobalColorWorld(albedo,radialUp);
+                if(PlanetMaskKeepsGlobalPaint()&&_PeriodicMaterialEnabled<.5)albedo=PlanetApplyGlobalColorWorld(albedo,radialUp,PlanetCoverageKeepsMaterialColour());
                 float3 regionalTone=1;
                 if(_PlanetRegionalColorCount>0&&_PlanetRegionalColorControls.y>0&&_PlanetGlobalColorBlend>0)
                     regionalTone=PlanetGlobalColorRelativeTint(mul((float3x3)_PlanetGlobalColorWorldToLocal,radialUp));
-                if(_PlanetMaterialMaskEnabled<.5)albedo=PlanetRegionalColorApply(albedo,input.detail,regionalTone,regionalDetailLuminance);
-                if(_PlanetMaterialMaskEnabled<.5)albedo=PlanetPreparedColour(input.detail,albedo);
+                if(PlanetMaskKeepsGlobalPaint()&&_PeriodicMaterialEnabled<.5)albedo=PlanetRegionalColorApply(albedo,input.detail,regionalTone,regionalDetailLuminance);
+                if(_PlanetMaterialMaskEnabled<.5&&_PeriodicMaterialEnabled<.5)albedo=PlanetPreparedColour(input.detail,albedo);
                 if(PlanetPreparedColourIsUnlit()){PlanetFragment unlit;unlit.color=float4(albedo,length(input.relative)*_LayerToMeters);unlit.solar=0;return unlit;}
                 float3 brdf=albedo*INV_PI;
                 if(_PlanetTerrainPalette>0||_PeriodicSurfaceEnabled>0)brdf*=1-metallic;

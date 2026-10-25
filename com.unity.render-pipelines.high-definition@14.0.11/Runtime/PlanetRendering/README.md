@@ -1,5 +1,25 @@
 # Procedural planet rendering prototype
 
+## Integration update — 25 October 2026
+
+The SpaceRunner authoring adapter now supplies continuous resource coverage with
+regional height, normal and RGBA material banks. Coverage replaces resource
+placement only; the Foundation, climate, biome colour and ocean paths remain.
+Four named terrain layers accept Unity materials using HDRP/Lit or Planet Terrain
+Lit. RGBA channels select those layers directly; global biome/regional colour is
+still applied by the planet. Material extraction includes PBR remaps, height,
+normal encoding and texture transforms, with cached material revisions.
+
+The application contains the mask-order editor, atlas compiler and automatic
+library-mask generation. Technical evidence is archived in SpaceRunner under
+`Docs/Coordinates/Renders/MaterialWorkflow20261025` (52 checks) and
+`AutoMasks20261025` (67 checks). Those results are not a new FPS qualification.
+The reported first near-surface sector corruption remains unresolved and paused
+at the owner's request; the resource/material work does not close that defect.
+
+The following sections retain the renderer's earlier architecture notes and
+bounded qualification history; current defaults should be read from code.
+
 This optional HDRP assembly owns procedural cube-sphere geometry and far-layer rendering.
 It has no references to SpaceRunner, ECS physics or the application's coordinate graph.
 An application adapter supplies a PlanetDefinition, camera position in the same double

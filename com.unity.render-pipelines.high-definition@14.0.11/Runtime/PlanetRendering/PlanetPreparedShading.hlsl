@@ -93,6 +93,11 @@ PreparedPlanetShadingResult PreparedPlanetShadingSample(double3 direction,double
     double3 d=PPNormalize(direction);float3 radial=(float3)d;
     float horizontal=length(radial.xz);float3 east=horizontal>1e-15f?float3(-radial.z/horizontal,0,radial.x/horizontal):float3(0,0,1);
     float3 north=cross(east,radial);double exactHeight;double2 exactGradient;PSFoundation(d,exactHeight,exactGradient);float baseHeight=(float)exactHeight;float2 baseGradient=(float2)exactGradient;
+    // Coverage is shared by geometry and every appearance backend.
+    if(PCCoverage()) {
+        PreparedPlanetSurface coverage=PCSurface(d,exactHeight,exactGradient,worldFootprint);
+        result.radialHeight=(float)coverage.height;result.normal=coverage.normal;return result;
+    }
     float sum=0,product=1,weighted=0;float2 ds=0,dp=0,dnormal=0;
     double radius=_PreparedPlanetParameters[0].x;int cell=PPCell(d),begin=_PreparedPlanetOffsets[cell],end=_PreparedPlanetOffsets[cell+1];
     [loop]for(int i=begin;i<end;i++) {
