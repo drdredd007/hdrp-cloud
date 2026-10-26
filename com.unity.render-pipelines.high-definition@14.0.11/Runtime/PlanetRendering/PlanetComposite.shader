@@ -136,5 +136,28 @@ Shader "SpaceRunner/Planet Composite"
             }
             ENDHLSL
         }
+        // The final composite already replaces these pixels with native terrain.
+        // Seed the far layer's depth so its expensive surface shader is rejected
+        // before shading, without adding another resource to that shader.
+        Pass
+        {
+            ZWrite On ZTest Always Cull Off ColorMask 0
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma vertex Vert
+            #pragma fragment MaskFarDepth
+            #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/RenderPass/CustomPass/CustomPassCommon.hlsl"
+            TEXTURE2D_X(_PlanetNativeCoverage);
+            float MaskFarDepth(Varyings input):SV_Depth
+            {
+                clip(LOAD_TEXTURE2D_X(_PlanetNativeCoverage,uint2(input.positionCS.xy)).r>0?1:-1);
+                #if UNITY_REVERSED_Z
+                    return 1;
+                #else
+                    return 0;
+                #endif
+            }
+            ENDHLSL
+        }
     }
 }

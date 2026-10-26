@@ -33,4 +33,13 @@ namespace UnityEngine.Rendering.HighDefinition
     {
         bool CanReuseCompletedGeometry(IPlanetNativeMeshSource previous);
     }
+    /// <summary>Optional far geometry sampled from the same captured ready maps as native meshes.
+    /// The coarse physics parent is not an adequate height source for intermediate render LODs.</summary>
+    public interface IPlanetPreparedFarSource
+    {
+        string GeometryIdentity{get;}
+        void GenerateFar(CommandBuffer command,in PlanetDefinition definition,PlanetPatchKey key,int resolution,
+            int firstVertex,double footprint,double skirtDepth,GraphicsBuffer vertices,GraphicsBuffer parents,
+            GraphicsBuffer attributes,GraphicsBuffer parentAttributes);
+    }
 }

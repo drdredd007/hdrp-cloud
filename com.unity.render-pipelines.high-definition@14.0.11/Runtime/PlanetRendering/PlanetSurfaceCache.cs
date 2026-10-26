@@ -26,6 +26,7 @@ namespace UnityEngine.Rendering.HighDefinition
         bool initialized;
         int lastErrorVersion=-1;
         int lastFilterGeneration;
+        string lastPreparedIdentity;
         public PlanetLodDiagnostics LodDiagnostics { get; private set; }
         public PlanetSurfaceCache(IPlanetPatchBackend backend)
         {
@@ -54,21 +55,23 @@ namespace UnityEngine.Rendering.HighDefinition
             if(cmd==null || !definition.IsValid || !math.all(math.isfinite(camera)) || height<=0 || !math.isfinite(fov)||
                 view.HasValue&&!view.Value.IsValid)return;
             var settings=requested.Clamped;
+            var prepared=(backend as PlanetGpuPatchBackend)?.PreparedSource;
+            string preparedIdentity=prepared?.GeometryIdentity;
             bool discarded=backend.Reserve(RequiredSlots(settings));
             int filterGeneration=0;
-            if(backend is PlanetGpuPatchBackend gpu&&gpu.FilterRenderingDetail&&definition.GeneratorVersion==3)
+            if(prepared==null&&backend is PlanetGpuPatchBackend gpu&&gpu.FilterRenderingDetail&&definition.GeneratorVersion==3)
             {gpu.PrepareRegionalFiltering(definition);filterGeneration=gpu.FilteringGeneration;}
             if(discarded || !initialized || generated.Id!=definition.Id || generated.Seed!=definition.Seed || generated.Radius!=definition.Radius ||
-                generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface)||!PlanetPeriodicHeight.SameSource(generated,definition)||lastFilterGeneration!=filterGeneration)
-            {Restart(cmd,definition);lastFilterGeneration=filterGeneration;}
+                generated.Relief!=definition.Relief || generated.GeneratorVersion!=definition.GeneratorVersion || !generated.Surface.Equals(definition.Surface)||!PlanetPeriodicHeight.SameSource(generated,definition)||lastFilterGeneration!=filterGeneration||lastPreparedIdentity!=preparedIdentity)
+            {Restart(cmd,definition);lastFilterGeneration=filterGeneration;lastPreparedIdentity=preparedIdentity;}
             double altitude=math.length(camera)-definition.Radius;
             int errorVersion=definition.GeneratorVersion==3?PlanetSurfaceDataRegistry.LodPreparationVersion(definition.Surface):0;
             if(pending==null && (lastHeight!=height || math.distance(lastCamera,camera)>math.max(10,altitude*.02) ||
                 math.abs(lastFov-fov)>.1f || !SameView(lastView,view)||!lastSettings.Equals(settings)||lastErrorVersion!=errorVersion))
             {
                 PlanetLodDiagnostics diagnostics;
-                var selected=view.HasValue?PlanetLodSelector.Select(definition,camera,height,view.Value,settings,out diagnostics,active):
-                    PlanetLodSelector.Select(definition,camera,height,fov,settings,out diagnostics,active);
+                var selected=view.HasValue?PlanetLodSelector.Select(definition,camera,height,view.Value,settings,out diagnostics,active,prepared==null):
+                    PlanetLodSelector.Select(definition,camera,height,fov,settings,out diagnostics,active,prepared==null);
                 LodDiagnostics=diagnostics;lastErrorVersion=errorVersion;
                 lastCamera=camera;lastHeight=height;lastFov=fov;lastView=view;lastSettings=settings;
                 // Completed subtrees may publish while other error measurements warm, provided every
@@ -81,7 +84,10 @@ namespace UnityEngine.Rendering.HighDefinition
             }
             if(pending==null)return;
             int created=0;
-            while(pendingIndex<pending.Count && created<settings.PatchesPerFrame)
+            // Prepared-map queries are substantially more work than interpolating
+            // the coarse parent; keep replacement preparation bounded per update.
+            int generationBudget=prepared==null?settings.PatchesPerFrame:math.min(settings.PatchesPerFrame,8);
+            while(pendingIndex<pending.Count && created<generationBudget)
             {
                 var key=pending[pendingIndex++];
                 if(!slots.ContainsKey(key)){Generate(cmd,definition,key);created++;}

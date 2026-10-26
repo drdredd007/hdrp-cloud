@@ -76,6 +76,7 @@ namespace UnityEngine.Rendering.HighDefinition
         public GraphicsBuffer Attributes=>attributes;
         public GraphicsBuffer ParentVertices=>parentVertices;
         public GraphicsBuffer ParentAttributes=>parentAttributes;
+        public IPlanetPreparedFarSource PreparedSource{get;set;}
         public ComputeShader ActiveGenerator=>generator;
         // Per-backend allocations only; immutable SurfaceGpuData is shared and accounted once per retained descriptor.
         public long EstimatedGeometryBytes=>checked(BufferBytes(vertices)+BufferBytes(indices)+BufferBytes(attributes)+BufferBytes(parentVertices)+BufferBytes(parentAttributes));
@@ -128,6 +129,17 @@ namespace UnityEngine.Rendering.HighDefinition
 
         public void GenerateFar(CommandBuffer cmd,int slot,in PlanetDefinition definition,PlanetPatchKey key)
         {
+            if(PreparedSource!=null&&definition.GeneratorVersion==3)
+            {
+                // Separate compute binding: do not combine prepared-map SRVs with the
+                // legacy canonical field, which would exceed D3D11 resource limits.
+                if(attributes==null)attributes=new GraphicsBuffer(GraphicsBuffer.Target.Structured,capacity*SlotVertexCount,PlanetSurfaceVertexAttributes.Stride){name="Prepared far attributes"};
+                if(parentVertices==null)parentVertices=new GraphicsBuffer(GraphicsBuffer.Target.Structured,capacity*SlotVertexCount,PlanetVertex.Stride){name="Prepared far parent-band vertices"};
+                if(parentAttributes==null)parentAttributes=new GraphicsBuffer(GraphicsBuffer.Target.Structured,capacity*SlotVertexCount,PlanetSurfaceVertexAttributes.Stride){name="Prepared far parent-band attributes"};
+                PreparedSource.GenerateFar(cmd,definition,key,Resolution,slot*SlotVertexCount,RenderFootprint(definition,key),
+                    PlanetLodSelector.RenderedSkirtDepthMetres(definition,key,Resolution),vertices,parentVertices,attributes,parentAttributes);
+                return;
+            }
             var shader=Prepare(cmd,definition,slot,PlanetPatchLayout.Far,out int kernel);
             if(definition.GeneratorVersion==4)cmd.SetComputeFloatParam(shader,"_PeriodicNormalStepMetres",(float)(2*definition.Radius/((1<<key.Level)*(double)Resolution)));
             double skirt=PlanetLodSelector.RenderedSkirtDepthMetres(definition,key,Resolution);
@@ -305,6 +317,7 @@ namespace UnityEngine.Rendering.HighDefinition
         }
         public void Dispose()
         {
+            PreparedSource=null;
             periodicHeights?.Dispose();periodicHeights=null;
             PlanetSurfaceGpuData.Release(surfaceData);surfaceData=null;
             vertices?.Dispose();indices?.Dispose();attributes?.Dispose();parentVertices?.Dispose();parentAttributes?.Dispose();vertices=null;indices=null;attributes=null;parentVertices=null;parentAttributes=null;capacity=0;free.Clear();used.Clear();

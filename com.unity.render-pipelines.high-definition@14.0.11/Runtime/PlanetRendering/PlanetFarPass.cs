@@ -241,6 +241,7 @@ namespace UnityEngine.Rendering.HighDefinition
             bool filteredSurface=Definition.GeneratorVersion==3;
             if(farPatches.FilterRenderingDetail!=filteredSurface)
             {geometry.Dispose();farPatches.FilterRenderingDetail=filteredSurface;}
+            farPatches.PreparedSource=NativeMeshSource as IPlanetPreparedFarSource;
             var nearTarget=LocalSurfaceTarget ?? CameraPosition;
             double lodMargin=0;
             if(EnableLocalSurface&&math.length(nearTarget-Definition.Center)-Definition.Radius<20000)
@@ -318,6 +319,7 @@ namespace UnityEngine.Rendering.HighDefinition
             terrainShadows.SetLayerTarget(ctx.cmd,farBuffer,false);ctx.cmd.SetViewport(new Rect(0,0,width,height));
             // Unity-convention depth (clear 1, ZTest LEqual): Unity reverses both for reversed-Z platforms itself.
                 ctx.cmd.ClearRenderTarget(true,true,Color.clear,1);
+            if(nativeCoverage)CoreUtils.DrawFullScreen(ctx.cmd,composite,shaderPassId:2);
             properties.SetBuffer("_PlanetVertices",farPatches.Vertices);
             properties.SetBuffer("_PlanetParentVertices",farPatches.ParentVertices??farPatches.Vertices);
             properties.SetInteger("_PlanetFilteredSurface",filteredSurface?1:0);

@@ -135,7 +135,7 @@ namespace UnityEngine.Rendering.HighDefinition
                 Closest=visible?math.max(1,DistanceLowerBound(definition,key,camera,minimum,maximum,reserve)):0};
         }
         static double Error(PlanetDefinition definition,PlanetPatchKey key,double3 camera,double pixelsPerRadian,
-            PlanetLodView? view,PlanetSurfaceLodContext context,out bool complete,out bool pending,out bool bounded,SelectionProjections projections=null)
+            PlanetLodView? view,PlanetSurfaceLodContext context,out bool complete,out bool pending,out bool bounded,SelectionProjections projections=null,bool useMeasuredSurface=true)
         {
             using var profile=ErrorMarker.Auto();
             complete=true;pending=false;bounded=true;
@@ -144,6 +144,16 @@ namespace UnityEngine.Rendering.HighDefinition
                 var projection=projections==null?SignedGlobalProjection(definition,key,camera,view):projections.Global(key);
                 if(!projection.Visible)return 0;
                 double signedClosest=projection.Closest;
+                if(!useMeasuredSurface)
+                {
+                    // A coarse-parent certificate does not enclose geometry sampled
+                    // from detailed ready maps. Retain the full signed envelope until
+                    // this source has its own measured render-error certificates.
+                    complete=false;
+                    double inverseGrid=1.0/((1<<key.Level)*32.0);
+                    double reserve=RenderedPositionReserveMetres(definition,key,-definition.Relief,definition.Relief);
+                    return (2*definition.Relief+4*(definition.Radius+definition.Relief)*inverseGrid*inverseGrid+reserve)*pixelsPerRadian/signedClosest;
+                }
                 if(context==null){complete=false;bounded=false;return double.PositiveInfinity;}
                 var footprint=new SurfaceSamplingFootprint(2*(definition.Radius+definition.Relief)/((1<<key.Level)*32));
                 SurfaceLodError measured;
@@ -184,16 +194,16 @@ namespace UnityEngine.Rendering.HighDefinition
             PlanetLodSettings requested,IReadOnlyList<PlanetPatchKey> previous=null)
             =>Select(definition,camera,height,fieldOfView,requested,out _,previous);
         public static List<PlanetPatchKey> Select(PlanetDefinition definition,double3 camera,int height,float fieldOfView,
-            PlanetLodSettings requested,out PlanetLodDiagnostics diagnostics,IReadOnlyList<PlanetPatchKey> previous=null)
-            =>Select(definition,camera,height,fieldOfView,null,requested,out diagnostics,previous);
+            PlanetLodSettings requested,out PlanetLodDiagnostics diagnostics,IReadOnlyList<PlanetPatchKey> previous=null,bool useMeasuredSurface=true)
+            =>Select(definition,camera,height,fieldOfView,null,requested,out diagnostics,previous,useMeasuredSurface);
         public static List<PlanetPatchKey> Select(PlanetDefinition definition,double3 camera,int height,PlanetLodView view,
-            PlanetLodSettings requested,out PlanetLodDiagnostics diagnostics,IReadOnlyList<PlanetPatchKey> previous=null)
-            =>Select(definition,camera,height,view.FieldOfView,view,requested,out diagnostics,previous);
+            PlanetLodSettings requested,out PlanetLodDiagnostics diagnostics,IReadOnlyList<PlanetPatchKey> previous=null,bool useMeasuredSurface=true)
+            =>Select(definition,camera,height,view.FieldOfView,view,requested,out diagnostics,previous,useMeasuredSurface);
         public static List<PlanetPatchKey> Select(PlanetDefinition definition,double3 camera,int height,PlanetLodView view,
             PlanetLodSettings requested,IReadOnlyList<PlanetPatchKey> previous=null)
             =>Select(definition,camera,height,view,requested,out _,previous);
         static List<PlanetPatchKey> Select(PlanetDefinition definition,double3 camera,int height,float fieldOfView,PlanetLodView? view,
-            PlanetLodSettings requested,out PlanetLodDiagnostics diagnostics,IReadOnlyList<PlanetPatchKey> previous)
+            PlanetLodSettings requested,out PlanetLodDiagnostics diagnostics,IReadOnlyList<PlanetPatchKey> previous,bool useMeasuredSurface=true)
         {
             using var profile=SelectionMarker.Auto();
             var result=new List<PlanetPatchKey>();
@@ -201,7 +211,7 @@ namespace UnityEngine.Rendering.HighDefinition
             if(!definition.IsValid || !math.all(math.isfinite(camera)) || height<=0 || !math.isfinite(fieldOfView)||
                 view.HasValue&&!view.Value.IsValid)return result;
             PlanetSurfaceLodContext context=null;
-            diagnostics.UsesMeasuredTerrain=definition.GeneratorVersion==3;
+            diagnostics.UsesMeasuredTerrain=definition.GeneratorVersion==3&&useMeasuredSurface;
             if(diagnostics.UsesMeasuredTerrain)
                 diagnostics.SurfaceUnavailable=!PlanetSurfaceDataRegistry.TryAcquireLodContext(definition.Surface,out context);
             try
@@ -239,7 +249,7 @@ namespace UnityEngine.Rendering.HighDefinition
                     bool complete=true,pending=false,bounded=true;double measured;
                     if(periodicErrors==null||!periodicErrors.TryGetValue(key,out measured))
                     {
-                        measured=Error(definition,key,camera,pixelScale,view,context,out complete,out pending,out bounded,projections);
+                        measured=Error(definition,key,camera,pixelScale,view,context,out complete,out pending,out bounded,projections,useMeasuredSurface);
                         if(periodicErrors!=null)periodicErrors.Add(key,measured);
                     }
                     double error=measured/(settings.PixelError*(wasSplit?.7:1.2));
@@ -265,7 +275,7 @@ namespace UnityEngine.Rendering.HighDefinition
             diagnostics.MeasurementIncomplete=false;diagnostics.PreparationPending=false;
             foreach(var key in result)
             {
-                double error=Error(definition,key,camera,pixelScale,view,context,out bool complete,out bool pending,out bool bounded,projections);
+                double error=Error(definition,key,camera,pixelScale,view,context,out bool complete,out bool pending,out bool bounded,projections,useMeasuredSurface);
                 diagnostics.MeasurementIncomplete|=!complete;if(!complete&&bounded)diagnostics.ConservativeFallbackPatches++;diagnostics.MaximumPixelError=math.max(diagnostics.MaximumPixelError,error);
                 diagnostics.PreparationPending|=pending;
                 if(!complete)diagnostics.PixelErrorSatisfied=false;
